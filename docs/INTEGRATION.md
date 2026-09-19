@@ -16,7 +16,7 @@ extension-owned dialog, per exact origin (scheme://host:port).
 ## Install
 
 ```sh
-npm install arjunah
+npm install arjunah@alpha
 ```
 
 The package is the typed SDK: it finds the injected API, waits for it, and types

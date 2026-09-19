@@ -20,7 +20,7 @@ Step-by-step instructions, Firefox notes, and updating are in [docs/INSTALL.md](
 Lets websites use the subscriptions you are already signed in to, with no API key. Needs Node.js 22.22 or later on macOS, Linux, or Windows.
 
 ```sh
-npm install -g arjunah-desktop
+npm install -g arjunah-desktop@alpha
 arjunah-desktop install
 ```
 
@@ -29,7 +29,7 @@ arjunah-desktop install
 ## For website developers
 
 ```sh
-npm install arjunah
+npm install arjunah@alpha
 ```
 
 ```js

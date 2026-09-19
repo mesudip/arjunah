@@ -1,9 +1,11 @@
 name: Publish to npm
 
 # Manual: publishes the `arjunah` SDK and `arjunah-desktop` companion at the
-# version in their package.json files. Needs the NPM_TOKEN repository secret
-# (an npm automation token). Pre-release versions go to the `alpha` dist-tag by
-# default so `npm install arjunah` keeps resolving to the last stable release.
+# version in their package.json files. Authentication uses npm trusted
+# publishing (OIDC), configured for this workflow on both npm packages. No
+# long-lived npm token is stored in GitHub. Pre-release versions go to the
+# `alpha` dist-tag by default so `npm install arjunah` keeps resolving to the
+# last stable release.
 on:
   workflow_dispatch:
     inputs:
@@ -23,14 +25,25 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: npm
+          node-version: 24
           registry-url: https://registry.npmjs.org
+      - name: Use an npm CLI with trusted publishing support
+        run: npm install --global npm@^11.15.0
       - run: npm ci
       - run: npm run check
-      - run: npm publish --workspace arjunah --access public --provenance --tag "${{ inputs.dist_tag }}"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: npm publish --workspace arjunah-desktop --access public --provenance --tag "${{ inputs.dist_tag }}"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Ensure both versions are unpublished
+        run: |
+          sdk_version="$(node -p "require('./packages/sdk/package.json').version")"
+          desktop_version="$(node -p "require('./desktop/package.json').version")"
+          if npm view "arjunah@$sdk_version" version >/dev/null 2>&1; then
+            echo "arjunah@$sdk_version is already published" >&2
+            exit 1
+          fi
+          if npm view "arjunah-desktop@$desktop_version" version >/dev/null 2>&1; then
+            echo "arjunah-desktop@$desktop_version is already published" >&2
+            exit 1
+          fi
+      - name: Publish SDK through npm OIDC
+        run: npm publish --workspace arjunah --access public --tag "${{ inputs.dist_tag }}"
+      - name: Publish desktop companion through npm OIDC
+        run: npm publish --workspace arjunah-desktop --access public --tag "${{ inputs.dist_tag }}"

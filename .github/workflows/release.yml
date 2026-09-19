@@ -39,5 +39,5 @@ jobs:
           body: |
             **Chrome / Brave / Edge**: download the `.zip`, unzip it, open `chrome://extensions`, turn on Developer mode, choose **Load unpacked**, and pick the unzipped folder.
             **Firefox**: the `.xpi` is unsigned; load it from `about:debugging#/runtime/this-firefox` as a temporary add-on.
-            **Desktop app**: `npm install -g arjunah-desktop && arjunah-desktop install`.
+            **Desktop app**: `npm install -g arjunah-desktop@alpha && arjunah-desktop install`.
             Full instructions: docs/INSTALL.md.

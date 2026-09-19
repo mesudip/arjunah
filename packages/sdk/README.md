@@ -5,7 +5,7 @@ TypeScript SDK and types for **अर्जुनः** (Arjunah): let your websi
 The visitor installs the अर्जुनः browser extension. It injects `window.ai.arjunah` into every page. Your site never holds an API key: it publishes an assistant contract and lets the extension host the chat (level 0), or it calls `enable()` and gets completions from the model the visitor chose (level 1 or 2). The visitor approves every request in an extension-owned dialog, per exact origin.
 
 ```sh
-npm install arjunah
+npm install arjunah@alpha
 ```
 
 ```ts

@@ -5,7 +5,7 @@
 Requires Node.js 22.22 or later on macOS, Linux, or Windows.
 
 ```sh
-npm install -g arjunah-desktop
+npm install -g arjunah-desktop@alpha
 arjunah-desktop install
 ```
 

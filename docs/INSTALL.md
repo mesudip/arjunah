@@ -33,7 +33,7 @@ Then try it: open a site that supports अर्जुनः, or run the playgro
 Requires [Node.js](https://nodejs.org) 22.22 or later on macOS, Linux, or Windows.
 
 ```sh
-npm install -g arjunah-desktop
+npm install -g arjunah-desktop@alpha
 arjunah-desktop install
 ```
 
