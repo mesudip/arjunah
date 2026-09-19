@@ -17,7 +17,7 @@ const server = createServer(async (request, response) => {
   }
   if (request.url === "/v1/models") {
     response.writeHead(200, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ data: [{ id: "test-model" }] }));
+    response.end(JSON.stringify({ data: [{ id: "gpt-test-model" }] }));
     return;
   }
   if (request.url === "/v1/chat/completions") {
@@ -40,7 +40,13 @@ const server = createServer(async (request, response) => {
             {
               id: "call-1",
               type: "function",
-              function: { name: toolName, arguments: '{"value":"from-model"}' },
+              function: {
+                name: toolName,
+                arguments:
+                  toolName === "site__look_at_canvas"
+                    ? "{}"
+                    : '{"value":"from-model"}',
+              },
             },
           ],
         }
@@ -100,7 +106,7 @@ const server = createServer(async (request, response) => {
     response.end(
       JSON.stringify({
         id: `response-${modelRequests.length}`,
-        model: "test-model",
+        model: "gpt-test-model",
         choices: [
           { message, finish_reason: shouldCallTool ? "tool_calls" : "stop" },
         ],
@@ -197,7 +203,7 @@ try {
       ),
     {
       baseUrl: "https://api.openai.com/v1",
-      model: "test-model",
+      model: "gpt-test-model",
       apiKey: "e2e-secret",
     },
   );
@@ -216,7 +222,7 @@ try {
       namespaceWritable: Object.getOwnPropertyDescriptor(window, "ai").writable,
     })),
     {
-      version: "1.0.0",
+      version: "1.1.0",
       writable: false,
       configurable: false,
       namespaceWritable: false,
@@ -259,7 +265,7 @@ try {
     await page.evaluate(async () =>
       (await (await window.__session).models.list()).map((item) => item.id),
     ),
-    ["openai/test-model"],
+    ["openai/gpt-test-model"],
   );
   assert.equal(
     await page.evaluate(
@@ -394,6 +400,45 @@ try {
   );
   assert.equal(Object.hasOwn(secureTool.function, "userInputs"), false);
 
+  await page.evaluate(() => window.registerImageResult());
+  await page.evaluate(() => window.ai.arjunah.chat.open());
+  await page.keyboard.type("Look at the canvas image");
+  await page.keyboard.press("Enter");
+  await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => window.imageToolCalls === 1, {
+    timeout: 10000,
+  });
+  await waitFor(() => {
+    const messages = modelRequests.at(-1)?.payload.messages ?? [];
+    const toolIndex = messages.findIndex(
+      (item) => item.role === "tool" && item.content.includes('"width":1'),
+    );
+    return (
+      toolIndex >= 0 &&
+      messages[toolIndex + 1]?.role === "user" &&
+      messages[toolIndex + 1]?.content?.some(
+        (part) =>
+          part.type === "image_url" &&
+          part.image_url.url.startsWith("data:image/webp;base64,UklGRi"),
+      )
+    );
+  });
+  const imageRound = modelRequests.at(-1).payload.messages;
+  const imageToolIndex = imageRound.findIndex(
+    (item) => item.role === "tool" && item.content.includes('"width":1'),
+  );
+  assert.equal(imageRound[imageToolIndex + 1].role, "user");
+  const imageCdp = await page.createCDPSession();
+  const imageDom = JSON.stringify(
+    await imageCdp.send("DOM.getDocument", {
+      depth: -1,
+      pierce: true,
+    }),
+  );
+  await imageCdp.detach();
+  assert.doesNotMatch(imageDom, /UklGRiIAAABXRUJQ/);
+
   const requestsBeforeContractChange = modelRequests.length;
   await page.evaluate(() => window.changeContract());
   await page.evaluate(() => window.ai.arjunah.chat.open());
@@ -449,14 +494,14 @@ try {
   );
   assert.equal(await popup.$("#prompt"), null);
   await popup.waitForFunction(() =>
-    /Sites you approve use OpenAI API \(test-model\)/.test(
+    /Sites you approve use OpenAI API \(gpt-test-model\)/.test(
       document.querySelector("#provider-label").textContent,
     ),
   );
   // The wallet view lists providers with a global default selector.
   assert.equal(
     await popup.$eval("#default-model", (node) => node.value),
-    "openai/test-model",
+    "openai/gpt-test-model",
   );
   assert.ok((await popup.$$("#providers .provider")).length >= 1);
   await popup.close();

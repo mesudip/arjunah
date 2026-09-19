@@ -16,6 +16,7 @@
       window.lastInvocation = null;
       window.safeInputRequested = false;
       window.receivedUserInput = null;
+      window.imageToolCalls = 0;
       window.changeContract = () =>
         window.ai.arjunah.site.register({
           name: "Changed fixture assistant",
@@ -77,6 +78,43 @@
           systemPrompt: "Use the declared MCP tool.",
           widget: { autoShow: false },
           mcpServers: [{ id: "demo", name: "Demo MCP", url }],
+        });
+      window.registerImageResult = () =>
+        window.ai.arjunah.site.register({
+          name: "Image result fixture",
+          systemPrompt: "Inspect the canvas with the declared site tool.",
+          widget: { autoShow: false, toolCallView: "detailed" },
+          tools: [
+            {
+              name: "look_at_canvas",
+              description: "Return a known canvas summary and snapshot",
+              outputContent: ["text", "image"],
+              inputSchema: {
+                type: "object",
+                properties: {},
+                additionalProperties: false,
+              },
+              handler: async () => {
+                window.imageToolCalls++;
+                return {
+                  kind: "content",
+                  content: [
+                    {
+                      type: "text",
+                      text: '{"width":1,"height":1,"objects":[]}',
+                    },
+                    {
+                      type: "image",
+                      mediaType: "image/webp",
+                      data:
+                        "UklGRiIA" +
+                        "AABXRUJQVlA4IBYAAAAwAQCdASoBAAEALmk0mk0iIiIiIgBoSygABc6zbAAA",
+                    },
+                  ],
+                };
+              },
+            },
+          ],
         });
       window.registerAutoShow = () =>
         window.ai.arjunah.site.register({

@@ -26,7 +26,7 @@ Open the extension's settings (right-click the icon, **Options**) and do one of:
 - Enter an **OpenAI API key** and pick a default model. The key stays in extension storage and is never given to any website.
 - Pair the **desktop app** (next section) to use your subscriptions instead.
 
-Then try it: open a site that supports अर्जुनः, or run the playground from a checkout of this repository with `npm run demo` and open <http://127.0.0.1:8090/>.
+Then try it: open a site that supports अर्जुनः, visit the [hosted Paint playground](https://mesudip.github.io/arjunah/paint/), or run `npm run demo` from a checkout and open <http://127.0.0.1:8090/paint/>.
 
 ## 2. The desktop app
 

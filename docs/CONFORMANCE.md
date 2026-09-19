@@ -1,4 +1,4 @@
-# v0.4 validation record
+# v1.1 validation record
 
 The audited defects have regression coverage in the revised implementation. This record describes automated evidence, not an independent certification or full provider/MCP interoperability assessment. The supported schema subset and limits are part of SPEC sections 5 and 7.1.
 
@@ -31,6 +31,7 @@ Browser validation uses Chrome for Testing 152.0.7977.75 and Firefox 155.0.1 on 
 | Image parts, reasoning, attachments (v0.3)           | Validation tests for part shapes and bounds; background test converting parts to `image_url` and refusing images for non-vision models before any request; visual run: attachment strip, reasoning block, generated image rendering                                                                                             |
 | Hosted activity and usage (v0.3)                     | Background test for `arjunah-progress` event sequence bound to the initiating tab; visual run: thinking indicator, tool cards, token/history/quota footer; popup wallet assertions in Chrome and desktop suites                                                                                                                 |
 | Extension-collected tool inputs (v0.4)               | Validation tests for declaration bounds, model/property separation, scalar schemas, and direct-generation rejection; Chrome E2E enters a masked value through extension UI, completes the site tool round, and asserts the value never appears in captured provider requests                                                    |
+| Structured site-tool images (v1.1)                   | Independent result validation and declaration tests; background tests for non-vision fallback and vision-message ordering; Chrome fixture returns a known WebP and asserts the textual tool result is followed by the broker-generated user image without base64 in activity DOM                                                |
 
 Run `npm ci`, install test browsers if needed, then `npm run validate`. `npm run test:e2e:desktop` runs the desktop companion suite with a fake agent; `ARJUNAH_E2E_LIVE=<provider>` uses a real signed-in CLI. `npm run pack` produces unsigned development archives. Browser install commands select available versions; use `CHROME_PATH` and `FIREFOX_PATH` to reproduce particular binaries.
 

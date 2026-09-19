@@ -599,8 +599,18 @@ test("desktop pairing stores the token privately, lists providers, and syncs bro
     false,
     "settings never receives the desktop token",
   );
+  let unchangedDesktopWrites = 0;
+  b.hooks.set = async (value) => {
+    if (value.desktop) unchangedDesktopWrites++;
+  };
   const summary = await b.ok("desktop.status", {}, b.extension);
   assert.equal(summary.label, "OpenAI API (allowed)");
+  await b.ok("desktop.status", {}, b.extension);
+  assert.equal(
+    unchangedDesktopWrites,
+    0,
+    "unchanged provider snapshots do not create storage invalidation loops",
+  );
   assert.equal(
     (await b.call("desktop.pair", { code: "123456" }, b.sender())).error.code,
     "PERMISSION_REQUIRED",
@@ -1030,6 +1040,65 @@ test("hosted chat emits progress events to the initiating document only", async 
   );
 });
 
+test("hosted content tools send text normally and inject images only for vision models", async (t) => {
+  const contentManifest = {
+    name: "Canvas",
+    tools: [
+      {
+        name: "look",
+        outputContent: ["text", "image"],
+        inputSchema: { type: "object", additionalProperties: false },
+      },
+    ],
+  };
+  const imageResult = {
+    kind: "content",
+    content: [
+      { type: "text", text: '{"objects":1,"summary":"blue dot"}' },
+      { type: "image", mediaType: "image/webp", data: "UklGRg==" },
+    ],
+  };
+  for (const [model, vision] of [
+    ["gpt-5.6-sol", true],
+    ["allowed", false],
+  ]) {
+    const b = await broker(t);
+    b.store.provider.model = model;
+    b.hooks.tool = () => imageResult;
+    b.hooks.fetch = async (_url, _init, payload) =>
+      payload.messages.some((message) => message.role === "tool")
+        ? Response.json({ choices: [{ message: { content: "done" } }] })
+        : toolReply("site__look");
+    const prepared = await b.prepare(contentManifest);
+    await b.ok("chat.complete", prepared);
+    const messages = b.requests.at(-1).payload.messages;
+    const toolIndex = messages.findIndex((message) => message.role === "tool");
+    assert.equal(messages[toolIndex].content, imageResult.content[0].text);
+    assert.equal(messages[toolIndex].tool_call_id, "call-1");
+    assert.equal(messages[toolIndex + 1]?.role === "user", vision);
+    assert.equal(JSON.stringify(messages).includes("UklGRg=="), vision);
+  }
+});
+
+test("declared output modes change the assistant contract fingerprint", async (t) => {
+  const b = await broker(t);
+  const legacy = await b.register({
+    name: "Canvas",
+    tools: [{ name: "look", inputSchema: { type: "object" } }],
+  });
+  const content = await b.register({
+    name: "Canvas",
+    tools: [
+      {
+        name: "look",
+        inputSchema: { type: "object" },
+        outputContent: ["text", "image"],
+      },
+    ],
+  });
+  assert.notEqual(legacy.fingerprint, content.fingerprint);
+});
+
 test("commands a desktop agent ran are shown as activity but never returned to the page", async (t) => {
   const b = await broker(t);
   desktopMock(b, {
@@ -1198,7 +1267,7 @@ test("a companion that forgot this browser's pairing is reported as unpaired, no
     if (target.pathname === "/api/status")
       return Response.json({
         app: "arjunah-desktop",
-        version: "1.0.0",
+        version: "1.1.0",
         paired: false,
         sync: { revision: 0 },
       });

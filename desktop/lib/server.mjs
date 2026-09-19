@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Store } from "./store.mjs";
@@ -25,14 +25,68 @@ import {
   T3Error,
 } from "./t3/client.mjs";
 import { enrichProviders, mapT3Providers } from "./t3/catalog.mjs";
-import { createHash } from "node:crypto";
 
 export const APP_NAME = "arjunah-desktop";
-export const APP_VERSION = "1.0.0";
-export const PROTOCOL_VERSION = "1.0.0";
+export const APP_VERSION = "1.1.0";
+export const PROTOCOL_VERSION = "1.1.0";
 const BODY_LIMIT = 5_000_000;
 const EXTENSION_ORIGIN = /^(chrome|moz|safari-web)-extension:\/\/[a-z0-9-]+$/i;
+const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const WS_PROTOCOL = "arjunah.v1";
 const here = dirname(fileURLToPath(import.meta.url));
+
+function websocketFrame(payload, opcode = 1) {
+  const body = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
+  if (body.length > 65_535) throw new Error("WebSocket event is too large.");
+  const header = Buffer.alloc(body.length < 126 ? 2 : 4);
+  header[0] = 0x80 | opcode;
+  if (body.length < 126) header[1] = body.length;
+  else {
+    header[1] = 126;
+    header.writeUInt16BE(body.length, 2);
+  }
+  return Buffer.concat([header, body]);
+}
+
+function observeWebsocket(socket, onClose) {
+  let pending = Buffer.alloc(0);
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    onClose();
+  };
+  socket.on("data", (chunk) => {
+    pending = Buffer.concat([pending, chunk]);
+    while (pending.length >= 2) {
+      const opcode = pending[0] & 0x0f;
+      const masked = Boolean(pending[1] & 0x80);
+      let length = pending[1] & 0x7f;
+      let offset = 2;
+      if (length === 126) {
+        if (pending.length < 4) return;
+        length = pending.readUInt16BE(2);
+        offset = 4;
+      } else if (length === 127) return socket.destroy();
+      if (length > 16_384 || !masked) return socket.destroy();
+      if (pending.length < offset + 4 + length) return;
+      const mask = pending.subarray(offset, offset + 4);
+      const body = Buffer.from(
+        pending.subarray(offset + 4, offset + 4 + length),
+      );
+      for (let index = 0; index < body.length; index++)
+        body[index] ^= mask[index % 4];
+      pending = pending.subarray(offset + 4 + length);
+      if (opcode === 8) {
+        socket.end(websocketFrame(body, 8));
+        return;
+      }
+      if (opcode === 9) socket.write(websocketFrame(body, 10));
+    }
+  });
+  socket.on("close", close);
+  socket.on("error", close);
+}
 
 class HttpError extends Error {
   constructor(status, code, message) {
@@ -80,6 +134,49 @@ export function createDesktopApp({
   }
   const resolveAdapter = adapters ?? adapterFor;
   let server = null;
+  let eventRevision = 0;
+  const eventClients = new Set();
+  let providerView = [];
+  let providerRefresh = null;
+  let providerFingerprint = "";
+  let providerTimer = null;
+
+  function scheduleProviderMonitor() {
+    clearTimeout(providerTimer);
+    providerTimer = setTimeout(async () => {
+      if (eventClients.size)
+        await refreshProviderView({ force: true }).catch(() => {});
+      scheduleProviderMonitor();
+    }, 30_000);
+    providerTimer.unref?.();
+  }
+
+  function publish(topic) {
+    const message = JSON.stringify({
+      type: "state.changed",
+      revision: ++eventRevision,
+      topic,
+    });
+    const frame = websocketFrame(message);
+    for (const client of eventClients) {
+      if (client.socket.destroyed) eventClients.delete(client);
+      else {
+        client.socket.write(frame);
+        if (
+          client.role === "client" &&
+          !store.listClients().some((item) => item.id === client.clientId)
+        )
+          client.socket.end(websocketFrame("", 8));
+      }
+    }
+  }
+
+  function stableProviders(providers) {
+    return JSON.stringify(
+      providers.map(({ detectedAt: _detectedAt, ...provider }) => provider),
+    );
+  }
+  pairing.subscribe(() => publish("pairing"));
   // Optional T3 Code catalog source (docs/T3CODE.md): a paired T3 server
   // supplies richer model metadata, sign-in state, and usage windows for the
   // agents Arjunah runs itself, plus the agents only T3 can run.
@@ -134,6 +231,33 @@ export function createDesktopApp({
     const snapshot = await t3Snapshot(options);
     if (!snapshot?.mapped) return providers;
     return enrichProviders(providers, snapshot.mapped);
+  }
+
+  async function refreshProviderView({
+    force = false,
+    refreshModels = false,
+  } = {}) {
+    if (providerRefresh) {
+      if (!force && !refreshModels) return providerRefresh;
+      await providerRefresh.catch(() => {});
+      return refreshProviderView({ force, refreshModels });
+    }
+    providerRefresh = (async () => {
+      const providers = await detect(store.settings, { force });
+      const next = await withT3(
+        providers.map(({ binary: _binary, ...item }) => withLearned(item)),
+        { force, refreshModels },
+      );
+      const fingerprint = stableProviders(next);
+      const changed = providerFingerprint !== fingerprint;
+      providerView = next;
+      providerFingerprint = fingerprint;
+      if (changed) publish("providers");
+      return providerView;
+    })().finally(() => {
+      providerRefresh = null;
+    });
+    return providerRefresh;
   }
   function t3Status() {
     return {
@@ -195,6 +319,7 @@ export function createDesktopApp({
     activity.push({ at: new Date().toISOString(), kind, detail });
     if (activity.length > 100) activity.shift();
     log(`${kind}: ${detail}`);
+    publish("activity");
   }
 
   function own(request) {
@@ -259,6 +384,77 @@ export function createDesktopApp({
         "FORBIDDEN",
         "Dashboard session is invalid. Reload the dashboard.",
       );
+  }
+
+  function websocketIdentity(request) {
+    const host = String(request.headers.host ?? "");
+    if (!/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host)) return null;
+    const origin = request.headers.origin;
+    if (
+      origin != null &&
+      !EXTENSION_ORIGIN.test(origin) &&
+      origin !== own(request)
+    )
+      return null;
+    const protocols = String(request.headers["sec-websocket-protocol"] ?? "")
+      .split(",")
+      .map((item) => item.trim());
+    for (const protocol of protocols) {
+      const dashboardPrefix = `${WS_PROTOCOL}.dashboard.`;
+      if (
+        protocol.startsWith(dashboardPrefix) &&
+        protocol.slice(dashboardPrefix.length) === dashboardToken &&
+        (origin == null || origin === own(request))
+      )
+        return { protocol, role: "dashboard", clientId: null };
+      const clientPrefix = `${WS_PROTOCOL}.client.`;
+      if (
+        protocol.startsWith(clientPrefix) &&
+        (origin == null || EXTENSION_ORIGIN.test(origin))
+      ) {
+        const client = store.authenticate(protocol.slice(clientPrefix.length));
+        if (client) return { protocol, role: "client", clientId: client.id };
+      }
+    }
+    return null;
+  }
+
+  function upgradeWebsocket(request, socket) {
+    try {
+      const url = new URL(request.url, "http://127.0.0.1");
+      const identity =
+        url.pathname === "/api/events" ? websocketIdentity(request) : null;
+      const key = request.headers["sec-websocket-key"];
+      if (!identity || typeof key !== "string") {
+        socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+        return;
+      }
+      const accept = createHash("sha1")
+        .update(key + WS_GUID)
+        .digest("base64");
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\n" +
+          "Upgrade: websocket\r\n" +
+          "Connection: Upgrade\r\n" +
+          `Sec-WebSocket-Accept: ${accept}\r\n` +
+          `Sec-WebSocket-Protocol: ${identity.protocol}\r\n\r\n`,
+      );
+      socket.setNoDelay(true);
+      const entry = { socket, ...identity };
+      eventClients.add(entry);
+      observeWebsocket(socket, () => eventClients.delete(entry));
+      socket.write(
+        websocketFrame(
+          JSON.stringify({
+            type: "hello",
+            revision: eventRevision,
+            protocol: PROTOCOL_VERSION,
+          }),
+        ),
+      );
+    } catch {
+      socket.destroy();
+    }
   }
 
   async function readBody(request) {
@@ -561,6 +757,8 @@ export function createDesktopApp({
         `${providerId}/${session.model}`,
         event.contextWindow,
       );
+    if (event.quota || Number.isInteger(event.contextWindow))
+      void refreshProviderView().catch(() => {});
     return {
       ...base,
       model: event.model ? `${providerId}/${event.model}` : base.model,
@@ -677,6 +875,7 @@ export function createDesktopApp({
           revision: store.sync.revision,
           updatedAt: store.sync.updatedAt,
         },
+        eventsRevision: eventRevision,
       });
     }
     if (path === "/api/pair" && request.method === "POST") {
@@ -688,6 +887,7 @@ export function createDesktopApp({
       }
       const { token, client } = store.addClient(body.client ?? {});
       record("paired", `${client.name} (${client.browser})`);
+      publish("clients");
       return send(response, 200, {
         token,
         client,
@@ -701,18 +901,17 @@ export function createDesktopApp({
       const client = requireClient(request);
       store.revokeClient(client.id);
       record("unpaired", client.name);
+      publish("clients");
       return send(response, 200, { ok: true });
     }
     if (path === "/api/providers" && request.method === "GET") {
       requireClient(request);
-      const providers = await detect(store.settings, {
-        force: url.searchParams.get("refresh") === "1",
-      });
+      const force = url.searchParams.get("refresh") === "1";
       return send(response, 200, {
-        providers: await withT3(
-          providers.map(({ binary: _binary, ...item }) => withLearned(item)),
-          { refreshModels: url.searchParams.get("refresh") === "1" },
-        ),
+        providers: await refreshProviderView({
+          force,
+          refreshModels: force,
+        }),
         t3: t3Status(),
       });
     }
@@ -762,11 +961,17 @@ export function createDesktopApp({
         "sync",
         `${client.name} pushed configuration revision ${sync.revision}`,
       );
+      publish("sync");
       return send(response, 200, sync);
     }
     if (path.startsWith("/api/dashboard/")) {
       requireDashboard(request);
-      if (path === "/api/dashboard/state" && request.method === "GET")
+      if (path === "/api/dashboard/state" && request.method === "GET") {
+        const force = url.searchParams.get("refresh") === "1";
+        if (force)
+          await refreshProviderView({ force: true, refreshModels: true });
+        else if (!providerView.length)
+          void refreshProviderView().catch(() => {});
         return send(response, 200, {
           app: APP_NAME,
           version: APP_VERSION,
@@ -774,20 +979,16 @@ export function createDesktopApp({
           port: server.address().port,
           pairing: pairing.current(),
           clients: store.listClients(),
-          providers: await withT3(
-            (
-              await detect(store.settings, {
-                force: url.searchParams.get("refresh") === "1",
-              })
-            ).map(({ binary: _binary, ...item }) => withLearned(item)),
-            { refreshModels: url.searchParams.get("refresh") === "1" },
-          ),
+          providers: providerView,
+          providersRefreshing: Boolean(providerRefresh),
+          eventsRevision: eventRevision,
           sync: maskedSync(),
           settings: maskedSettings(),
           t3: t3Status(),
           activity: [...activity].reverse(),
           dataPath: store.path,
         });
+      }
       if (path === "/api/dashboard/pairing/rotate" && request.method === "POST")
         return send(response, 200, { code: pairing.rotate() });
       if (
@@ -796,7 +997,10 @@ export function createDesktopApp({
       ) {
         const body = await readBody(request);
         const ok = store.revokeClient(String(body.id ?? ""));
-        if (ok) record("revoked", `client ${body.id}`);
+        if (ok) {
+          record("revoked", `client ${body.id}`);
+          publish("clients");
+        }
         return send(response, 200, { ok });
       }
       if (path === "/api/dashboard/t3/pair" && request.method === "POST") {
@@ -829,6 +1033,8 @@ export function createDesktopApp({
         invalidateProviderCache();
         record("t3-paired", paired.baseUrl);
         await t3Snapshot({ force: true });
+        await refreshProviderView({ force: true });
+        publish("settings");
         return send(response, 200, { t3: t3Status(), scope: paired.scope });
       }
       if (path === "/api/dashboard/t3" && request.method === "DELETE") {
@@ -842,6 +1048,8 @@ export function createDesktopApp({
         };
         invalidateProviderCache();
         record("t3-unpaired", "T3 Code connection removed");
+        await refreshProviderView({ force: true });
+        publish("settings");
         return send(response, 200, { t3: t3Status() });
       }
       if (path === "/api/dashboard/settings" && request.method === "PUT") {
@@ -863,7 +1071,10 @@ export function createDesktopApp({
           if (typeof body[key] === "string")
             patch[key] = body[key].slice(0, 500) || undefined;
         invalidateProviderCache();
-        return send(response, 200, store.updateSettings(patch));
+        const settings = store.updateSettings(patch);
+        publish("settings");
+        void refreshProviderView({ force: true }).catch(() => {});
+        return send(response, 200, settings);
       }
       if (path === "/api/dashboard/config" && request.method === "PUT") {
         const body = await readBody(request);
@@ -876,6 +1087,7 @@ export function createDesktopApp({
           "sync",
           `desktop dashboard saved configuration revision ${sync.revision}`,
         );
+        publish("sync");
         return send(response, 200, maskedSync());
       }
       throw new HttpError(404, "NOT_FOUND", "Unknown dashboard operation.");
@@ -886,7 +1098,7 @@ export function createDesktopApp({
         return send(response, 200, asset.text, {
           "Content-Type": asset.type,
           "Content-Security-Policy":
-            "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:",
+            "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:* ws://[::1]:*; img-src 'self' data:",
         });
     }
     throw new HttpError(404, "NOT_FOUND", "Not found.");
@@ -906,6 +1118,7 @@ export function createDesktopApp({
       else response.end();
     });
   });
+  server.on("upgrade", upgradeWebsocket);
   server.requestTimeout = 0;
   server.headersTimeout = 60_000;
 
@@ -916,16 +1129,24 @@ export function createDesktopApp({
     sessions,
     activity,
     dashboardToken,
+    providers(options) {
+      return refreshProviderView(options);
+    },
     listen(port = store.port, host = "127.0.0.1") {
       return new Promise((resolve, reject) => {
         server.once("error", reject);
         server.listen(port, host, () => {
           server.off("error", reject);
+          void refreshProviderView().catch(() => {});
+          scheduleProviderMonitor();
           resolve(server.address());
         });
       });
     },
     close() {
+      clearTimeout(providerTimer);
+      for (const client of eventClients) client.socket.destroy();
+      eventClients.clear();
       for (const id of [...threads.keys()]) endThread(id);
       sessions.endAll();
       return new Promise((resolve) => server.close(() => resolve()));

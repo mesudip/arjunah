@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>अर्जुनः Paint</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="titlebar">
+      <a href="../" aria-label="Back to playgrounds">←</a>
+      <strong>untitled - अर्जुनः Paint</strong>
+      <span id="extension-state">Looking for अर्जुनः…</span>
+    </header>
+    <nav class="menu" aria-label="Commands">
+      <button id="new">New</button><button id="undo">Undo</button
+      ><button id="redo">Redo</button>
+      <button id="download-png">Download PNG</button
+      ><button id="download-svg">Download SVG</button>
+      <button id="ask-ai" class="ai" disabled>✨ Ask अर्जुनः to draw</button>
+    </nav>
+    <main>
+      <aside class="toolbox" aria-label="Paint tools">
+        <button data-tool="select">↖<span>Select</span></button>
+        <button data-tool="pencil" class="active">✎<span>Pencil</span></button>
+        <button data-tool="brush">🖌<span>Brush</span></button>
+        <button data-tool="eraser">▰<span>Eraser</span></button>
+        <button data-tool="fill">▨<span>Fill</span></button>
+        <button data-tool="circle">◯<span>Circle</span></button>
+        <button data-tool="rectangle">□<span>Rectangle</span></button>
+        <button data-tool="text">A<span>Text</span></button>
+        <button data-tool="eyedropper">◉<span>Pick color</span></button>
+        <label class="size"
+          >Size<select id="size">
+            <option>1</option>
+            <option>3</option>
+            <option selected>6</option>
+            <option>12</option>
+            <option>24</option>
+          </select></label
+        >
+        <label class="size"
+          >Shapes<select id="shape-style">
+            <option value="outline">Outline</option>
+            <option value="both">Fill + outline</option>
+            <option value="fill">Fill only</option>
+          </select></label
+        >
+      </aside>
+      <section class="workspace" aria-label="Drawing canvas">
+        <div class="canvas-wrap">
+          <canvas id="canvas" width="960" height="600"></canvas>
+        </div>
+        <div class="palette" id="palette" aria-label="Color palette"></div>
+        <label class="custom"
+          >Custom <input id="color" type="color" value="#111827"
+        /></label>
+      </section>
+      <aside class="objects">
+        <h2>Objects <span id="object-count">0</span></h2>
+        <p>Every mark is saved. Select one to remove it directly.</p>
+        <ol id="object-list"></ol>
+        <button id="delete-object" disabled>Delete selected</button>
+      </aside>
+    </main>
+    <footer>
+      <span id="status">Ready</span><span id="coords">0, 0 px</span>
+    </footer>
+    <script type="module" src="./app.js"></script>
+    <script type="module" src="./arjunah.js"></script>
+  </body>
+</html>

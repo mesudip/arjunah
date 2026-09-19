@@ -5,6 +5,7 @@
   const pending = new Map();
   const pendingToolInputs = new Map();
   const handlers = new Map();
+  const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
   let activeRegistration = null;
   let controlListener = null;
   let controlValues = {};
@@ -69,6 +70,58 @@
       entry.reject(new Error(message));
     }
     pendingToolInputs.clear();
+  }
+
+  function validatedToolResult(value, outputContent = []) {
+    const encoded = JSON.stringify(value);
+    if (encoded === undefined) throw new Error("Invalid tool result.");
+    if (!outputContent.length) {
+      if (new TextEncoder().encode(encoded).byteLength > 65536)
+        throw new Error("Invalid or oversized tool result.");
+      return JSON.parse(encoded);
+    }
+    if (
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      value.kind !== "content" ||
+      !Array.isArray(value.content) ||
+      !value.content.length ||
+      value.content.length > 8
+    )
+      throw new Error("Invalid content tool result.");
+    let images = 0;
+    let hasText = false;
+    const content = value.content.map((part) => {
+      if (!part || typeof part !== "object" || Array.isArray(part))
+        throw new Error("Invalid content tool result.");
+      if (part.type === "text") {
+        if (
+          !outputContent.includes("text") ||
+          typeof part.text !== "string" ||
+          part.text.length > 12000
+        )
+          throw new Error("Invalid text tool result.");
+        hasText ||= part.text.trim().length > 0;
+        return { type: "text", text: part.text };
+      }
+      if (part.type === "image") {
+        if (
+          !outputContent.includes("image") ||
+          ++images > 4 ||
+          !IMAGE_TYPES.includes(part.mediaType) ||
+          typeof part.data !== "string" ||
+          part.data.length > 2000000 ||
+          !/^[A-Za-z0-9+/]+={0,2}$/.test(part.data)
+        )
+          throw new Error("Invalid image tool result.");
+        return { type: "image", mediaType: part.mediaType, data: part.data };
+      }
+      throw new Error("Invalid content tool result.");
+    });
+    if (images && !hasText)
+      throw new Error("Image tool results require a non-empty text fallback.");
+    return { kind: "content", content };
   }
 
   window.addEventListener("message", async (event) => {
@@ -144,12 +197,10 @@
             });
           },
         });
-        const encoded = JSON.stringify(result);
-        if (
-          encoded === undefined ||
-          new TextEncoder().encode(encoded).byteLength > 65536
-        )
-          throw new Error("Invalid or oversized tool result.");
+        const validated = validatedToolResult(
+          result,
+          message.outputContent ?? [],
+        );
         window.postMessage(
           {
             channel: CHANNEL,
@@ -158,7 +209,7 @@
             kind: "tool-result",
             id: message.id,
             ok: true,
-            result: JSON.parse(encoded),
+            result: validated,
           },
           "*",
         );
@@ -216,7 +267,7 @@
   }
 
   const api = {
-    version: "1.0.0",
+    version: "1.1.0",
     isEnabled: async () => {
       const grant = await request("permissions.query");
       return grant != null && grant.level !== "assistant";

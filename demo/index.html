@@ -3,870 +3,170 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>अर्जुनः Playground · Trip planner</title>
+    <title>अर्जुनः Playgrounds</title>
     <style>
       :root {
-        color-scheme: light;
         font:
-          14px/1.5 system-ui,
-          -apple-system,
-          "Segoe UI",
+          16px/1.55 Inter,
+          ui-sans-serif,
+          system-ui,
           sans-serif;
-        color: #0f172a;
-        background: #f6f7fb;
+        color: #eef2ff;
+        background: #0e1730;
+        --accent: #7dd3fc;
       }
       * {
         box-sizing: border-box;
       }
       body {
         margin: 0;
+        min-height: 100vh;
+        background:
+          radial-gradient(circle at 15% 0, #243d82 0, transparent 38%), #0e1730;
       }
       main {
-        width: min(1040px, calc(100% - 32px));
-        margin: 32px auto 80px;
-        display: grid;
-        gap: 16px;
+        width: min(1040px, calc(100% - 36px));
+        margin: auto;
+        padding: 64px 0 80px;
       }
       header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 16px;
+        max-width: 760px;
+        margin-bottom: 40px;
+      }
+      .eyebrow {
+        color: var(--accent);
+        font-weight: 750;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        font-size: 0.75rem;
       }
       h1 {
-        margin: 0;
-        font-size: 24px;
-        letter-spacing: -0.02em;
+        font-size: clamp(2.5rem, 8vw, 5.6rem);
+        line-height: 0.92;
+        margin: 0.25em 0;
       }
-      h2 {
-        margin: 0 0 4px;
-        font-size: 15px;
-      }
-      .muted {
-        color: #64748b;
+      .lede {
+        font-size: 1.2rem;
+        color: #cbd5e1;
       }
       .grid {
         display: grid;
-        grid-template-columns: 1.2fr 1fr;
-        gap: 16px;
-        align-items: start;
-      }
-      @media (max-width: 820px) {
-        .grid {
-          grid-template-columns: 1fr;
-        }
+        grid-template-columns: 2fr 1fr;
+        gap: 20px;
       }
       .card {
-        background: #fff;
-        border: 1px solid #e6e9f0;
-        border-radius: 14px;
-        padding: 18px 20px;
-        box-shadow:
-          0 1px 2px #0f172a0a,
-          0 8px 24px #0f172a0f;
-        display: grid;
-        gap: 12px;
+        display: flex;
+        flex-direction: column;
+        min-height: 260px;
+        padding: 28px;
+        border: 1px solid #ffffff24;
+        border-radius: 24px;
+        color: inherit;
+        text-decoration: none;
+        background: #ffffff0c;
+        box-shadow: 0 24px 70px #0004;
+        transition:
+          0.18s transform,
+          0.18s border-color;
+      }
+      .card:hover {
+        transform: translateY(-4px);
+        border-color: #7dd3fc80;
+      }
+      .paint {
+        min-height: 390px;
+        background: linear-gradient(145deg, #253f92, #3157c8 48%, #f5b82e);
+      }
+      .card small {
+        font-weight: 750;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: #dbeafe;
+      }
+      .card h2 {
+        font-size: clamp(1.8rem, 4vw, 3rem);
+        margin: auto 0 8px;
       }
       .card p {
         margin: 0;
+        color: #e2e8f0;
       }
-      label {
-        display: grid;
-        gap: 4px;
-        font-weight: 600;
-        font-size: 13px;
+      .paint p {
+        max-width: 650px;
+        color: white;
       }
-      label span {
-        color: #64748b;
-        font-weight: 500;
-        font-size: 12px;
+      .arrow {
+        margin-top: 24px;
+        font-size: 1.2rem;
+        font-weight: 800;
       }
-      input,
-      select,
-      textarea {
-        font: inherit;
-        border: 1px solid #e6e9f0;
-        border-radius: 10px;
-        padding: 8px 10px;
-        background: #fff;
-        color: inherit;
+      h3 {
+        margin: 44px 0 14px;
+        font-size: 1rem;
+        color: #cbd5e1;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
       }
-      textarea {
-        min-height: 72px;
-        resize: vertical;
+      footer {
+        margin-top: 42px;
+        color: #94a3b8;
+        font-size: 0.9rem;
       }
-      .row {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 10px;
+      footer a {
+        color: #bae6fd;
       }
-      .btn {
-        border: 1px solid transparent;
-        border-radius: 10px;
-        padding: 8px 14px;
-        font: 600 13px system-ui;
-        cursor: pointer;
-        background: #fff;
-        border-color: #e6e9f0;
-        color: #0f172a;
-      }
-      .btn.primary {
-        background: #3b5bdb;
-        color: #fff;
-      }
-      .btn:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
-      }
-      .actions {
-        display: flex;
-        gap: 8px;
-        flex-wrap: wrap;
-      }
-      .pill {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 2px 9px;
-        border-radius: 999px;
-        background: #eef1fc;
-        color: #3b5bdb;
-        font-size: 12px;
-        font-weight: 600;
-      }
-      .pill.off {
-        background: #fee4e2;
-        color: #b42318;
-      }
-      .pill.warn {
-        background: #fef3c7;
-        color: #b45309;
-      }
-      ul.items {
-        margin: 0;
-        padding: 0;
-        list-style: none;
-        display: grid;
-        gap: 6px;
-      }
-      ul.items li {
-        display: flex;
-        justify-content: space-between;
-        gap: 10px;
-        padding: 8px 10px;
-        border: 1px solid #e6e9f0;
-        border-radius: 10px;
-        background: #f6f7fb;
-      }
-      ul.items li small {
-        color: #64748b;
-      }
-      .log {
-        font:
-          12px ui-monospace,
-          SFMono-Regular,
-          Menlo,
-          monospace;
-        background: #0b1220;
-        color: #e5e7eb;
-        border-radius: 12px;
-        padding: 12px;
-        max-height: 300px;
-        overflow: auto;
-        white-space: pre-wrap;
-        overflow-wrap: anywhere;
-      }
-      .log b {
-        color: #93c5fd;
-      }
-      .flash {
-        outline: 3px solid #f59e0b;
-        outline-offset: 2px;
-        transition: outline-color 0.6s;
-      }
-      .tools {
-        display: grid;
-        gap: 6px;
-        font-size: 13px;
-      }
-      .tools code {
-        background: #f3f4f8;
-        padding: 1px 5px;
-        border-radius: 5px;
-      }
-      output.result {
-        display: block;
-        white-space: pre-wrap;
-        background: #f6f7fb;
-        border-radius: 10px;
-        padding: 10px;
-        min-height: 40px;
-        font-size: 13px;
+      @media (max-width: 720px) {
+        main {
+          padding-top: 40px;
+        }
+        .grid {
+          grid-template-columns: 1fr;
+        }
+        .paint {
+          min-height: 330px;
+        }
       }
     </style>
   </head>
   <body>
     <main>
       <header>
-        <div>
-          <h1>अर्जुनः Playground · Trip planner</h1>
-          <p class="muted">
-            A fake booking form with six site tools. Ask the assistant to fill
-            fields, pick dropdown values, add stops, or read the form back.
-          </p>
-        </div>
-        <span id="ext" class="pill warn">Looking for the extension…</span>
+        <div class="eyebrow">अर्जुनः playgrounds</div>
+        <h1>Bring your AI.<br />Make something.</h1>
+        <p class="lede">
+          Static examples for the open, user-controlled AI protocol. The
+          extension owns the chat and credentials; each page exposes only narrow
+          local tools.
+        </p>
       </header>
-
-      <div class="grid">
-        <section class="card" aria-labelledby="form-heading">
-          <h2 id="form-heading">Booking form</h2>
-          <div class="row">
-            <label
-              >Traveller name<input id="name" placeholder="Ada Lovelace"
-            /></label>
-            <label
-              >Email<input
-                id="email"
-                type="email"
-                placeholder="ada@example.com"
-            /></label>
-          </div>
-          <div class="row">
-            <label
-              >Destination
-              <select id="destination">
-                <option value="">Choose…</option>
-                <option>Kathmandu</option>
-                <option>Lisbon</option>
-                <option>Kyoto</option>
-                <option>Reykjavik</option>
-                <option>Cape Town</option>
-                <option>Montréal</option>
-              </select>
-            </label>
-            <label
-              >Travel class
-              <select id="class">
-                <option value="economy">Economy</option>
-                <option value="premium">Premium economy</option>
-                <option value="business">Business</option>
-                <option value="first">First</option>
-              </select>
-            </label>
-          </div>
-          <div class="row">
-            <label
-              >Travellers
-              <select id="travellers">
-                <option>1</option>
-                <option>2</option>
-                <option>3</option>
-                <option>4</option>
-                <option>5</option>
-                <option>6</option>
-              </select>
-            </label>
-            <label
-              >Budget (USD)<input
-                id="budget"
-                type="number"
-                min="100"
-                step="50"
-                value="1500"
-            /></label>
-          </div>
-          <div class="row">
-            <label>Departure<input id="depart" type="date" /></label>
-            <label>Return<input id="return" type="date" /></label>
-          </div>
-          <label
-            >Special requests<span
-              >Window seat, dietary needs, accessibility…</span
-            ><textarea id="notes"></textarea>
-          </label>
-          <label
-            style="
-              display: flex;
-              align-items: center;
-              gap: 8px;
-              font-weight: 500;
-            "
-            ><input id="insurance" type="checkbox" /> Add travel
-            insurance</label
-          >
-          <div>
-            <h2>Itinerary stops <span id="count" class="pill">0</span></h2>
-            <ul id="items" class="items"></ul>
-          </div>
-          <div class="actions">
-            <button id="reset" class="btn">Reset form</button>
-            <button id="book" class="btn primary">Book trip</button>
-            <button id="open" class="btn" disabled>Open assistant</button>
-          </div>
-          <output id="booking" class="result" hidden></output>
-        </section>
-
-        <div style="display: grid; gap: 16px">
-          <section class="card">
-            <h2>Site tools registered (level 0)</h2>
-            <div class="tools">
-              <div>
-                <code>get_form</code> — read every field, the itinerary, and
-                validation errors
-              </div>
-              <div>
-                <code>set_field</code> — set a text, number, date, checkbox, or
-                dropdown field
-              </div>
-              <div>
-                <code>add_stop</code> / <code>remove_stop</code> — manage
-                itinerary stops
-              </div>
-              <div>
-                <code>search_destinations</code> — query a small catalogue
-                (price, days, tags)
-              </div>
-              <div>
-                <code>highlight</code> — flash a field so the user sees it
-              </div>
-            </div>
-            <p class="muted">
-              Widget options: <em>Confirm before writing</em> (toggle),
-              <em>Currency</em> (select), <em>Clear itinerary</em> (button).
-              Try: “Plan a 2-person business trip to Kyoto under $4000 with two
-              stops.”
-            </p>
-          </section>
-
-          <section class="card">
-            <h2>Direct model access (levels 1 and 2)</h2>
-            <div class="actions">
-              <button id="lvl1" class="btn">
-                Request level 1 (completion)
-              </button>
-              <button id="lvl2" class="btn">Request level 2 (catalog)</button>
-              <button id="revoke" class="btn">Revoke</button>
-            </div>
-            <label
-              >Prompt<input
-                id="prompt"
-                value="Suggest a one-line tagline for this trip."
-            /></label>
-            <div class="actions" style="align-items: center">
-              <select id="model" title="Model (level 2)">
-                <option value="default">default model</option>
-              </select>
-              <button id="generate" class="btn primary">Generate</button>
-              <button id="list" class="btn">List providers &amp; models</button>
-            </div>
-            <output id="direct" class="result">Grant: none</output>
-          </section>
-
-          <section class="card">
-            <h2>Event log</h2>
-            <div id="log" class="log"></div>
-          </section>
-        </div>
-      </div>
+      <section class="grid" aria-label="Featured playground">
+        <a class="card paint" href="./paint/">
+          <small>Featured · level 0</small>
+          <h2>अर्जुनः Paint</h2>
+          <p>
+            Sketch by hand or ask your own AI to compose with circles, brush
+            strokes, text, fills, and stable objects. Every mark autosaves
+            locally; export the result as PNG or SVG.
+          </p>
+          <span class="arrow">Open the studio →</span>
+        </a>
+      </section>
+      <h3>Other playgrounds</h3>
+      <section class="grid">
+        <a class="card" href="./trip-planner/">
+          <small>Protocol reference</small>
+          <h2>Trip planner</h2>
+          <p>
+            The original form-and-tools demonstration, preserved as a secondary
+            example.
+          </p>
+          <span class="arrow">Plan a trip →</span>
+        </a>
+      </section>
+      <footer>
+        These pages are dependency-free and work both here and under a local
+        <a href="./paint/">demo server</a>.
+      </footer>
     </main>
-
-    <script>
-      const $ = (s) => document.querySelector(s);
-      const FIELDS = [
-        "name",
-        "email",
-        "destination",
-        "class",
-        "travellers",
-        "budget",
-        "depart",
-        "return",
-        "notes",
-        "insurance",
-      ];
-      const CATALOG = [
-        {
-          city: "Kathmandu",
-          country: "Nepal",
-          pricePerPerson: 900,
-          days: 7,
-          tags: ["mountains", "culture", "budget"],
-        },
-        {
-          city: "Lisbon",
-          country: "Portugal",
-          pricePerPerson: 1100,
-          days: 5,
-          tags: ["coast", "food", "city"],
-        },
-        {
-          city: "Kyoto",
-          country: "Japan",
-          pricePerPerson: 1900,
-          days: 6,
-          tags: ["temples", "food", "culture"],
-        },
-        {
-          city: "Reykjavik",
-          country: "Iceland",
-          pricePerPerson: 2100,
-          days: 5,
-          tags: ["nature", "aurora", "cold"],
-        },
-        {
-          city: "Cape Town",
-          country: "South Africa",
-          pricePerPerson: 1400,
-          days: 8,
-          tags: ["coast", "wine", "wildlife"],
-        },
-        {
-          city: "Montréal",
-          country: "Canada",
-          pricePerPerson: 1000,
-          days: 4,
-          tags: ["city", "food", "winter"],
-        },
-      ];
-      const stops = [];
-      let controls = { confirm: false, currency: "USD" };
-
-      function log(kind, detail) {
-        const line = document.createElement("div");
-        const b = document.createElement("b");
-        b.textContent = `${new Date().toLocaleTimeString()} ${kind} `;
-        line.append(
-          b,
-          typeof detail === "string" ? detail : JSON.stringify(detail),
-        );
-        $("#log").prepend(line);
-      }
-      function fieldValue(id) {
-        const el = document.getElementById(id);
-        return el.type === "checkbox" ? el.checked : el.value;
-      }
-      function flash(id) {
-        const el = document.getElementById(id);
-        if (!el) return false;
-        el.classList.add("flash");
-        el.scrollIntoView({ block: "center", behavior: "smooth" });
-        setTimeout(() => el.classList.remove("flash"), 1500);
-        return true;
-      }
-      function renderStops() {
-        $("#items").replaceChildren(
-          ...stops.map((stop, index) => {
-            const li = document.createElement("li");
-            li.append(
-              `${index + 1}. ${stop.place}`,
-              Object.assign(document.createElement("small"), {
-                textContent: `${stop.nights} night${stop.nights === 1 ? "" : "s"}${stop.note ? ` · ${stop.note}` : ""}`,
-              }),
-            );
-            return li;
-          }),
-        );
-        $("#count").textContent = String(stops.length);
-      }
-      function validate() {
-        const errors = [];
-        if (!fieldValue("name")) errors.push("name is empty");
-        if (!/^[^@\s]+@[^@\s]+$/.test(fieldValue("email")))
-          errors.push("email is invalid");
-        if (!fieldValue("destination")) errors.push("destination not chosen");
-        if (
-          fieldValue("depart") &&
-          fieldValue("return") &&
-          fieldValue("return") < fieldValue("depart")
-        )
-          errors.push("return is before departure");
-        return errors;
-      }
-      function formState() {
-        const fields = Object.fromEntries(
-          FIELDS.map((id) => [id, fieldValue(id)]),
-        );
-        return { fields, stops: [...stops], errors: validate(), controls };
-      }
-      function setField(id, value) {
-        const el = document.getElementById(id);
-        if (el.type === "checkbox") el.checked = Boolean(value);
-        else if (el.tagName === "SELECT") {
-          const option = [...el.options].find(
-            (o) =>
-              o.value.toLowerCase() === String(value).toLowerCase() ||
-              o.textContent.toLowerCase() === String(value).toLowerCase(),
-          );
-          if (!option)
-            throw new Error(
-              `Unknown option for ${id}: ${value}. Allowed: ${[...el.options]
-                .map((o) => o.value || o.textContent)
-                .filter(Boolean)
-                .join(", ")}`,
-            );
-          el.value = option.value;
-        } else el.value = String(value);
-        el.dispatchEvent(new Event("input", { bubbles: true }));
-        flash(id);
-        return fieldValue(id);
-      }
-
-      const tools = [
-        {
-          name: "get_form",
-          description:
-            "Read the booking form: every field value, itinerary stops, validation errors, and widget option state.",
-          inputSchema: {
-            type: "object",
-            properties: {},
-            additionalProperties: false,
-          },
-          handler: () => formState(),
-        },
-        {
-          name: "set_field",
-          description:
-            "Set one form field. Dropdowns accept an option value or label; insurance is boolean; dates are YYYY-MM-DD.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              field: { type: "string", enum: FIELDS },
-              value: {
-                anyOf: [
-                  { type: "string" },
-                  { type: "number" },
-                  { type: "boolean" },
-                ],
-              },
-            },
-            required: ["field", "value"],
-            additionalProperties: false,
-          },
-          handler: async ({ field, value }) => {
-            if (
-              controls.confirm &&
-              !confirm(
-                `Assistant wants to set ${field} to ${JSON.stringify(value)}. Allow?`,
-              )
-            )
-              return { ok: false, reason: "user declined" };
-            return { ok: true, field, value: setField(field, value) };
-          },
-        },
-        {
-          name: "add_stop",
-          description: "Add an itinerary stop.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              place: { type: "string", minLength: 1, maxLength: 80 },
-              nights: { type: "integer", minimum: 1, maximum: 30 },
-              note: { type: "string", maxLength: 120 },
-            },
-            required: ["place", "nights"],
-            additionalProperties: false,
-          },
-          handler: ({ place, nights, note }) => {
-            if (stops.length >= 8)
-              throw new Error("Itinerary is full (8 stops).");
-            stops.push({ place, nights, note: note ?? "" });
-            renderStops();
-            flash("items");
-            return { ok: true, stops: stops.length };
-          },
-        },
-        {
-          name: "remove_stop",
-          description: "Remove an itinerary stop by its 1-based position.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              position: { type: "integer", minimum: 1, maximum: 8 },
-            },
-            required: ["position"],
-            additionalProperties: false,
-          },
-          handler: ({ position }) => {
-            if (position > stops.length)
-              return { ok: false, reason: "no such stop" };
-            const [removed] = stops.splice(position - 1, 1);
-            renderStops();
-            return { ok: true, removed };
-          },
-        },
-        {
-          name: "search_destinations",
-          description:
-            "Search the destination catalogue by text, tag, or maximum price per person.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              query: { type: "string", maxLength: 60 },
-              maxPricePerPerson: { type: "number", minimum: 0 },
-            },
-            additionalProperties: false,
-          },
-          handler: ({ query = "", maxPricePerPerson }) => {
-            const q = query.toLowerCase();
-            const results = CATALOG.filter(
-              (d) =>
-                (!q ||
-                  `${d.city} ${d.country} ${d.tags.join(" ")}`
-                    .toLowerCase()
-                    .includes(q)) &&
-                (maxPricePerPerson == null ||
-                  d.pricePerPerson <= maxPricePerPerson),
-            );
-            return {
-              currency: controls.currency,
-              results: results.map((d) => ({
-                ...d,
-                price:
-                  controls.currency === "EUR"
-                    ? Math.round(d.pricePerPerson * 0.92)
-                    : controls.currency === "NPR"
-                      ? d.pricePerPerson * 134
-                      : d.pricePerPerson,
-              })),
-            };
-          },
-        },
-        {
-          name: "highlight",
-          description: "Flash a form field so the user notices it.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              field: { type: "string", enum: [...FIELDS, "items", "book"] },
-            },
-            required: ["field"],
-            additionalProperties: false,
-          },
-          handler: ({ field }) => ({ ok: flash(field) }),
-        },
-      ];
-      const logged = tools.map((tool) => ({
-        ...tool,
-        handler: async (args, invocation) => {
-          log(`tool ${tool.name}`, { args, controls: invocation.controls });
-          try {
-            const result = await tool.handler(args, invocation);
-            log(`  ↳ ${tool.name}`, result);
-            return result;
-          } catch (error) {
-            log(`  ↳ ${tool.name} error`, error.message);
-            throw error;
-          }
-        },
-      }));
-
-      async function register() {
-        if (!window.ai?.arjunah?.site) {
-          $("#ext").textContent =
-            "Extension not detected — load अर्जुनः and reload";
-          $("#ext").className = "pill off";
-          return;
-        }
-        try {
-          await window.ai.arjunah.site.register({
-            name: "Trip planner assistant",
-            description:
-              "Fills this booking form, manages stops, and searches destinations.",
-            systemPrompt:
-              "You help plan a trip using the booking form on this page. Read the form with get_form before changing it. Use set_field to fill text fields and choose dropdown values exactly from the allowed options. Prefer search_destinations before recommending a place. Keep answers short and confirm what you changed.",
-            widget: {
-              toolCallView: "detailed",
-              greeting: "Tell me about the trip and I will fill in the form.",
-              placeholder:
-                "e.g. Two of us to Lisbon in October, business class…",
-              suggestions: [
-                "Plan a 2-person business trip to Kyoto under $4000 with two stops",
-                "Fill the form for a budget Kathmandu trek, 7 nights",
-                "What is still missing before I can book?",
-              ],
-              theme: { accent: "#3b5bdb", mode: "auto" },
-              controls: [
-                {
-                  id: "confirm",
-                  type: "toggle",
-                  label: "Confirm before writing",
-                  description: "Ask me before the assistant changes a field",
-                  default: false,
-                  model: false,
-                },
-                {
-                  id: "currency",
-                  type: "select",
-                  label: "Currency",
-                  options: [
-                    { value: "USD" },
-                    { value: "EUR" },
-                    { value: "NPR" },
-                  ],
-                  default: "USD",
-                },
-                { id: "clear", type: "button", label: "Clear itinerary" },
-              ],
-            },
-            onControlChange(id, value, values) {
-              controls = { ...controls, ...values };
-              if (id === "clear") {
-                stops.length = 0;
-                renderStops();
-              }
-              log("control", { id, value });
-            },
-            tools: logged,
-          });
-          $("#ext").textContent =
-            `अर्जुनः ${window.ai.arjunah.version} · assistant registered`;
-          $("#ext").className = "pill";
-          $("#open").disabled = false;
-          log("registered", "Trip planner assistant with 6 tools");
-        } catch (error) {
-          $("#ext").textContent = `Registration failed: ${error.message}`;
-          $("#ext").className = "pill off";
-        }
-        refreshGrant();
-      }
-
-      // The session enable() resolves to; null until the user enables access.
-      let session = null;
-      // Wallet-style: connect on first use, without a prompt when already enabled.
-      const enabled = async () =>
-        (session ??= await window.ai.arjunah.enable());
-      async function refreshGrant() {
-        try {
-          if (!(await window.ai.arjunah.isEnabled())) session = null;
-          else await enabled();
-          const grant = session ? await session.permissions.query() : null;
-          $("#direct").textContent = grant
-            ? `Grant: level ${grant.level} · model ${grant.model ?? "—"} · ${grant.capabilities.join(", ")}`
-            : "Grant: none";
-          if (grant?.level === "catalog") {
-            const models = await session.models.list();
-            $("#model").replaceChildren(
-              ...models.map((m) =>
-                Object.assign(document.createElement("option"), {
-                  value: m.id,
-                  textContent: `${m.displayName} (${m.provider})${m.default ? " ★" : ""}`,
-                }),
-              ),
-            );
-          } else
-            $("#model").replaceChildren(
-              Object.assign(document.createElement("option"), {
-                value: "default",
-                textContent: "default model",
-              }),
-            );
-        } catch (error) {
-          $("#direct").textContent = error.message;
-        }
-      }
-      const guard = (fn) => async () => {
-        try {
-          await fn();
-        } catch (error) {
-          log("error", `${error.code ?? ""} ${error.message}`);
-          $("#direct").textContent =
-            `${error.code ?? "Error"}: ${error.message}`;
-        }
-      };
-      $("#lvl1").addEventListener(
-        "click",
-        guard(async () => {
-          session = await window.ai.arjunah.enable({
-            reason: "Generate trip taglines in the page.",
-          });
-          log("grant", session.grant);
-          refreshGrant();
-        }),
-      );
-      $("#lvl2").addEventListener(
-        "click",
-        guard(async () => {
-          session = await window.ai.arjunah.enable({ level: "catalog" });
-          log("grant", session.grant);
-          refreshGrant();
-        }),
-      );
-      $("#revoke").addEventListener(
-        "click",
-        guard(async () => {
-          await window.ai.arjunah.disable();
-          session = null;
-          log("disabled", "");
-          refreshGrant();
-        }),
-      );
-      $("#generate").addEventListener(
-        "click",
-        guard(async () => {
-          $("#direct").textContent = "Generating…";
-          const result = await (await enabled()).models.generate({
-            model: $("#model").value,
-            messages: [
-              {
-                role: "system",
-                content: `Form state: ${JSON.stringify(formState().fields)}`,
-              },
-              { role: "user", content: $("#prompt").value },
-            ],
-          });
-          log("generate", { model: result.model, usage: result.usage });
-          $("#direct").textContent =
-            `${result.model}\n\n${result.message.content}`;
-        }),
-      );
-      $("#list").addEventListener(
-        "click",
-        guard(async () => {
-          const ai = await enabled();
-          const providers = await ai.providers.list();
-          const models = await ai.models.list();
-          $("#direct").textContent = JSON.stringify(
-            { providers, models },
-            null,
-            2,
-          );
-        }),
-      );
-      $("#open").addEventListener("click", () => window.ai.arjunah.chat.open());
-      $("#reset").addEventListener("click", () => {
-        for (const id of FIELDS) {
-          const el = document.getElementById(id);
-          if (el.type === "checkbox") el.checked = false;
-          else if (el.tagName === "SELECT") el.selectedIndex = 0;
-          else el.value = id === "budget" ? "1500" : "";
-        }
-        stops.length = 0;
-        renderStops();
-        $("#booking").hidden = true;
-        log("reset", "");
-      });
-      $("#book").addEventListener("click", () => {
-        const errors = validate();
-        $("#booking").hidden = false;
-        $("#booking").textContent = errors.length
-          ? `Cannot book yet:\n- ${errors.join("\n- ")}`
-          : `Booked! Reference RN-${Math.random().toString(36).slice(2, 8).toUpperCase()} for ${fieldValue("travellers")} traveller(s) to ${fieldValue("destination")}, ${fieldValue("class")} class, ${stops.length} stop(s).`;
-        log("book", errors.length ? { errors } : "ok");
-      });
-      for (const id of FIELDS)
-        document
-          .getElementById(id)
-          .addEventListener("change", () => log(`field ${id}`, fieldValue(id)));
-
-      renderStops();
-      if (window.ai?.arjunah) register();
-      else {
-        window.addEventListener("arjunah:ready", register, { once: true });
-        setTimeout(() => {
-          if (!window.ai?.arjunah) register();
-        }, 1500);
-      }
-    </script>
   </body>
 </html>

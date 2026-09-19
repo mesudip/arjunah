@@ -2,6 +2,11 @@ const token = document.querySelector('meta[name="dashboard-token"]').content;
 const $ = (selector) => document.querySelector(selector);
 let state = null;
 let editing = false;
+let refreshInFlight = null;
+let refreshQueued = false;
+let forceQueued = false;
+let eventSocket = null;
+let reconnectDelay = 500;
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -189,6 +194,14 @@ function render() {
   // Keep a half-typed binary path intact across the periodic refresh.
   const typingPath = providers.contains(document.activeElement);
   if (!typingPath) providers.replaceChildren();
+  if (!typingPath && state.providersRefreshing && !state.providers.length)
+    providers.append(
+      text(
+        "p",
+        "Checking Claude Code, Codex, and OpenCode… Results will appear here automatically.",
+        "empty",
+      ),
+    );
   for (const provider of typingPath ? [] : state.providers) {
     const row = document.createElement("div");
     row.className = `row provider ${provider.available ? "ok" : "off"}`;
@@ -211,7 +224,11 @@ function render() {
     row.append(body);
     providers.append(row);
   }
-  if (!typingPath && !state.providers.some((provider) => provider.available))
+  if (
+    !typingPath &&
+    !state.providersRefreshing &&
+    !state.providers.some((provider) => provider.available)
+  )
     providers.append(
       rich(
         "p",
@@ -253,12 +270,60 @@ function render() {
 }
 
 async function refresh(force = false) {
-  try {
-    state = await api(`/api/dashboard/state${force ? "?refresh=1" : ""}`);
-    render();
-  } catch (error) {
-    $("#subtitle").textContent = error.message;
+  if (refreshInFlight) {
+    refreshQueued = true;
+    forceQueued ||= force;
+    return refreshInFlight;
   }
+  do {
+    const runForce = force || forceQueued;
+    force = false;
+    refreshQueued = false;
+    forceQueued = false;
+    refreshInFlight = (async () => {
+      try {
+        state = await api(
+          `/api/dashboard/state${runForce ? "?refresh=1" : ""}`,
+        );
+        render();
+      } catch (error) {
+        $("#subtitle").textContent = error.message;
+      }
+    })();
+    try {
+      await refreshInFlight;
+    } finally {
+      refreshInFlight = null;
+    }
+  } while (refreshQueued);
+}
+
+function connectEvents() {
+  eventSocket?.close();
+  const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+  eventSocket = new WebSocket(
+    `${scheme}//${location.host}/api/events`,
+    `arjunah.v1.dashboard.${token}`,
+  );
+  eventSocket.addEventListener("open", () => {
+    reconnectDelay = 500;
+  });
+  eventSocket.addEventListener("message", (event) => {
+    try {
+      const message = JSON.parse(event.data);
+      if (
+        ["hello", "state.changed"].includes(message.type) &&
+        message.revision >= (state?.eventsRevision ?? -1)
+      )
+        void refresh();
+    } catch {
+      /* ignore malformed events and wait for the next revision */
+    }
+  });
+  eventSocket.addEventListener("close", () => {
+    setTimeout(connectEvents, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 15_000);
+  });
 }
 
 $("#recheck").addEventListener("click", async (event) => {
@@ -364,4 +429,4 @@ $("#config-form").addEventListener("submit", async (event) => {
   refresh();
 });
 refresh();
-setInterval(refresh, 3000);
+connectEvents();

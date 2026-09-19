@@ -9,7 +9,8 @@ Names: everything a person sees says अर्जुनः; code, packages, and 
 - [Integration guide](docs/INTEGRATION.md): the API on one screen, level choice, manifest bounds, generate request and result, error codes, traps, how to verify locally. Start here.
 - [SDK types](packages/sdk/src/types.ts): every request and result shape, with the limits in doc comments.
 - [SDK entry point](packages/sdk/src/index.ts): the helpers the arjunah package exports.
-- [Playground](demo/index.html): a complete level 0, 1, and 2 integration to copy from.
+- [Paint playground](demo/paint/index.html): the primary level-0 example, including structured text/image tool results.
+- [Trip planner](demo/trip-planner/index.html): the original level 0, 1, and 2 integration.
 - [Test fixture](tests/fixtures/site.html): minimal registrations used by the browser suites.
 
 ## Protocol

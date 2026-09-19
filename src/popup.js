@@ -11,6 +11,9 @@ let origin = null;
 let catalog = null; // catalog.get: providers with account details, global default
 let site = null; // site.get: this origin's grant and settings
 let pageStatus = null; // content-script status: registered assistant, open state
+let statePort = null;
+let liveRefreshTimer = null;
+let siteLoadRequest = 0;
 
 // The popup never hosts its own chat. It is the wallet view: providers, the
 // global default, and what the current site may use. Chat happens on the page.
@@ -33,6 +36,7 @@ withTab((tab) => {
       "This browser page cannot implement the अर्जुनः protocol.";
     origin = null;
     loadSite();
+    connectStateStream();
     return;
   }
   chrome.tabs.sendMessage(
@@ -48,6 +52,7 @@ withTab((tab) => {
     },
   );
   loadSite();
+  connectStateStream();
 });
 toggleSite.addEventListener("click", () =>
   openSite(pageStatus?.open ? "toggle" : "open"),
@@ -96,6 +101,20 @@ function runtime(method, params = {}) {
       resolve(reply.result);
     }),
   );
+}
+function connectStateStream() {
+  if (statePort) return;
+  const port = chrome.runtime.connect({ name: "arjunah-state" });
+  statePort = port;
+  port.onMessage.addListener((message) => {
+    if (message?.kind !== "arjunah-state") return;
+    clearTimeout(liveRefreshTimer);
+    liveRefreshTimer = setTimeout(() => void loadSite(), 50);
+  });
+  port.onDisconnect.addListener(() => {
+    if (statePort === port) statePort = null;
+    setTimeout(connectStateStream, 500);
+  });
 }
 function element(tag, text, className) {
   const node = document.createElement(tag);
@@ -392,13 +411,21 @@ defaultModel.addEventListener("change", async () => {
 });
 
 async function loadSite() {
+  const request = ++siteLoadRequest;
+  let nextCatalog;
+  let nextSite;
   try {
-    catalog = await runtime("catalog.get");
-    site = origin ? await runtime("site.get", { origin }) : null;
+    nextCatalog = await runtime("catalog.get");
+    nextSite = origin ? await runtime("site.get", { origin }) : null;
   } catch (error) {
-    catalog = catalog ?? { providers: [], defaultModel: null };
+    nextCatalog ??= catalog ?? { providers: [], defaultModel: null };
+    nextSite = site;
+    if (request !== siteLoadRequest) return;
     note.textContent = error.message;
   }
+  if (request !== siteLoadRequest) return;
+  catalog = nextCatalog;
+  site = nextSite;
   renderProviders();
   renderSite();
 }

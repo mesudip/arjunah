@@ -22,6 +22,8 @@ From a checkout, `npm run desktop` and `npm run desktop:providers` do the same a
 3. Detected providers appear under **Providers and default model** with their sign-in state, account, plan, local usage, and quota status. Pick the global default model. The toolbar popup is the wallet view: every provider with its account and usage, the global default, and, on a connected page, that site's access level, its model, the providers it may list, and revoke/open controls. Consent dialogs let you choose the model for that site and say which provider receives requests.
 4. Anything you save in the extension (API key, model, active provider) syncs to the app and to other paired browsers; edits on the dashboard sync back.
 
+The companion keeps one authenticated loopback WebSocket open to each paired extension and to the dashboard. It sends only revisioned “state changed” notices; after every notice or reconnect, the receiver fetches a fresh authoritative snapshot. Provider sign-in, enablement, model, quota, pairing, and configuration changes therefore update the popup, settings, and open page widgets without per-view polling. Slow CLI discovery runs centrally in the companion, so the dashboard renders its pairing controls immediately and fills provider cards when discovery completes.
+
 Data lives in one file, `desktop.json`, created with mode 0600 under the OS application-support folder (`~/Library/Application Support/arjunah` on macOS, `%APPDATA%\arjunah` on Windows, `$XDG_CONFIG_HOME/arjunah` or `~/.config/arjunah` on Linux). `ARJUNAH_DESKTOP_HOME` moves it; `ARJUNAH_DESKTOP_PORT` changes the port.
 
 ## How agents run

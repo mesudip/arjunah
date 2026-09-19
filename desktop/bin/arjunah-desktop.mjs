@@ -107,7 +107,7 @@ if (process.argv.includes("--open")) {
     process.platform === "win32" ? ["/c", "start", "", dashboard] : [dashboard];
   spawn(opener, args, { stdio: "ignore", detached: true }).unref();
 }
-detectProviders(store.settings).then((providers) => {
+app.providers().then((providers) => {
   for (const item of providers)
     console.log(
       `${item.available ? "✔" : "✘"} ${item.name}: ${item.available ? `available${describeConnection(item)}` : item.reason}`,

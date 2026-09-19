@@ -5,6 +5,7 @@ import {
   validateGenerateRequest,
   validateMcpServer,
   validateSiteManifest,
+  validateSiteToolResult,
   validateControlValues,
   providerOrigin,
 } from "../src/lib/validation.js";
@@ -194,6 +195,108 @@ test("site tools may declare broker-collected scalar inputs", () => {
         ],
       }),
     );
+});
+
+test("site tool content results are declared, bounded, and retain a text fallback", () => {
+  const image = {
+    type: "image",
+    mediaType: "image/webp",
+    data: "UklGRg==",
+  };
+  assert.deepEqual(
+    validateSiteToolResult(
+      {
+        kind: "content",
+        content: [{ type: "text", text: "A small blue circle." }, image],
+      },
+      ["text", "image"],
+    ).content[1],
+    image,
+  );
+  assert.throws(
+    () =>
+      validateSiteToolResult({ kind: "content", content: [image] }, ["image"]),
+    /text fallback/,
+  );
+  assert.throws(
+    () =>
+      validateSiteToolResult(
+        {
+          kind: "content",
+          content: [{ type: "text", text: "  " }, image],
+        },
+        ["text", "image"],
+      ),
+    /non-empty text fallback/,
+  );
+  assert.throws(
+    () =>
+      validateSiteToolResult(
+        { kind: "content", content: [{ type: "text", text: "ok" }, image] },
+        ["text"],
+      ),
+    /undeclared/,
+  );
+  assert.throws(
+    () =>
+      validateSiteToolResult(
+        {
+          kind: "content",
+          content: [
+            { type: "text", text: "fallback" },
+            { type: "image", mediaType: "image/svg+xml", data: "PHN2Zz4=" },
+          ],
+        },
+        ["text", "image"],
+      ),
+    /supported image type/,
+  );
+  assert.throws(
+    () =>
+      validateSiteToolResult(
+        {
+          kind: "content",
+          content: Array.from({ length: 9 }, () => ({
+            type: "text",
+            text: "part",
+          })),
+        },
+        ["text"],
+      ),
+    /1 to 8 parts/,
+  );
+  assert.throws(() => validateSiteToolResult("x".repeat(65_537)), /too large/);
+  assert.equal(validateSiteToolResult({ legacy: true }).legacy, true);
+});
+
+test("tool output modes are normalized into the fingerprinted site contract", () => {
+  const manifest = validateSiteManifest({
+    name: "Canvas",
+    tools: [
+      {
+        name: "look",
+        outputContent: ["text", "image"],
+        inputSchema: { type: "object", additionalProperties: false },
+      },
+    ],
+  });
+  assert.deepEqual(manifest.tools[0].outputContent, ["text", "image"]);
+  assert.throws(
+    () =>
+      validateSiteManifest({
+        name: "Canvas",
+        tools: [{ name: "look", outputContent: ["image", "image"] }],
+      }),
+    /unique/,
+  );
+  assert.throws(
+    () =>
+      validateSiteManifest({
+        name: "Canvas",
+        tools: [{ name: "look", outputContent: ["image"] }],
+      }),
+    /text whenever image/,
+  );
 });
 
 test("provider endpoints require TLS except loopback", () => {

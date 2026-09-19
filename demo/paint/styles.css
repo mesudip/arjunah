@@ -1,0 +1,216 @@
+:root {
+  font:
+    14px/1.35 "Segoe UI",
+    Tahoma,
+    sans-serif;
+  color: #171923;
+  background: #d7d9df;
+  --blue: #3157c8;
+  --edge: #7f8592;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+}
+.titlebar {
+  min-height: 38px;
+  padding: 7px 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: white;
+  background: linear-gradient(90deg, #153a9a, #3878de);
+}
+.titlebar a {
+  color: white;
+  text-decoration: none;
+  font-size: 20px;
+}
+.titlebar span {
+  margin-left: auto;
+  font-size: 12px;
+}
+.menu {
+  padding: 6px;
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  background: #eceef2;
+  border-bottom: 1px solid var(--edge);
+}
+button,
+select {
+  font: inherit;
+  border: 1px solid #858b98;
+  border-radius: 3px;
+  background: linear-gradient(#fff, #dfe2e8);
+  padding: 6px 10px;
+  cursor: pointer;
+}
+button:hover {
+  background: #fff;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.menu .ai {
+  margin-left: auto;
+  background: linear-gradient(#fff7cf, #ffcf5b);
+  font-weight: 700;
+}
+main {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr) 220px;
+}
+.toolbox,
+.objects {
+  padding: 8px;
+  background: #e8e9ed;
+  border-right: 1px solid var(--edge);
+  overflow: auto;
+}
+.toolbox {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-content: start;
+  gap: 5px;
+}
+.toolbox button {
+  min-height: 58px;
+  padding: 5px;
+  display: grid;
+  place-items: center;
+  font-size: 22px;
+}
+.toolbox button span {
+  font-size: 10px;
+}
+.toolbox button.active {
+  background: #c7d7ff;
+  outline: 2px solid var(--blue);
+}
+.size {
+  grid-column: 1/-1;
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+}
+.workspace {
+  min-width: 0;
+  padding: 14px;
+  overflow: auto;
+  background: #9da1aa;
+}
+.canvas-wrap {
+  width: max-content;
+  padding: 3px;
+  background: #696d76;
+  box-shadow: 5px 5px 0 #6f737b;
+}
+canvas {
+  display: block;
+  width: min(960px, calc(100vw - 370px));
+  height: auto;
+  aspect-ratio: 8/5;
+  background: white;
+  cursor: crosshair;
+  touch-action: none;
+  image-rendering: auto;
+}
+canvas[data-tool="select"] {
+  cursor: default;
+}
+canvas[data-tool="eyedropper"] {
+  cursor: copy;
+}
+.palette {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+.swatch {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 2px solid white;
+  outline: 1px solid #555;
+}
+.swatch.selected {
+  outline: 3px solid #111;
+}
+.custom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  color: white;
+}
+.objects {
+  border-left: 1px solid var(--edge);
+  border-right: 0;
+}
+.objects h2 {
+  font-size: 15px;
+  margin: 0 0 4px;
+}
+.objects h2 span {
+  font-weight: 400;
+}
+.objects p {
+  font-size: 11px;
+  color: #5e6470;
+}
+.objects ol {
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+}
+.objects li button {
+  width: 100%;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.objects li button.active {
+  background: #c7d7ff;
+}
+footer {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 9px;
+  border-top: 1px solid var(--edge);
+  background: #eceef2;
+  font-size: 12px;
+}
+footer .problem {
+  color: #a31414;
+  font-weight: 600;
+}
+@media (max-width: 760px) {
+  main {
+    grid-template-columns: 76px 1fr;
+  }
+  .objects {
+    grid-column: 1/-1;
+    border-top: 1px solid var(--edge);
+  }
+  canvas {
+    width: calc(100vw - 120px);
+  }
+  .menu .ai {
+    margin-left: 0;
+  }
+  .titlebar span {
+    display: none;
+  }
+}

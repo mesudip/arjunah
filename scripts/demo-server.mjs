@@ -1,5 +1,7 @@
 // Serves the playground pages over loopback HTTP so the extension can inject window.ai.arjunah.
-//   npm run demo            → http://127.0.0.1:8090/        (trip planner with six site tools)
+//   npm run demo            → http://127.0.0.1:8090/        (playground landing page)
+//   http://127.0.0.1:8090/paint/         (level-0 Paint playground)
+//   http://127.0.0.1:8090/trip-planner/  (original trip planner)
 //   http://127.0.0.1:8090/lab/  (the minimal Assistant Protocol Lab sample)
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
@@ -13,6 +15,7 @@ const types = {
   ".css": "text/css; charset=utf-8",
   ".png": "image/png",
   ".svg": "image/svg+xml",
+  ".webp": "image/webp",
 };
 
 const server = createServer(async (request, response) => {
@@ -39,6 +42,8 @@ const server = createServer(async (request, response) => {
 });
 server.listen(port, "127.0.0.1", () => {
   console.log(`अर्जुनः playground: http://127.0.0.1:${port}/`);
+  console.log(`Paint:            http://127.0.0.1:${port}/paint/`);
+  console.log(`Trip planner:     http://127.0.0.1:${port}/trip-planner/`);
   console.log(`Sample site:      http://127.0.0.1:${port}/lab/`);
   console.log(
     "Load the extension from src/ (or dist/chrome-unpacked) first, then open the page.",

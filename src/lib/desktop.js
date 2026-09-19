@@ -34,6 +34,16 @@ export function desktopOrigin(input) {
   return url.origin;
 }
 
+/** Authenticated invalidation stream; the bearer stays in the WebSocket subprotocol, never the URL. */
+export function desktopEventConnection(link) {
+  const token = String(link?.token ?? "");
+  if (!/^[A-Za-z0-9_-]{20,200}$/.test(token)) return null;
+  return {
+    url: `${desktopOrigin(link.baseUrl).replace(/^http:/, "ws:")}/api/events`,
+    protocol: `arjunah.v1.client.${token}`,
+  };
+}
+
 async function desktopFetch(link, path, init = {}) {
   const headers = { ...(init.headers ?? {}) };
   if (link.token) headers.Authorization = `Bearer ${link.token}`;

@@ -183,6 +183,16 @@ try {
     ),
   );
   await new Promise((wait) => setTimeout(wait, 1100));
+  assert.match(
+    await settings.$eval("#desktop-state", (el) => el.textContent),
+    /Incorrect pairing code/,
+    "a concurrent status refresh does not replace the pairing result",
+  );
+  assert.equal(
+    await settings.$eval("#desktop-url", (el) => el.value),
+    desktopUrl,
+    "status refreshes preserve a custom desktop address before pairing",
+  );
   await settings.$eval("#desktop-code", (el) => (el.value = ""));
   await settings.type("#desktop-code", desktop.pairing.current().code);
   await settings.click("#pair");

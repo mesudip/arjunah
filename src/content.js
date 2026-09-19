@@ -40,6 +40,9 @@
   let conversationId = crypto.randomUUID(); // one agent thread per panel conversation
   let reasoningEffort = ""; // "" = provider default
   let thinkSelect;
+  let statePort = null;
+  let stateRefreshTimer = null;
+  let settingsRequest = 0;
 
   const script = document.createElement("script");
   script.src = chrome.runtime.getURL("page-api.js");
@@ -69,6 +72,24 @@
       ),
     );
   }
+  function connectStateStream() {
+    if (!alive || statePort) return;
+    try {
+      const port = chrome.runtime.connect({ name: "arjunah-state" });
+      statePort = port;
+      port.onMessage.addListener((message) => {
+        if (message?.kind !== "arjunah-state") return;
+        clearTimeout(stateRefreshTimer);
+        stateRefreshTimer = setTimeout(() => void refreshSettings(), 50);
+      });
+      port.onDisconnect.addListener(() => {
+        if (statePort === port) statePort = null;
+        if (alive) setTimeout(connectStateStream, 500);
+      });
+    } catch {
+      if (alive) setTimeout(connectStateStream, 1000);
+    }
+  }
   function aiError(
     code = "INTERNAL_ERROR",
     message = "The AI request failed.",
@@ -90,6 +111,51 @@
       },
       "*",
     );
+  }
+  function validToolResult(value, outputContent = []) {
+    let encoded;
+    try {
+      encoded = JSON.stringify(value);
+    } catch {
+      return false;
+    }
+    if (encoded === undefined) return false;
+    if (!outputContent.length)
+      return new TextEncoder().encode(encoded).byteLength <= 65536;
+    if (
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      value.kind !== "content" ||
+      !Array.isArray(value.content) ||
+      !value.content.length ||
+      value.content.length > 8
+    )
+      return false;
+    let images = 0;
+    let text = false;
+    for (const part of value.content) {
+      if (part?.type === "text") {
+        if (
+          !outputContent.includes("text") ||
+          typeof part.text !== "string" ||
+          part.text.length > 12000
+        )
+          return false;
+        text ||= part.text.trim().length > 0;
+      } else if (part?.type === "image") {
+        if (
+          !outputContent.includes("image") ||
+          ++images > 4 ||
+          !IMAGE_TYPES.includes(part.mediaType) ||
+          typeof part.data !== "string" ||
+          part.data.length > 2000000 ||
+          !/^[A-Za-z0-9+/]+={0,2}$/.test(part.data)
+        )
+          return false;
+      } else return false;
+    }
+    return !images || text;
   }
   function respond(id, ok, value) {
     toPage({
@@ -122,7 +188,7 @@
       if (!pending) return;
       clearTimeout(pending.timer);
       toolPending.delete(data.id);
-      data.ok
+      data.ok && validToolResult(data.result, pending.outputContent)
         ? pending.resolve(data.result)
         : pending.reject(
             aiError("TOOL_ERROR", data.error?.message ?? "Site tool failed."),
@@ -279,15 +345,19 @@
   }
   window.addEventListener("pagehide", () => {
     alive = false;
+    statePort?.disconnect();
+    statePort = null;
     cancelSession();
   });
   window.addEventListener("pageshow", () => {
     alive = true;
+    connectStateStream();
   });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && panel && !panel.hidden)
       void refreshSettings();
   });
+  connectStateStream();
 
   function assertRegistration(contract) {
     if (!alive || (contract && registration !== contract))
@@ -865,11 +935,16 @@
   }
 
   async function refreshSettings() {
+    const request = ++settingsRequest;
+    let next;
     try {
-      settings = await runtime("hosted.settings");
+      next = await runtime("hosted.settings");
     } catch {
-      settings = null;
+      next = null;
     }
+    if (request !== settingsRequest) return;
+    settings = next;
+    if (!root) return;
     renderModelSelect();
     renderStatus();
     renderSetup();
@@ -2075,6 +2150,13 @@
                         .join("\n"),
                   ]
                 : []),
+              ...(tool.outputContent?.length
+                ? [
+                    tool.outputContent.includes("image")
+                      ? "\nReturns structured text and an image that may be sent to the selected vision model. The text is always used as the non-vision fallback."
+                      : "\nReturns structured text.",
+                  ]
+                : []),
             ].join(""),
           );
         if (manifest.widget.controls.length)
@@ -2383,6 +2465,7 @@
           timer,
           name: message.name,
           userInputs: tool?.userInputs ?? [],
+          outputContent: tool?.outputContent ?? [],
           inputRequests: 0,
         });
         toPage({
@@ -2392,6 +2475,7 @@
           args: message.args,
           invocationId: message.invocationId,
           registrationId: active.id,
+          outputContent: tool?.outputContent ?? [],
           controls: { ...controls },
         });
       })

@@ -4,7 +4,7 @@
  */
 
 export interface Arjunah {
-  readonly version: "1.0.0";
+  readonly version: "1.1.0";
   /** True when this origin holds a grant at level 1 or 2. */
   isEnabled(): Promise<boolean>;
   /**
@@ -186,6 +186,12 @@ export interface AIToolDefinition {
   description?: string;
   inputSchema?: AIJSONSchema & { type?: "object" };
 }
+export type AIToolOutputKind = "text" | "image";
+export interface AISiteToolContentResult {
+  kind: "content";
+  /** Images require a text fallback for models without vision. */
+  content: Array<AITextPart | AIImagePart>;
+}
 export interface AIToolUserInput {
   /** Lowercase identifier that is deliberately absent from the model schema. */
   id: string;
@@ -200,6 +206,8 @@ export interface AIToolUserInput {
 }
 export type AIControlValues = Record<string, boolean | string>;
 export interface AISiteTool extends AIToolDefinition {
+  /** Rich result kinds this tool may return; omitted for legacy JSON results. */
+  outputContent?: AIToolOutputKind[];
   /** Inputs collected by extension UI and never included in a provider request. */
   userInputs?: AIToolUserInput[];
   handler(
@@ -210,7 +218,10 @@ export interface AISiteTool extends AIToolDefinition {
       controls: AIControlValues;
       requestInput(id: string): Promise<JSONValue>;
     },
-  ): JSONValue | Promise<JSONValue>;
+  ):
+    | JSONValue
+    | AISiteToolContentResult
+    | Promise<JSONValue | AISiteToolContentResult>;
 }
 export interface AIMcpServer {
   id: string;

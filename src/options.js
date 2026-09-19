@@ -7,6 +7,10 @@ import {
 let existing = null;
 let desktop = null;
 let catalog = null; // catalog.get: providers with usage and quota, global default
+let statePort = null;
+let liveRefreshTimer = null;
+let desktopRequest = 0;
+let pairingDesktop = false;
 // Extension pages always run the newest files, but Chrome keeps the previous
 // background service worker alive until the extension is reloaded. Requests
 // the old worker does not recognise surface as these two messages.
@@ -29,6 +33,22 @@ function runtime(method, params = {}) {
       resolve(reply.result);
     }),
   );
+}
+function connectStateStream() {
+  if (statePort) return;
+  const port = chrome.runtime.connect({ name: "arjunah-state" });
+  statePort = port;
+  port.onMessage.addListener((message) => {
+    if (message?.kind !== "arjunah-state") return;
+    clearTimeout(liveRefreshTimer);
+    liveRefreshTimer = setTimeout(() => {
+      if (!pairingDesktop) void refreshDesktop();
+    }, 50);
+  });
+  port.onDisconnect.addListener(() => {
+    if (statePort === port) statePort = null;
+    setTimeout(connectStateStream, 500);
+  });
 }
 // Render a sentence, turning `backtick` spans into <code> elements.
 function rich(tag, content, className) {
@@ -507,14 +527,17 @@ function desktopProblem() {
 }
 function renderDesktop() {
   const link = $("#dashboard-link");
-  link.href = `${desktop?.baseUrl ?? "http://127.0.0.1:48123"}/`;
-  if (desktop?.baseUrl) $("#desktop-url").value = desktop.baseUrl;
+  const address = $("#desktop-url");
+  // Status refreshes probe the saved/default address. Until pairing succeeds,
+  // they must not overwrite a custom loopback address the user is entering.
+  if (desktop?.paired && desktop.baseUrl) address.value = desktop.baseUrl;
+  link.href = `${desktop?.paired ? desktop.baseUrl : address.value || "http://127.0.0.1:48123"}/`;
   $("#unpair").hidden = !desktop?.paired;
   $("#pair").hidden = Boolean(desktop?.paired && desktop?.accepted);
   $("#desktop-code").closest("label").hidden = Boolean(
     desktop?.paired && desktop?.accepted,
   );
-  $("#desktop-url").readOnly = Boolean(desktop?.paired);
+  address.readOnly = Boolean(desktop?.paired);
   let text;
   if (!desktop) text = "Checking the desktop app…";
   else if (!desktop.running)
@@ -540,12 +563,18 @@ function renderDesktop() {
   );
 }
 async function refreshDesktop(refresh = false) {
+  if (pairingDesktop) return;
+  const request = ++desktopRequest;
+  let nextDesktop;
   try {
-    desktop = await runtime("desktop.status", { refresh });
+    nextDesktop = await runtime("desktop.status", { refresh });
   } catch (error) {
-    desktop = { running: false, paired: false, error: error.message };
+    nextDesktop = { running: false, paired: false, error: error.message };
   }
-  catalog = await runtime("catalog.get").catch(() => catalog);
+  const nextCatalog = await runtime("catalog.get").catch(() => catalog);
+  if (request !== desktopRequest) return;
+  desktop = nextDesktop;
+  catalog = nextCatalog;
   renderDesktop();
   renderProviders();
   refreshGrants().catch(() => {});
@@ -562,9 +591,7 @@ refreshKeyControl();
 renderProviders();
 await refreshGrants();
 refreshDesktop();
-setInterval(() => {
-  if (document.visibilityState === "visible") refreshDesktop();
-}, 15000);
+connectStateStream();
 $("#base-url").addEventListener("input", refreshKeyControl);
 $("#keep-key").addEventListener("change", refreshKeyControl);
 $("#provider-form").addEventListener("submit", async (event) => {
@@ -627,6 +654,9 @@ $("#clear-grants").addEventListener("click", async () => {
 });
 $("#pair-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  pairingDesktop = true;
+  clearTimeout(liveRefreshTimer);
+  desktopRequest++;
   status("#desktop-state", "Pairing…");
   try {
     desktop = await runtime("desktop.pair", {
@@ -642,6 +672,8 @@ $("#pair-form").addEventListener("submit", async (event) => {
     renderProviders();
   } catch (error) {
     status("#desktop-state", error.message, true);
+  } finally {
+    pairingDesktop = false;
   }
 });
 $("#unpair").addEventListener("click", async () => {

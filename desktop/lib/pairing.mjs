@@ -6,6 +6,7 @@ const MAX_FAILURES = 5;
 export class Pairing {
   constructor(onChange = () => {}) {
     this.onChange = onChange;
+    this.listeners = new Set();
     this.failures = 0;
     this.lastAttempt = 0;
     this.rotate();
@@ -15,7 +16,12 @@ export class Pairing {
     this.expires = Date.now() + CODE_TTL_MS;
     this.failures = 0;
     this.onChange(this.code);
+    for (const listener of this.listeners) listener(this.code);
     return this.code;
+  }
+  subscribe(listener) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   }
   current() {
     if (Date.now() > this.expires) this.rotate();

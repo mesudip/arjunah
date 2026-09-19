@@ -149,6 +149,59 @@ test("pairing requires the current code, issues a hashed token, and can be revok
   assert.equal((await call("/api/providers", { headers })).status, 401);
 });
 
+test("authenticated websocket events carry revisions and invalidate changed desktop state", async (t) => {
+  const { call, instance, base } = await app(t);
+  const paired = await call("/api/pair", {
+    method: "POST",
+    body: {
+      code: instance.pairing.current().code,
+      client: { name: "Live browser", browser: "test" },
+    },
+  });
+  assert.equal(paired.status, 200);
+  const socket = new WebSocket(
+    `${base.replace(/^http:/, "ws:")}/api/events`,
+    `arjunah.v1.client.${paired.body.token}`,
+  );
+  t.after(() => socket.close());
+  const messages = [];
+  const waiters = [];
+  socket.addEventListener("message", (event) => {
+    const message = JSON.parse(event.data);
+    const waiter = waiters.shift();
+    if (waiter) waiter(message);
+    else messages.push(message);
+  });
+  const nextMessage = () =>
+    messages.length
+      ? Promise.resolve(messages.shift())
+      : new Promise((resolve) => waiters.push(resolve));
+  const helloPromise = nextMessage();
+  await new Promise((resolve, reject) => {
+    socket.addEventListener("open", resolve, { once: true });
+    socket.addEventListener("error", reject, { once: true });
+  });
+  const hello = await helloPromise;
+  assert.equal(hello.type, "hello");
+  assert.ok(Number.isInteger(hello.revision));
+
+  const changedPromise = (async () => {
+    for (;;) {
+      const message = await nextMessage();
+      if (message.type === "state.changed" && message.topic === "sync")
+        return message;
+    }
+  })();
+  const synced = await call("/api/sync", {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${paired.body.token}` },
+    body: { config: { active: { type: "openai" } } },
+  });
+  assert.equal(synced.status, 200);
+  const changed = await changedPromise;
+  assert.ok(changed.revision > hello.revision);
+});
+
 test("sync stores browser configuration with increasing revisions and masks keys on the dashboard", async (t) => {
   const { call, pair, instance, base } = await app(t);
   const headers = await pair();

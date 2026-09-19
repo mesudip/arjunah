@@ -2,18 +2,19 @@
 
 > अर्जुनः कृष्णं पश्यति। — Arjuna sees Krishna.
 
-**अर्जुनः has seen the divine form, the AI and the human, so your website never has to.** अर्जुनः (romanized _Arjunah_) is a browser extension and an open protocol that let a website use the AI its visitor already has. Think of it as a wallet for AI access: a site starts with the least access and asks for more, the visitor decides which provider and model answer, and the site never sees a credential, an account, or a quota.
+अर्जुनः has seen the divine form, the AI and the human, so your website never has to. अर्जुनः (romanized _Arjunah_) is a browser extension and an open protocol that let a website use the AI its visitor already has.
+
+**Think of it as a wallet for AI access: a site starts with the least access and asks for more, the visitor decides which provider and model answer, and the site never sees a credential, an account, or a quota.**
 
 - **Visitors** install the extension once and bring an OpenAI API key, or pair the desktop app to lend their Claude Code, Codex, or OpenCode subscription to websites.
 - **Websites** either publish an assistant contract and let the extension host the chat, or call `enable()` and get completions from the visitor's chosen model.
 
-Everything a person sees says अर्जुनः; code, packages, and identifiers use `arjunah`.
 
 ## Install the extension
 
 Download the latest build from [GitHub releases](../../releases): `arjunah-chrome-<version>.zip` for Chrome, Brave, and Edge, or `arjunah-firefox-<version>.xpi` for Firefox. Unzip the Chrome build, open `chrome://extensions`, turn on Developer mode, choose **Load unpacked**, and select the folder. Then open the extension's settings and enter an OpenAI API key, or pair the desktop app below.
 
-Step-by-step instructions, Firefox notes, and updating are in [docs/INSTALL.md](docs/INSTALL.md). This is a 1.0.0-alpha: store listings and signed builds come with the first stable release.
+Step-by-step instructions, Firefox notes, and updating are in [docs/INSTALL.md](docs/INSTALL.md). This is a 1.1.0 alpha: store listings and signed builds come with the first stable release.
 
 ## Install the desktop app (optional)
 
@@ -58,7 +59,7 @@ const { message } = await ai.models.generate({
 });
 ```
 
-Read [docs/INTEGRATION.md](docs/INTEGRATION.md) for the whole API on one screen, the three access levels, request bounds, error codes, and the traps. The normative contract is [SPEC.md](SPEC.md); the SDK's types are in [packages/sdk/src/types.ts](packages/sdk/src/types.ts). A complete integration to copy from runs with `npm run demo` at <http://127.0.0.1:8090/>.
+Read [docs/INTEGRATION.md](docs/INTEGRATION.md) for the whole API on one screen, the three access levels, request bounds, error codes, and the traps. The normative contract is [SPEC.md](SPEC.md); the SDK's types are in [packages/sdk/src/types.ts](packages/sdk/src/types.ts). The [hosted playgrounds](https://mesudip.github.io/arjunah/) feature a level-0 Paint studio and preserve the original trip planner; both also run locally with `npm run demo`.
 
 **Using an AI coding assistant?** Point it at [llms.txt](llms.txt), which links the integration guide, the types, and the spec in the order an agent should read them.
 
@@ -83,6 +84,6 @@ The repository is an npm workspace: the extension in `src/`, the `arjunah` SDK i
 
 ## Status
 
-1.0.0-alpha. Chrome Manifest V3 and Firefox Manifest V3 are tested targets; the desktop app has been exercised on macOS with OpenCode, Codex, and Claude Code and on the fake-agent end-to-end suite. Linux and Windows autostart are implemented and unit-tested but not yet exercised on real machines. This is not an independent security certification; see [docs/REMEDIATION.md](docs/REMEDIATION.md) for the audit findings and their regression tests.
+1.1.0-alpha. Chrome Manifest V3 and Firefox Manifest V3 are tested targets; the desktop app has been exercised on macOS with OpenCode, Codex, and Claude Code and on the fake-agent end-to-end suite. Linux and Windows autostart are implemented and unit-tested but not yet exercised on real machines. This is not an independent security certification; see [docs/REMEDIATION.md](docs/REMEDIATION.md) for the audit findings and their regression tests.
 
 License: MIT.

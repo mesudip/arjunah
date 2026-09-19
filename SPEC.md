@@ -1,6 +1,6 @@
 # अर्जुनः Protocol
 
-Version: **1.0.0-alpha**
+Version: **1.1.0-alpha**
 
 Status: **Implemented draft with a bounded schema subset, tiered site access, extension-collected tool inputs, and an optional desktop companion**
 License: MIT
@@ -55,7 +55,7 @@ interface AINamespace {
 }
 
 interface Arjunah {
-  readonly attribute DOMString version; // "1.0.0"
+  readonly attribute DOMString version; // "1.1.0"
   Promise<boolean> isEnabled();
   Promise<Session> enable(optional AccessRequest request = {});
   Promise<boolean> disable();
@@ -78,7 +78,7 @@ Feature detection MUST use members, not version string comparison. Unknown input
 
 If `window.ai.arjunah` already exists, or `window.ai` exists but is not an extensible object, the extension MUST NOT overwrite either. It SHOULD dispatch `arjunah:conflict` on `window`.
 
-After successful installation of the object, the extension SHOULD dispatch `arjunah:ready` on `window`; its `detail` is `{ "version": "1.0.0" }`. Pages MUST still check `window.ai.arjunah` first so they work when injection precedes their event listener.
+After successful installation of the object, the extension SHOULD dispatch `arjunah:ready` on `window`; its `detail` is `{ "version": "1.1.0" }`. Pages MUST still check `window.ai.arjunah` first so they work when injection precedes their event listener.
 
 ## 4. Access levels, capabilities, and consent
 
@@ -232,13 +232,17 @@ Manifest fields:
 - `description` (optional, up to 280 characters)
 - `systemPrompt` (optional, up to 12,000 characters; disclosed during hosted-chat consent)
 - `widget` (optional): see section 7.2.
-- `tools` (optional): up to 32 `{ name, description, inputSchema, userInputs?, handler }` values. Names match `^[A-Za-z0-9_-]{1,64}$`; `handler(args, invocation)` is async or sync. `invocation` is `{ id, name, controls, requestInput(id) }` where `controls` is the current widget control state (section 7.2) and `requestInput` follows section 7.3.
+- `tools` (optional): up to 32 `{ name, description, inputSchema, outputContent?, userInputs?, handler }` values. Names match `^[A-Za-z0-9_-]{1,64}$`; `handler(args, invocation)` is async or sync. `invocation` is `{ id, name, controls, requestInput(id) }` where `controls` is the current widget control state (section 7.2) and `requestInput` follows section 7.3.
 - `mcpServers` (optional): up to 8 descriptors `{ id, name, url, headers? }`. URL MUST be HTTPS, except loopback HTTP for development. URL credentials and fragments are forbidden.
 - `onControlChange(id, value, values)` (optional, local function): called when the user changes a widget control.
 
 At most one active registration exists per page. A later successful registration replaces it and clears the prior hosted-chat history. The extension MUST fingerprint the validated contract, including widget controls; a new fingerprint requires redisclosure before use. The extension MAY show a launcher when a site registers; `autoShow` opens the chat panel but MUST NOT approve capabilities or send a model request.
 
-Site tool invocations have a random id, tool name, parsed arguments, and abort-neutral metadata. Arguments MUST be JSON objects matching the declared schema; malformed JSON and schema failures MUST produce a tool error without calling the handler. Results MUST be JSON-serializable and their serialized UTF-8 representation is limited to 65,536 bytes (64 KiB). Exceptions and invalid/oversized results become safe tool error results; they do not expose extension internals. A result in flight after registration replacement or revocation MUST NOT be forwarded to the provider.
+Site tool invocations have a random id, tool name, parsed arguments, and abort-neutral metadata. Arguments MUST be JSON objects matching the declared schema; malformed JSON and schema failures MUST produce a tool error without calling the handler. When `outputContent` is absent, results MUST be JSON-serializable and their serialized UTF-8 representation is limited to 65,536 bytes (64 KiB). Exceptions and invalid/oversized results become safe tool error results; they do not expose extension internals. A result in flight after registration replacement or revocation MUST NOT be forwarded to the provider.
+
+When `outputContent` is present, it is a unique subset of `"text" | "image"` and the handler result MUST be `{ "kind": "content", "content": [...] }`. Content contains 1–8 text/image parts, no more than four images, and every returned part type MUST be declared. Text uses the ordinary 12,000-character part limit. Images use the section 5.3 MIME, base64, and 2,000,000-character limits. Every result containing an image MUST also contain text so a non-vision model receives a useful fallback.
+
+Output modes are part of the fingerprinted contract and consent disclosure. The broker appends the textual fallback as the ordinary matching `role: "tool"` message. Only when the selected model advertises `capabilities.vision`, and only after all matching tool results for that round, the broker appends user messages containing the returned images in the provider-neutral section 5.3 shape. This bridge is necessary because function outputs are textual while vision inputs are user-message image parts. Non-vision models receive only the text. Base64 data MUST NOT appear in consent activity cards, logs, errors, or progress events; those surfaces show bounded metadata such as `[image/webp, 84 KB]`. Page API, content bridge, and background broker each validate content results independently. A result in flight after registration replacement or revocation MUST NOT be forwarded to the provider.
 
 ### 7.1 Supported JSON Schema subset
 
@@ -428,9 +432,17 @@ Section 8 tool disclosure, approval, and revocation semantics are unchanged: the
 
 `GET /api/sync` and `PUT /api/sync` exchange one configuration document `{ openai: { model, apiKey } | null, active }` with a monotonically increasing `revision` maintained by the companion. `active` is the global default: `{ type: "openai" }` or `{ type: "desktop", providerId, model }`. The extension pushes after each provider save, clear, or default change and pulls when the companion reports a newer revision or when it pairs. A newly paired extension without any configuration adopts the companion's document. The companion stores the document in a user-only file (mode 0600) and shows it, with secrets masked, on the dashboard where the user can edit it; edits sync to every paired browser. Sync never includes site grants, per-site models, chat history, page context, or the usage ledger.
 
+### 12.5 Live state invalidation
+
+The companion exposes an authenticated WebSocket at `/api/events`. Browser extensions authenticate with their pairing bearer in the `arjunah.v1.client.<token>` subprotocol; the dashboard uses its ephemeral dashboard token in `arjunah.v1.dashboard.<token>`. Tokens MUST NOT appear in the URL, event payloads, or logs. The same loopback `Host` and `Origin` restrictions as section 12.1 apply.
+
+The first frame is `{ type: "hello", revision, protocol }`. Each relevant change emits `{ type: "state.changed", revision, topic }`, where `revision` increases for the lifetime of the companion process. Events are invalidations, not state: they contain no account, provider, configuration, grant, prompt, or credential data. A receiver MUST re-read the authoritative JSON API after an event and after every reconnect. This reconnect snapshot rule makes missed frames harmless. The extension relays invalidations to its popup, options page, and content scripts over extension runtime ports; the hosted widget then re-reads `hosted.settings`. Extension storage changes use the same local invalidation path.
+
+The reference companion monitors provider discovery centrally and emits when availability, sign-in, models, quota, or enabled state changes. Clients MUST NOT independently poll the full provider probes. The dashboard state endpoint MAY return a cached provider view with `providersRefreshing: true`; its pairing code and other local state MUST render without waiting for slow CLI discovery.
+
 ## 13. Conformance
 
-A conforming v0.4 extension MUST pass tests for:
+A conforming v1.1 extension MUST pass tests for:
 
 1. immutable discovery and version;
 2. exact-origin grant isolation and denial;
@@ -448,4 +460,4 @@ A conforming v0.4 extension MUST pass tests for:
 14. desktop companion pairing, provider selection, configuration sync, and bridged tool rounds through a desktop provider (section 12), when the desktop companion is implemented.
 15. extension-collected tool input declaration, disclosure, scalar validation, invocation binding, cancellation, and absence from model traffic and chat history.
 
-Extensions MAY implement additional APIs under another namespace. They MUST NOT change the semantics of the members defined here while claiming v0.4 conformance.
+Extensions MAY implement additional APIs under another namespace. They MUST NOT change the semantics of the members defined here while claiming v1.1 conformance.

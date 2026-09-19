@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { VERSION, LIMITS } from "../src/lib/constants.js";
 
 const pkg = JSON.parse(readFileSync("package.json", "utf8"));
-// npm versions may carry a prerelease tag (1.0.0-alpha.1); the protocol version does not.
+// npm versions may carry a prerelease tag (1.1.0-alpha.1); the protocol version does not.
 const release = (version) => String(version).split("-")[0];
 for (const path of [
   "package.json",

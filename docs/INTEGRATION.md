@@ -29,7 +29,7 @@ dependency for the types only.
 
 Root, window.ai.arjunah, always present once the extension is installed:
 
-version: protocol version string, currently "1.0.0". Feature-detect by members, not version.
+version: protocol version string, currently "1.1.0". Feature-detect by members, not version.
 isEnabled(): Promise<boolean>. True when this origin holds level 1 or 2 access.
 enable(request?): Promise<Session>. Asks the visitor for access and resolves to the session. No argument means level 1. Does not prompt when the access is already held. Rejects with code USER_DENIED.
 disable(): Promise<true>. Drops the origin's whole grant, including a hosted-chat grant.
@@ -81,17 +81,18 @@ Level 1 or 2, your own model calls:
 2. const { message } = await ai.models.generate({ messages: [...] }).
 3. await window.ai.arjunah.disable() when the visitor asks to disconnect.
 
-Live examples: demo/index.html (trip planner: six site tools, widget controls, level
-1 and 2 buttons) and tests/fixtures/site.html (minimal registrations used by the
-browser tests). Copy their shapes rather than inventing new ones.
+Live examples: demo/paint/ (a level-0 retained canvas with structured image tool
+results), demo/trip-planner/ (the original level 0, 1, and 2 form example), and
+tests/fixtures/site.html (minimal browser-test registrations). Copy their shapes
+rather than inventing new ones.
 
 ## Site manifest: fields and bounds
 
 name: required, 1 to 80 characters.
 description: up to 280 characters.
 systemPrompt: up to 12,000 characters. Disclosed to the visitor verbatim at consent.
-tools: up to 32 of { name, description, inputSchema, userInputs?, handler }. Names match ^[A-Za-z0-9_-]{1,64}$. inputSchema uses the JSON Schema subset in SPEC section 7.1 (object schemas with typed properties; keep them small and set additionalProperties false).
-handler(args, invocation): sync or async. invocation is { id, name, controls, requestInput(id) }. Return JSON-serialisable data, at most 64 KiB serialised; anything else becomes a tool error the model sees.
+tools: up to 32 of { name, description, inputSchema, outputContent?, userInputs?, handler }. Names match ^[A-Za-z0-9_-]{1,64}$. inputSchema uses the JSON Schema subset in SPEC section 7.1 (object schemas with typed properties; keep them small and set additionalProperties false).
+handler(args, invocation): sync or async. invocation is { id, name, controls, requestInput(id) }. Without outputContent, return JSON-serialisable data at most 64 KiB. With outputContent: ["text"] or ["text", "image"], return { kind: "content", content: [...] }; 1–8 bounded parts, at most four supported base64 images, and every image requires a text fallback. Vision models see broker-generated user image parts after all ordinary tool results in the round; other models receive only the text.
 userInputs: scalars the model must never supply (passphrase, one-time code, confirmation). Declared outside inputSchema, collected by the extension in its own labelled prompt, delivered only to your handler via await invocation.requestInput(id), never added to model messages or history. Your handler receives the value, so this protects against accidental model exposure, not against your own code. See SPEC 7.3.
 mcpServers: up to 8 { id, name, url, headers? }. HTTPS only, loopback HTTP for development. The visitor approves the server, then its discovered tool metadata, before any model call.
 widget: { autoShow, toolCallView: "compact" | "detailed", greeting (500), placeholder (80), suggestions (6 x 120), theme: { accent: "#rrggbb", mode }, controls (8) }. Controls are { id, label, type: toggle | select | button, default?, options?, model? }; values reach handlers as invocation.controls and fire onControlChange(id, value, values). Widget options never change permissions, the model, or the consent text.
@@ -156,5 +157,5 @@ PERMISSION_REQUIRED.
 ## Verify locally
 
 1. Install the extension (docs/INSTALL.md) and configure a provider in its settings.
-2. Run npm run demo in this repository and open http://127.0.0.1:8090/ to see every API path working, with an on-page event log.
+2. Run npm run demo and open http://127.0.0.1:8090/paint/ for the level-0 Paint example, or /trip-planner/ for the original all-level example.
 3. Load your own page over HTTP. In the console, await window.ai.arjunah.isEnabled() should resolve without throwing.

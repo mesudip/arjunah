@@ -147,6 +147,28 @@ function validateContent(content, name, maxChars) {
   });
 }
 
+export function validateSiteToolResult(input, outputContent = []) {
+  if (!outputContent.length) return cloneJson(input, "tool result");
+  if (!plainObject(input) || input.kind !== "content")
+    invalid(
+      'Content tool results must be { kind: "content", content: [...] }.',
+    );
+  const content = validateContent(
+    input.content,
+    "tool result content",
+    LIMITS.messageChars,
+  );
+  const kinds = new Set(content.map((part) => part.type));
+  if ([...kinds].some((kind) => !outputContent.includes(kind)))
+    invalid("The tool returned an undeclared content type.");
+  if (
+    kinds.has("image") &&
+    !content.some((part) => part.type === "text" && part.text.trim().length > 0)
+  )
+    invalid("Image tool results require a non-empty text fallback.");
+  return { kind: "content", content };
+}
+
 export function hasImages(messages) {
   return messages.some(
     (message) =>
@@ -364,6 +386,20 @@ export function validateTools(
         inputSchema,
         index,
       );
+    if (allowUserInputs) {
+      const outputContent = tool.outputContent ?? [];
+      if (
+        !Array.isArray(outputContent) ||
+        outputContent.length > 2 ||
+        new Set(outputContent).size !== outputContent.length ||
+        outputContent.some((kind) => !["text", "image"].includes(kind)) ||
+        (outputContent.includes("image") && !outputContent.includes("text"))
+      )
+        invalid(
+          `tools[${index}].outputContent must contain unique text/image values, with text whenever image is declared.`,
+        );
+      result.outputContent = outputContent;
+    }
     return result;
   });
 }
