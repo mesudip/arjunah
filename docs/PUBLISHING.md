@@ -21,6 +21,13 @@ npm publish --workspace arjunah-desktop --access public --tag alpha
 
 These commands create `arjunah@1.0.0-alpha.1` and `arjunah-desktop@1.0.0-alpha.1` under the `alpha` dist-tag. npm package versions are immutable. If the first publish succeeds and the second fails, fix the second package and publish only that workspace; do not try to republish the first version.
 
+On a package's first publication npm may also create a `latest` tag even when `--tag alpha` was supplied. Remove it while signed in interactively so plain installs do not resolve to the prerelease:
+
+```sh
+npm dist-tag rm arjunah latest
+npm dist-tag rm arjunah-desktop latest
+```
+
 Alpha users install with:
 
 ```sh
