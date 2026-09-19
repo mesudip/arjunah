@@ -1,6 +1,6 @@
 # ChatKit and machine-manager review
 
-Date: 2026-09-17
+Date: 2026-09-17 (updated 2026-09-20 for v1.2)
 
 ## Decision
 
@@ -73,8 +73,64 @@ The extension cannot enforce information-flow policy inside page JavaScript. Onc
 
 See [SPEC.md](../SPEC.md#73-extension-collected-tool-inputs) for the normative contract and [SECURITY.md](../SECURITY.md) for the trust boundary.
 
+## What v1.2 built instead
+
+The four ChatKit capabilities this project actually needed are now in the
+protocol and the implementation, each shaped to keep the wallet boundary:
+
+- **In-transcript widgets → transcript cards (SPEC 7.4).** A bounded JSON tree
+  (text, list, button, form) that a site tool returns beside its text. The
+  extension draws it; the model receives only the text. A button either sends
+  its exact declared text as a visible user turn, or fires a local callback that
+  never becomes a model message. No HTML, Markdown, links, or images, so a card
+  cannot smuggle markup into extension UI. The word _card_ is deliberate:
+  `widget` already means the panel options of SPEC 7.2.
+- **Threads and history → site-owned threads (SPEC 7.6).** Rather than growing a
+  store inside the extension, the site keeps its conversations and supplies them
+  through manifest callbacks. This answers the ownership question the plan left
+  open: the extension is the renderer and the policy boundary, not the archive.
+  Consent says the site stores the conversation, and supplied messages reach the
+  model between explicit untrusted markers.
+- **Progress → `invocation.reportProgress` (SPEC 7.5).** One ephemeral line under
+  the running tool's step, capped and never stored or sent to a model. Desktop
+  agent activity already reached the same feed.
+- **Server tools → declared remote tools (SPEC 7.7).** Instead of a second
+  transport, an `mcpServers` entry may declare its tool definitions up front. The
+  extension then skips discovery, folds the definitions into the fingerprinted
+  contract, and grants them the single-stage consent site tools get. The site's
+  backend holds the secret, the page holds only a short-lived token in `headers`,
+  and `tools/call` carries the conversation id in `params._meta`. One backend
+  definition serves both deployments, which a bespoke POST shape could not.
+
+## The renderer, without the extension
+
+ChatKit's real pull was never its protocol; it was that a site can drop in a
+finished chat surface. अर्जुनः now ships that as
+[`arjunah-widget`](../packages/widget/README.md): the extension's own renderer,
+published as an ES module and mounted against the site's backend (SPEC section
+14). The package is built from `src/renderer/core.js` with an ESM footer, and a
+static check fails the build if the published file drifts from the one the
+extension loads, so there is one renderer rather than two that resemble each
+other.
+
+Standalone mode provides none of the wallet guarantees, and the package says so
+in its README: the site's backend owns inference, tools and conversations, and it
+sees everything the visitor types. The widget never presents itself as the
+extension and never touches `window.ai.arjunah`. What the two modes share is the
+conversation surface — transcript, activity feed, cards, progress, thread panel,
+composer — driven by the same normalized event vocabulary.
+
+This is the opposite trade from loading `chatkit.js`: no vendor CDN, no domain
+key, no remote code inside a security-sensitive extension UI, and a renderer a
+site can read before shipping it.
+
 ## Future ChatKit compatibility
 
 अर्जुनः can revisit a renderer adapter if the complete renderer becomes available under an OSI-approved license, can be bundled locally, needs no vendor domain key or account, and can preserve अर्जुनः's closed consent boundary. The adapter would consume अर्जुनः's provider-neutral conversation and tool events; it would not own provider sessions, credentials, grants, or tool authorization.
 
 Until those conditions hold, matching useful ChatKit interaction patterns in the अर्जुनः-owned UI is safer than using ChatKit directly.
+
+A ChatKit **server** adapter is a smaller and more plausible step: a translator
+from the ChatKit server event stream to the section 14 vocabulary would let a site
+already running a custom ChatKit backend swap in this renderer without touching
+that backend. It is not implemented, and it would not change any boundary above.

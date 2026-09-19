@@ -75,6 +75,16 @@ test("OpenAI key retention works for both Save and Test, and settings never rece
   assert.equal((await b.ok("provider.get", {}, b.extension)).apiKey, undefined);
 });
 
+test("malformed extension grant origins are rejected as invalid requests", async (t) => {
+  const b = await broker(t);
+  const result = await b.call(
+    "grants.revoke",
+    { origin: "not an origin" },
+    b.extension,
+  );
+  assert.equal(result.error.code, "INVALID_REQUEST");
+});
+
 for (const change of [
   "navigation",
   "registration",
@@ -695,7 +705,7 @@ test("hosted chat tool rounds work through a desktop provider", async (t) => {
               toolCalls: [],
             },
             finishReason: "stop",
-            usage: {},
+            usage: { promptTokens: 3, completionTokens: 4, totalTokens: 7 },
           })
         : Response.json({
             id: "d1",
@@ -711,7 +721,7 @@ test("hosted chat tool rounds work through a desktop provider", async (t) => {
               ],
             },
             finishReason: "tool_calls",
-            usage: {},
+            usage: { promptTokens: 1, completionTokens: 2, totalTokens: 3 },
           }),
   });
   await b.ok("desktop.pair", { code: "123456" }, b.extension);
@@ -730,6 +740,103 @@ test("hosted chat tool rounds work through a desktop provider", async (t) => {
   );
   assert.equal(rounds.length, 2);
   assert.equal(rounds[1].payload.messages.at(-2).tool_calls[0].id, "call_1");
+  const usage = await b.ok("usage.get", {}, b.extension);
+  assert.equal(usage["claude-code"].dayRequests, 1);
+  assert.equal(usage["claude-code"].dayPromptTokens, 4);
+  assert.equal(usage["claude-code"].dayCompletionTokens, 6);
+});
+
+test("a hosted turn that fails mid-way still records the tokens it spent", async (t) => {
+  const b = await broker(t);
+  desktopMock(b, {
+    // The second round asks for a tool the site never declared, which aborts
+    // the turn after the first round has already been billed by the provider.
+    generate: (payload) =>
+      Response.json({
+        id: payload.messages.some((item) => item.role === "tool") ? "d2" : "d1",
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "call_1",
+              name: payload.messages.some((item) => item.role === "tool")
+                ? "site__undeclared"
+                : "site__echo",
+              arguments: "{}",
+            },
+          ],
+        },
+        finishReason: "tool_calls",
+        usage: { promptTokens: 5, completionTokens: 6, totalTokens: 11 },
+      }),
+  });
+  await b.ok("desktop.pair", { code: "123456" }, b.extension);
+  await b.ok(
+    "provider.select",
+    { type: "desktop", providerId: "claude-code" },
+    b.extension,
+  );
+  b.hooks.tool = () => ({ echoed: "x" });
+  const prepared = await b.prepare(manifest);
+  assert.equal(
+    (await b.call("chat.complete", prepared)).error.code,
+    "TOOL_ERROR",
+  );
+  const usage = await b.ok("usage.get", {}, b.extension);
+  assert.equal(usage["claude-code"].dayRequests, 1);
+  assert.equal(usage["claude-code"].dayPromptTokens, 10);
+  assert.equal(usage["claude-code"].dayCompletionTokens, 12);
+});
+
+test("a narrowed level 2 site keeps its pinned model in the widget switcher, and desktop agents warn about sampling controls", async (t) => {
+  const b = await broker(t);
+  desktopMock(b);
+  await b.ok("desktop.pair", { code: "123456" }, b.extension);
+  await b.approve(["models.generate", "models.list"], {
+    model: "openai/allowed",
+  });
+  await b.approve(["models.catalog"]);
+  const summary = await b.ok(
+    "site.update",
+    { origin: "https://site.test", providers: ["claude-code"] },
+    b.extension,
+  );
+  assert.deepEqual(summary.providers.sort(), ["claude-code", "openai"]);
+  const settings = await b.ok("hosted.settings");
+  assert.equal(settings.model.id, "openai/allowed");
+  assert.ok(
+    settings.models.some((item) => item.id === settings.model.id),
+    "the model that answers is selectable in its own switcher",
+  );
+  // An API-key provider accepts sampling controls; a subscription agent does
+  // not, and says so in the page console instead of failing the request.
+  assert.equal(
+    (
+      await b.ok("models.generate", {
+        model: "openai/allowed",
+        temperature: 0.2,
+        messages: [{ role: "user", content: "hi" }],
+      })
+    )._warnings,
+    undefined,
+  );
+  const viaDesktop = await b.ok("models.generate", {
+    model: "claude-code/sonnet",
+    temperature: 0.2,
+    maxTokens: 64,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  assert.equal(viaDesktop.model, "claude-code/sonnet");
+  assert.deepEqual(
+    viaDesktop._warnings.map((item) => item.split(" ")[0]),
+    ["temperature", "maxTokens"],
+  );
+  const sent = b.requests
+    .filter((item) => new URL(item.url).pathname === "/api/generate")
+    .at(-1).payload;
+  assert.equal(sent.temperature, undefined);
+  assert.equal(sent.maxTokens, undefined);
 });
 
 test("a newer desktop revision is pulled into the browser and a bad desktop payload is rejected safely", async (t) => {
@@ -864,6 +971,16 @@ test("level 1 sites see exactly their model, level 2 sites see the exposed catal
       })
     ).error.code,
     "INVALID_REQUEST",
+  );
+  // The widget switcher follows the narrowing, and consent does not: consent is
+  // how the user would widen the grant again.
+  assert.deepEqual(
+    (await b.ok("hosted.settings")).models.map((item) => item.id),
+    ["claude-code/default", "claude-code/sonnet"],
+  );
+  assert.deepEqual(
+    (await b.ok("broker.status")).providers.map((item) => item.id).sort(),
+    ["claude-code", "openai"],
   );
   const usage = await b.ok("usage.get", {}, b.extension);
   assert.equal(usage["claude-code"].dayRequests, 1);
@@ -1267,7 +1384,7 @@ test("a companion that forgot this browser's pairing is reported as unpaired, no
     if (target.pathname === "/api/status")
       return Response.json({
         app: "arjunah-desktop",
-        version: "1.1.0",
+        version: "1.2.0",
         paired: false,
         sync: { revision: 0 },
       });

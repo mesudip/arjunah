@@ -9,6 +9,8 @@
   let activeRegistration = null;
   let controlListener = null;
   let controlValues = {};
+  let cardActionListener = null;
+  let threadStore = null;
 
   // `window.ai` is a shared namespace; this broker owns only `window.ai.arjunah`.
   const namespace = "ai" in window ? window.ai : undefined;
@@ -64,6 +66,41 @@
     });
   }
 
+  /**
+   * `_warnings` carries broker notices meant for whoever wrote this page, not
+   * for its users: it is logged and removed, so the public result shape stays
+   * exactly what SPEC section 5 documents.
+   */
+  function withoutWarnings(result) {
+    if (
+      !result ||
+      typeof result !== "object" ||
+      !Array.isArray(result._warnings)
+    )
+      return result;
+    const { _warnings, ...publicResult } = result;
+    for (const warning of _warnings)
+      if (typeof warning === "string") console.warn(`[अर्जुनः] ${warning}`);
+    return publicResult;
+  }
+
+  /** Local callback results cross the bridge, so they must be plain JSON. */
+  function bounded(value, maxBytes) {
+    if (value == null) return null;
+    let encoded;
+    try {
+      encoded = JSON.stringify(value);
+    } catch {
+      throw new Error("The site returned a value that is not JSON.");
+    }
+    if (
+      encoded === undefined ||
+      new TextEncoder().encode(encoded).byteLength > maxBytes
+    )
+      throw new Error("The site returned a value that is too large.");
+    return JSON.parse(encoded);
+  }
+
   function clearPendingToolInputs(message) {
     for (const entry of pendingToolInputs.values()) {
       clearTimeout(entry.timer);
@@ -91,6 +128,7 @@
     )
       throw new Error("Invalid content tool result.");
     let images = 0;
+    let cards = 0;
     let hasText = false;
     const content = value.content.map((part) => {
       if (!part || typeof part !== "object" || Array.isArray(part))
@@ -117,10 +155,27 @@
           throw new Error("Invalid image tool result.");
         return { type: "image", mediaType: part.mediaType, data: part.data };
       }
+      if (part.type === "card") {
+        // Shape and size only; the extension runs the full SPEC 7.4 validator
+        // before anything is drawn, and the model never sees this part.
+        if (
+          !outputContent.includes("card") ||
+          ++cards > 1 ||
+          !part.card ||
+          typeof part.card !== "object" ||
+          Array.isArray(part.card) ||
+          part.card.type !== "card" ||
+          new TextEncoder().encode(JSON.stringify(part.card)).byteLength > 65536
+        )
+          throw new Error("Invalid card tool result.");
+        return { type: "card", card: JSON.parse(JSON.stringify(part.card)) };
+      }
       throw new Error("Invalid content tool result.");
     });
-    if (images && !hasText)
-      throw new Error("Image tool results require a non-empty text fallback.");
+    if ((images || cards) && !hasText)
+      throw new Error(
+        "Image and card tool results require a non-empty text fallback.",
+      );
     return { kind: "content", content };
   }
 
@@ -139,7 +194,7 @@
       clearTimeout(entry.timer);
       pending.delete(message.id);
       message.ok
-        ? entry.resolve(message.result)
+        ? entry.resolve(withoutWarnings(message.result))
         : entry.reject(errorFrom(message.error));
       return;
     }
@@ -164,10 +219,31 @@
           throw new Error("Assistant registration changed.");
         if (!handler) throw new Error("Tool handler is unavailable.");
         let inputRequests = 0;
+        let progressReports = 0;
         const result = await handler(message.args, {
           id: message.invocationId,
           name: message.name,
           controls: { ...(message.controls ?? controlValues) },
+          /**
+           * Ephemeral status for a slow tool (SPEC 7.5). It is drawn under the
+           * tool's step and never enters model messages or chat history, so a
+           * dropped report changes nothing the model or the site can observe.
+           */
+          reportProgress(text) {
+            if (typeof text !== "string" || !text) return;
+            if (++progressReports > 50) return;
+            window.postMessage(
+              {
+                channel: CHANNEL,
+                direction: "page-to-extension",
+                nonce,
+                kind: "tool-progress",
+                invocation: message.id,
+                text: text.slice(0, 200),
+              },
+              "*",
+            );
+          },
           requestInput(inputId) {
             if (typeof inputId !== "string" || !inputId)
               return Promise.reject(new Error("Input id is required."));
@@ -235,6 +311,52 @@
       }
       return;
     }
+    if (message.kind === "card-action" || message.kind === "thread-call") {
+      const reply = (ok, payload) =>
+        window.postMessage(
+          {
+            channel: CHANNEL,
+            direction: "page-to-extension",
+            nonce,
+            kind: "page-result",
+            id: message.id,
+            ok,
+            ...(ok ? { result: payload } : { error: { message: payload } }),
+          },
+          "*",
+        );
+      if (message.registrationId !== activeRegistration)
+        return reply(false, "Assistant registration changed.");
+      try {
+        if (message.kind === "card-action") {
+          if (!cardActionListener) return reply(true, null);
+          const detail = message.action ?? {};
+          const replacement = await cardActionListener({
+            cardId: detail.cardId ?? null,
+            name: detail.name,
+            payload: detail.payload,
+            values: detail.values ?? null,
+          });
+          return reply(true, bounded(replacement ?? null, 65536));
+        }
+        const method = message.method;
+        const handler =
+          threadStore && typeof threadStore[method] === "function"
+            ? threadStore[method]
+            : null;
+        if (!handler) return reply(false, `threads.${method} is unavailable.`);
+        const result = await handler.apply(
+          threadStore,
+          Array.isArray(message.args) ? message.args : [],
+        );
+        return reply(true, bounded(result ?? null, 8 * 1024 * 1024));
+      } catch (error) {
+        return reply(
+          false,
+          String(error?.message ?? "The site callback failed.").slice(0, 300),
+        );
+      }
+    }
     if (message.kind === "tool-input-result") {
       const entry = pendingToolInputs.get(message.id);
       if (!entry) return;
@@ -267,7 +389,7 @@
   }
 
   const api = {
-    version: "1.1.0",
+    version: "1.2.0",
     isEnabled: async () => {
       const grant = await request("permissions.query");
       return grant != null && grant.level !== "assistant";
@@ -288,22 +410,48 @@
             code: "INVALID_REQUEST",
             message: "Site tools require function handlers.",
           });
-        if (
-          manifest.onControlChange != null &&
-          typeof manifest.onControlChange !== "function"
-        )
-          throw errorFrom({
-            code: "INVALID_REQUEST",
-            message: "onControlChange must be a function.",
-          });
+        for (const name of ["onControlChange", "onCardAction"])
+          if (manifest[name] != null && typeof manifest[name] !== "function")
+            throw errorFrom({
+              code: "INVALID_REQUEST",
+              message: `${name} must be a function.`,
+            });
+        const threads = manifest.threads ?? null;
+        if (threads != null) {
+          if (typeof threads !== "object" || Array.isArray(threads))
+            throw errorFrom({
+              code: "INVALID_REQUEST",
+              message: "threads must be an object of functions.",
+            });
+          for (const name of ["list", "create", "load", "append", "delete"])
+            if (typeof threads[name] !== "function")
+              throw errorFrom({
+                code: "INVALID_REQUEST",
+                message: `threads.${name} must be a function.`,
+              });
+          if (threads.rename != null && typeof threads.rename !== "function")
+            throw errorFrom({
+              code: "INVALID_REQUEST",
+              message: "threads.rename must be a function.",
+            });
+        }
         const id = crypto.randomUUID();
-        // Local functions never cross the bridge.
-        const { onControlChange, ...serializable } = manifest;
+        // Local functions never cross the bridge; the contract carries only the
+        // fact that the site stores conversations (SPEC 7.6).
+        const {
+          onControlChange,
+          onCardAction,
+          threads: _threads,
+          ...serializable
+        } = manifest;
         const wire = {
           ...serializable,
           tools: (manifest?.tools ?? []).map(
             ({ handler, ...definition }) => definition,
           ),
+          ...(threads
+            ? { threads: { rename: typeof threads.rename === "function" } }
+            : {}),
         };
         const result = await request("site.register", { id, manifest: wire });
         clearPendingToolInputs("Assistant registration changed.");
@@ -313,6 +461,8 @@
             handlers.set(tool.name, tool.handler);
         activeRegistration = id;
         controlListener = onControlChange ?? null;
+        cardActionListener = onCardAction ?? null;
+        threadStore = threads;
         controlValues = result.controls ?? {};
         return Object.freeze({
           id: result.id,
@@ -324,6 +474,8 @@
               handlers.clear();
               activeRegistration = null;
               controlListener = null;
+              cardActionListener = null;
+              threadStore = null;
               controlValues = {};
             }
             return removed;

@@ -1,11 +1,11 @@
 {
-  "name": "arjunah",
+  "name": "arjunah-widget",
   "version": "1.2.0-alpha.1",
-  "description": "TypeScript SDK and types for अर्जुनः (Arjunah): let your website use the AI your visitor already has, through window.ai.arjunah.",
+  "description": "The अर्जुनः (Arjunah) chat renderer, mounted against your own backend — the same widget the browser extension hosts, without the extension.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/mesudip/arjunah.git",
-    "directory": "packages/sdk"
+    "directory": "packages/widget"
   },
   "license": "MIT",
   "type": "module",
@@ -23,19 +23,17 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node ../../scripts/build-widget.mjs",
     "prepack": "npm run build"
   },
   "keywords": [
     "ai",
-    "browser-extension",
-    "window.ai",
-    "arjunah",
-    "bring-your-own-ai",
-    "sdk",
-    "typescript"
+    "chat",
+    "widget",
+    "assistant",
+    "arjunah"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=22.22.0"
   }
 }

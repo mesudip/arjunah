@@ -607,7 +607,12 @@
             },
             additionalProperties: false,
           },
-          handler: ({ query = "", maxPricePerPerson }) => {
+          handler: async ({ query = "", maxPricePerPerson }, invocation) => {
+            // Ephemeral status for a slow step (SPEC 7.5): it shows under this
+            // tool in the transcript and never reaches the model.
+            invocation.reportProgress("searching the destination catalogue");
+            await new Promise((done) => setTimeout(done, 250));
+            invocation.reportProgress("pricing the results");
             const q = query.toLowerCase();
             const results = CATALOG.filter(
               (d) =>
@@ -633,6 +638,76 @@
           },
         },
         {
+          name: "review_trip",
+          description:
+            "Show the traveller a summary card of the current booking with actions.",
+          inputSchema: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+          // Cards are drawn in the transcript; the model gets only the text
+          // fallback below (SPEC 7.4).
+          outputContent: ["text", "card"],
+          handler: () => {
+            const state = formState();
+            const summary = [
+              `Destination: ${state.fields.destination || "not set"}`,
+              `Travellers: ${state.fields.travellers || "not set"}`,
+              `Stops: ${state.stops.length}`,
+            ];
+            return {
+              kind: "content",
+              content: [
+                { type: "text", text: summary.join("; ") },
+                {
+                  type: "card",
+                  card: {
+                    type: "card",
+                    id: "review",
+                    title: "Trip so far",
+                    children: [
+                      {
+                        type: "list",
+                        items: [
+                          ...summary.map((line) => ({ title: line })),
+                          ...state.stops.map((stop) => ({
+                            title: stop.place,
+                            description: `${stop.nights} night(s)${stop.note ? ` — ${stop.note}` : ""}`,
+                          })),
+                        ],
+                      },
+                      ...(state.errors.length
+                        ? [
+                            {
+                              type: "text",
+                              style: "muted",
+                              text: `Still missing: ${state.errors.join(", ")}`,
+                            },
+                          ]
+                        : []),
+                      {
+                        type: "button",
+                        label: "Highlight what is missing",
+                        style: "primary",
+                        action: { type: "local", name: "highlight_missing" },
+                      },
+                      {
+                        type: "button",
+                        label: "Ask for cheaper options",
+                        action: {
+                          type: "message",
+                          text: "Find me cheaper options for this trip",
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            };
+          },
+        },
+        {
           name: "highlight",
           description: "Flash a form field so the user notices it.",
           inputSchema: {
@@ -646,6 +721,26 @@
           handler: ({ field }) => ({ ok: flash(field) }),
         },
       ];
+      // A tiny site-owned conversation store, so the demo shows who keeps the
+      // transcript. Real sites would use their own backend.
+      const THREAD_KEY = "arjunah-demo-threads";
+      function threadStore() {
+        try {
+          const raw = sessionStorage.getItem(THREAD_KEY);
+          const parsed = raw ? JSON.parse(raw) : [];
+          return Array.isArray(parsed) ? parsed : [];
+        } catch {
+          return [];
+        }
+      }
+      function saveThreads(all) {
+        try {
+          sessionStorage.setItem(THREAD_KEY, JSON.stringify(all.slice(-20)));
+        } catch {
+          /* a full or blocked store just means no history next reload */
+        }
+      }
+
       const logged = tools.map((tool) => ({
         ...tool,
         handler: async (args, invocation) => {
@@ -709,6 +804,80 @@
                 { id: "clear", type: "button", label: "Clear itinerary" },
               ],
             },
+            // The site owns its conversations (SPEC 7.6): the extension asks
+            // for them, stores nothing itself, and marks what the site returns
+            // as untrusted before the model sees it.
+            threads: {
+              list: () =>
+                threadStore()
+                  .map(({ id, title, updatedAt }) => ({ id, title, updatedAt }))
+                  .reverse(),
+              create() {
+                const summary = {
+                  id: `t${Date.now().toString(36)}`,
+                  title: "New trip chat",
+                  updatedAt: new Date().toISOString(),
+                  entries: [],
+                };
+                saveThreads([...threadStore(), summary]);
+                log("thread created", summary.id);
+                return {
+                  id: summary.id,
+                  title: summary.title,
+                  updatedAt: summary.updatedAt,
+                };
+              },
+              load: (id) =>
+                threadStore().find((item) => item.id === id)?.entries ?? [],
+              append(id, entries) {
+                const all = threadStore();
+                const thread = all.find((item) => item.id === id);
+                if (!thread) return;
+                thread.entries.push(...entries);
+                const first = thread.entries.find(
+                  (entry) => entry.type === "message" && entry.role === "user",
+                );
+                if (first && thread.title === "New trip chat")
+                  thread.title = String(
+                    typeof first.content === "string"
+                      ? first.content
+                      : "Trip chat",
+                  ).slice(0, 60);
+                thread.updatedAt = new Date().toISOString();
+                saveThreads(all);
+                log("thread saved", { id, entries: entries.length });
+              },
+              rename(id, title) {
+                const all = threadStore();
+                const thread = all.find((item) => item.id === id);
+                if (thread) thread.title = title;
+                saveThreads(all);
+              },
+              delete(id) {
+                saveThreads(threadStore().filter((item) => item.id !== id));
+                log("thread deleted", id);
+              },
+            },
+            onCardAction(event) {
+              log("card action", event);
+              if (event.name !== "highlight_missing") return;
+              const missing = validate();
+              for (const field of FIELDS)
+                if (missing.some((item) => item.includes(field))) flash(field);
+              return {
+                type: "card",
+                id: "review",
+                title: "Trip so far",
+                children: [
+                  {
+                    type: "text",
+                    text: missing.length
+                      ? `Highlighted ${missing.length} field(s) that still need attention.`
+                      : "Everything needed to book is filled in.",
+                  },
+                ],
+              };
+            },
             onControlChange(id, value, values) {
               controls = { ...controls, ...values };
               if (id === "clear") {
@@ -723,7 +892,10 @@
             `अर्जुनः ${window.ai.arjunah.version} · assistant registered`;
           $("#ext").className = "pill";
           $("#open").disabled = false;
-          log("registered", "Trip planner assistant with 6 tools");
+          log(
+            "registered",
+            `Trip planner assistant with ${logged.length} tools`,
+          );
         } catch (error) {
           $("#ext").textContent = `Registration failed: ${error.message}`;
           $("#ext").className = "pill off";
@@ -805,7 +977,9 @@
         "click",
         guard(async () => {
           $("#direct").textContent = "Generating…";
-          const result = await (await enabled()).models.generate({
+          const result = await (
+            await enabled()
+          ).models.generate({
             model: $("#model").value,
             messages: [
               {

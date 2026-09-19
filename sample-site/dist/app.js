@@ -14,7 +14,7 @@ function showState(message, state = "waiting", detail = "") {
 
 async function registerAssistant() {
   if (starting || registration) return;
-  if (!window.ai?.site?.register) {
+  if (!window.ai?.arjunah?.site?.register) {
     showState(
       "Extension not detected",
       "error",
@@ -26,14 +26,15 @@ async function registerAssistant() {
   starting = true;
   showState("Registering assistant…");
   try {
-    registration = await window.ai.site.register({
+    registration = await window.ai.arjunah.site.register({
       name: "Protocol Lab Assistant",
-      description: "A small assistant for testing the User Controlled AI extension.",
+      description: "A small assistant for testing the अर्जुनः extension.",
       systemPrompt:
         "You are the assistant for a minimal protocol test page. Be brief. When asked whether the sample is ready, call get_sample_status and report its result.",
       widget: {
         autoShow: false,
-        greeting: "The sample assistant is connected. What would you like to test?",
+        greeting:
+          "The sample assistant is connected. What would you like to test?",
         placeholder: "Ask about the sample page…",
         suggestions: [
           "Use the site tool and tell me whether the sample is ready.",
@@ -68,7 +69,8 @@ async function registerAssistant() {
       tools: [
         {
           name: "get_sample_status",
-          description: "Return the current readiness state of this sample page.",
+          description:
+            "Return the current readiness state of this sample page.",
           inputSchema: {
             type: "object",
             properties: {},
@@ -88,7 +90,7 @@ async function registerAssistant() {
     showState(
       "Assistant registered",
       "ready",
-      `Protocol ${window.ai.version} is ready.`,
+      `Protocol ${window.ai.arjunah.version} is ready.`,
     );
   } catch (error) {
     showState(
@@ -104,8 +106,12 @@ async function registerAssistant() {
 openButton.addEventListener("click", async () => {
   openButton.disabled = true;
   try {
-    await window.ai.chat.open();
-    showState("Assistant opened", "ready", "Send the suggested prompt in chat.");
+    await window.ai.arjunah.chat.open();
+    showState(
+      "Assistant opened",
+      "ready",
+      "Send the suggested prompt in chat.",
+    );
   } catch (error) {
     showState(
       "Could not open assistant",
@@ -117,10 +123,10 @@ openButton.addEventListener("click", async () => {
   }
 });
 
-if (window.ai) {
+if (window.ai?.arjunah) {
   registerAssistant();
 } else {
-  window.addEventListener("user-controlled-ai:ready", registerAssistant, {
+  window.addEventListener("arjunah:ready", registerAssistant, {
     once: true,
   });
   window.setTimeout(registerAssistant, 1200);

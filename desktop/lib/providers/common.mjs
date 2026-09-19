@@ -24,6 +24,8 @@ const ENV_KEEP = new Set([
   "XDG_CONFIG_HOME",
   "XDG_DATA_HOME",
   "XDG_CACHE_HOME",
+  "CODEX_HOME",
+  "CLAUDE_CONFIG_DIR",
   "APPDATA",
   "LOCALAPPDATA",
   "USERPROFILE",
@@ -158,6 +160,9 @@ export function spawnAgent({
       }
     });
   });
+  // A CLI that exits before draining stdin (an auth failure, say) breaks the
+  // pipe. Without this listener the EPIPE would take the whole companion down.
+  child.stdin.on("error", () => {});
   if (stdin != null) child.stdin.end(stdin);
   else child.stdin.end();
   return { child, output };
@@ -369,6 +374,7 @@ export function jsonLineProbe(
     };
     const timer = setTimeout(() => finish("timeout"), timeoutMs);
     child.on("error", (error) => finish(error.message));
+    child.stdin.on("error", () => {});
     child.on("close", () => finish(messages.length ? null : "exited"));
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk) => {

@@ -181,7 +181,7 @@ try {
     await driver.executeScript(
       "const d=Object.getOwnPropertyDescriptor(window,'ai'); return {version:window.ai.arjunah.version,writable:d.writable,configurable:d.configurable}",
     ),
-    { version: "1.1.0", writable: false, configurable: false },
+    { version: "1.2.0", writable: false, configurable: false },
   );
   assert.equal(
     await invoke(driver, "window.ai.arjunah.isEnabled()", true),

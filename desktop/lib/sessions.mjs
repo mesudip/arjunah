@@ -177,6 +177,11 @@ export class SessionRegistry {
       if (session.matches(results)) return session;
     return null;
   }
+  findByAnyResult(results) {
+    for (const session of this.sessions.values())
+      if (results.some((item) => session.pending.has(item.id))) return session;
+    return null;
+  }
   endAll() {
     for (const session of [...this.sessions.values()]) session.end(true);
   }

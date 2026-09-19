@@ -1,0 +1,94 @@
+/**
+ * Types for the अर्जुनः standalone widget (SPEC section 14).
+ * The normative contract is SPEC.md in the repository.
+ */
+
+export type JSONValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JSONValue[]
+  | { [key: string]: JSONValue };
+
+export interface WidgetTheme {
+  accent?: string;
+  mode?: "light" | "dark" | "auto";
+}
+
+export interface WidgetControl {
+  id: string;
+  type: "toggle" | "select" | "button";
+  label: string;
+  description?: string;
+  default?: boolean | string;
+  options?: Array<{ value: string; label?: string }>;
+}
+
+export interface WidgetOptions {
+  name?: string;
+  subtitle?: string;
+  greeting?: string;
+  placeholder?: string;
+  suggestions?: string[];
+  theme?: WidgetTheme;
+  toolCallView?: "compact" | "detailed";
+  controls?: WidgetControl[];
+}
+
+export interface BackendOptions {
+  /** Same-origin or HTTPS. Routes in SPEC 14.4 are resolved against it. */
+  baseUrl: string;
+  headers?: Record<string, string>;
+  credentials?: RequestCredentials;
+}
+
+export interface ClientToolInvocation {
+  id: string;
+  name: string;
+  controls: Record<string, boolean | string>;
+  /** Ephemeral status shown under this tool's step; never model input. */
+  reportProgress(text: string): void;
+}
+
+export interface ClientTool {
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+  handler(
+    args: Record<string, JSONValue>,
+    invocation: ClientToolInvocation,
+  ): unknown;
+}
+
+export interface MountConfig {
+  /** The element the widget's shadow root is attached to. */
+  mount: Element;
+  backend: BackendOptions;
+  widget?: WidgetOptions;
+  /** Tools the backend may ask the page to run (`tool.client`, SPEC 14.3). */
+  tools?: ClientTool[];
+  /** Show the image attach control. Default false. */
+  vision?: boolean;
+  /** Set false when the backend has no PATCH route for thread titles. */
+  allowRename?: boolean;
+  onClose?(): void;
+  onControlChange?(
+    id: string,
+    value: boolean | string,
+    values: Record<string, boolean | string>,
+  ): void;
+}
+
+export interface MountedAssistant {
+  readonly panel: HTMLElement;
+  readonly view: unknown;
+  open(): void;
+  close(): void;
+  destroy(): void;
+}
+
+export function mountAssistant(config: MountConfig): MountedAssistant;
+export function validateCard(card: unknown, name?: string): unknown;
+export const ArjunahRenderer: unknown;
+export const PROTOCOL_VERSION: string;

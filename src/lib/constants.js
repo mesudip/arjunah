@@ -1,4 +1,4 @@
-export const VERSION = "1.1.0";
+export const VERSION = "1.2.0";
 export const CAPABILITIES = Object.freeze([
   "models.list",
   "models.generate",
@@ -65,4 +65,25 @@ export const LIMITS = Object.freeze({
   widgetControls: 8,
   widgetSuggestions: 6,
   reasoningChars: 12_000,
+  // Transcript cards (SPEC 7.4).
+  cardNodes: 200,
+  cardDepth: 6,
+  cardText: 2_000,
+  cardLabel: 80,
+  cardButtons: 16,
+  cardFields: 16,
+  cardListItems: 50,
+  cardSelectOptions: 20,
+  cardActionPayloadBytes: 4_096,
+  // Tool progress (SPEC 7.5).
+  progressChars: 200,
+  progressReports: 50,
+  // Site-owned threads (SPEC 7.6).
+  threads: 100,
+  threadEntries: 200,
+  threadTitle: 120,
+  threadCallbackTimeoutMs: 30_000,
+  stepPreview: 2_000,
+  // Declared remote tools (SPEC 7.7).
+  declaredMcpTools: 64,
 });

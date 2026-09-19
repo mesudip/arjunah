@@ -16,7 +16,7 @@ import type {
 export * from "./types.js";
 
 /** The protocol version this SDK was written against. */
-export const PROTOCOL_VERSION = "1.1.0";
+export const PROTOCOL_VERSION = "1.2.0";
 /** Dispatched on `window` once `window.ai.arjunah` is installed. */
 export const READY_EVENT = "arjunah:ready";
 /** Dispatched on `window` when another actor already owns the namespace. */

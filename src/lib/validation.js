@@ -8,6 +8,7 @@ import {
   LIMITS,
 } from "./constants.js";
 import { validateSchema } from "./schema.js";
+import { validateCard } from "./cards.js";
 
 const TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 const TOOL_USER_INPUT_ID = /^[a-z][a-z0-9_-]{0,31}$/;
@@ -76,6 +77,11 @@ export function validateAccessRequest(input) {
   } else if (!Array.isArray(requested) || requested.length === 0) {
     invalid("capabilities must be a non-empty array.");
   }
+  // Uniqueness is the caller's contract, so it is checked against what the site
+  // actually passed. A level bundle restating one of them is not the site's
+  // mistake, so merging the two may legitimately drop a duplicate.
+  const own = Array.isArray(input.capabilities) ? input.capabilities : [];
+  if (new Set(own).size !== own.length) invalid("capabilities must be unique.");
   const capabilities = [...new Set(requested)];
   if (
     capabilities.some(
@@ -84,8 +90,6 @@ export function validateAccessRequest(input) {
   ) {
     invalid("The request contains an unknown capability.");
   }
-  if (level == null && capabilities.length !== requested.length)
-    invalid("capabilities must be unique.");
   if (!Array.isArray(input.context ?? [])) invalid("context must be an array.");
   const context = [...new Set(input.context ?? [])];
   if (context.some((item) => !CONTEXT_FIELDS.includes(item))) {
@@ -149,12 +153,29 @@ function validateContent(content, name, maxChars) {
 
 export function validateSiteToolResult(input, outputContent = []) {
   if (!outputContent.length) return cloneJson(input, "tool result");
-  if (!plainObject(input) || input.kind !== "content")
+  if (
+    !plainObject(input) ||
+    input.kind !== "content" ||
+    !Array.isArray(input.content)
+  )
     invalid(
       'Content tool results must be { kind: "content", content: [...] }.',
     );
+  // Cards (SPEC 7.4) are drawn, never sent to the model, so they are pulled out
+  // and checked by their own bounded validator before the rest is validated.
+  const cards = input.content.filter(
+    (part) => plainObject(part) && part.type === "card",
+  );
+  if (cards.length > 1) invalid("A tool result may contain one card.");
+  if (cards.length && !outputContent.includes("card"))
+    invalid("The tool returned an undeclared content type.");
+  const rest = input.content.filter(
+    (part) => !(plainObject(part) && part.type === "card"),
+  );
+  if (cards.length && !rest.length)
+    invalid("Image and card tool results require a non-empty text fallback.");
   const content = validateContent(
-    input.content,
+    rest,
     "tool result content",
     LIMITS.messageChars,
   );
@@ -162,11 +183,17 @@ export function validateSiteToolResult(input, outputContent = []) {
   if ([...kinds].some((kind) => !outputContent.includes(kind)))
     invalid("The tool returned an undeclared content type.");
   if (
-    kinds.has("image") &&
+    (kinds.has("image") || cards.length) &&
     !content.some((part) => part.type === "text" && part.text.trim().length > 0)
   )
-    invalid("Image tool results require a non-empty text fallback.");
-  return { kind: "content", content };
+    invalid("Image and card tool results require a non-empty text fallback.");
+  const card = cards.length
+    ? validateCard(cards[0].card, "tool result card")
+    : null;
+  return {
+    kind: "content",
+    content: card ? [...content, { type: "card", card }] : content,
+  };
 }
 
 export function hasImages(messages) {
@@ -180,6 +207,7 @@ export function hasImages(messages) {
 export function contentText(content) {
   if (typeof content === "string") return content;
   return (content ?? [])
+    .filter((part) => part.type !== "card")
     .map((part) => (part.type === "text" ? part.text : "[image]"))
     .join("\n");
 }
@@ -390,13 +418,16 @@ export function validateTools(
       const outputContent = tool.outputContent ?? [];
       if (
         !Array.isArray(outputContent) ||
-        outputContent.length > 2 ||
+        outputContent.length > 3 ||
         new Set(outputContent).size !== outputContent.length ||
-        outputContent.some((kind) => !["text", "image"].includes(kind)) ||
-        (outputContent.includes("image") && !outputContent.includes("text"))
+        outputContent.some(
+          (kind) => !["text", "image", "card"].includes(kind),
+        ) ||
+        ((outputContent.includes("image") || outputContent.includes("card")) &&
+          !outputContent.includes("text"))
       )
         invalid(
-          `tools[${index}].outputContent must contain unique text/image values, with text whenever image is declared.`,
+          `tools[${index}].outputContent must contain unique text/image/card values, with text whenever image or card is declared.`,
         );
       result.outputContent = outputContent;
     }
@@ -495,7 +526,22 @@ export function validateMcpServer(server, index = 0) {
       } else invalid(`mcpServers[${index}] contains a forbidden header.`);
     }
   }
-  return { id, name, url: url.toString(), headers };
+  // Declared tools (SPEC 7.7) make the server's tool set part of the
+  // fingerprinted contract, so the extension never calls tools/list for it and
+  // consent shows the same definitions the model will be offered.
+  let tools;
+  if (server.tools != null) {
+    if (!Array.isArray(server.tools) || !server.tools.length)
+      invalid(`mcpServers[${index}].tools must be a non-empty array.`);
+    tools = validateTools(server.tools, LIMITS.declaredMcpTools);
+  }
+  return {
+    id,
+    name,
+    url: url.toString(),
+    headers,
+    ...(tools ? { tools } : {}),
+  };
 }
 
 const CONTROL_ID = /^[a-z][a-z0-9_-]{0,31}$/;
@@ -644,6 +690,13 @@ export function validateSiteManifest(input) {
     return server;
   });
   const widget = validateWidget(input.widget);
+  // The page cannot ship its callbacks, so the contract carries only the fact
+  // that this site stores the conversation, which consent must disclose.
+  let threads = null;
+  if (input.threads != null) {
+    if (!plainObject(input.threads)) invalid("threads must be an object.");
+    threads = { rename: input.threads.rename === true };
+  }
   return {
     name: boundedString(input.name, "name", 80, true),
     description:
@@ -657,6 +710,7 @@ export function validateSiteManifest(input) {
     widget,
     tools,
     mcpServers,
+    threads,
   };
 }
 

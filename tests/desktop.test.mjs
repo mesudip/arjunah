@@ -10,7 +10,11 @@ import {
   buildPrompt,
   trailingToolResults,
 } from "../desktop/lib/transcript.mjs";
-import { ToolSession, SESSION_LIMITS } from "../desktop/lib/sessions.mjs";
+import {
+  ToolSession,
+  SessionRegistry,
+  SESSION_LIMITS,
+} from "../desktop/lib/sessions.mjs";
 
 const EXTENSION = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
 
@@ -456,6 +460,33 @@ test("sessions batch concurrent tool calls and resolve pending calls with errors
   other.end(true);
   assert.equal((await pending).isError, true);
   assert.ok(SESSION_LIMITS.resumeMs > 0);
+});
+
+test("partial tool results identify and retire their stale suspended session", async () => {
+  const registry = new SessionRegistry();
+  const session = registry.create({ tools: [], model: "m", providerId: "p" });
+  const a = session.call("site__a", {});
+  const b = session.call("site__b", {});
+  const event = await session.nextEvent();
+  const partial = [{ id: event.calls[0].id, content: "one" }];
+  assert.equal(registry.findByResults(partial), null);
+  assert.equal(registry.findByAnyResult(partial), session);
+  session.end(true);
+  assert.equal((await a).isError, true);
+  assert.equal((await b).isError, true);
+});
+
+test("an agent that exits without draining stdin does not take the companion down", async () => {
+  const { spawnAgent } = await import("../desktop/lib/providers/common.mjs");
+  const { output } = spawnAgent({
+    binary: "/bin/sh",
+    args: ["-c", "exit 1"],
+    // Larger than the pipe buffer, so the write cannot be absorbed and the
+    // broken pipe surfaces as an EPIPE on the child's stdin stream.
+    stdin: "x".repeat(2_000_000),
+    parse: (stdout, stderr, code) => ({ stdout, stderr, code }),
+  });
+  assert.equal((await output).code, 1);
 });
 
 test("jwtPayload decodes an ID token payload and tolerates junk", async () => {

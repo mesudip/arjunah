@@ -269,13 +269,21 @@ export async function listMcpTools(server, signal) {
   return tools;
 }
 
-export async function callMcpTool(server, name, args, signal) {
-  return request(server, "tools/call", { name, arguments: args }, signal);
+export async function callMcpTool(server, name, args, signal, meta) {
+  // `_meta` carries the extension-minted conversation id (SPEC 7.7) so a site
+  // backend can correlate calls without the page taking part.
+  return request(
+    server,
+    "tools/call",
+    { name, arguments: args, ...(meta ? { _meta: meta } : {}) },
+    signal,
+  );
 }
 
-export function clearMcpSessions(origin) {
+export function clearMcpSessions(origin, session) {
   if (!origin) sessions.clear();
   else
     for (const key of sessions.keys())
-      if (key.startsWith(`${origin}\n`)) sessions.delete(key);
+      if (key.startsWith(`${origin}\n${session ? `${session}\n` : ""}`))
+        sessions.delete(key);
 }

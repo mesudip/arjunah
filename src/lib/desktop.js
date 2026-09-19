@@ -376,8 +376,8 @@ export async function desktopGenerate(config, valid, signal, options = {}) {
             : message,
         ),
         tools: valid.tools,
-        temperature: valid.temperature,
-        maxTokens: valid.maxTokens,
+        // Subscription-agent CLIs expose no sampling controls (SPEC 12.3); the
+        // caller is warned in the page console instead of failing the request.
       },
       signal,
       timeoutMs: LIMITS.desktopTimeoutMs,

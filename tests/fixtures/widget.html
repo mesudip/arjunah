@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Standalone widget fixture</title>
+  </head>
+  <body>
+    <div id="assistant"></div>
+    <script type="module">
+      import { mountAssistant } from "/widget/index.js";
+      window.clientToolCalls = 0;
+      window.assistant = mountAssistant({
+        mount: document.querySelector("#assistant"),
+        backend: { baseUrl: "/api/" },
+        widget: {
+          name: "Trip desk",
+          greeting: "Ask about a trip.",
+          suggestions: ["Plan a weekend"],
+        },
+        tools: [
+          {
+            name: "page_info",
+            inputSchema: { type: "object", additionalProperties: false },
+            handler(_args, invocation) {
+              window.clientToolCalls++;
+              invocation.reportProgress("reading the page");
+              return { title: document.title };
+            },
+          },
+        ],
+      });
+    </script>
+  </body>
+</html>

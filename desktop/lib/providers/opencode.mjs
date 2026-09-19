@@ -293,6 +293,10 @@ export function start({
     };
   const configPath = join(scratch.directory, "opencode.json");
   writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
+  // The prompt travels on stdin, like the Claude Code and Codex adapters: it
+  // never appears in process arguments, has no command-template expansion
+  // applied to it, and is not subject to argv size limits. `opencode run`
+  // with no positional message reads the message from stdin.
   const args = [
     "run",
     "--format",
@@ -307,11 +311,11 @@ export function start({
   if (thread?.handle) args.push("--session", thread.handle);
   const effort = effortOf(reasoning, ["low", "medium", "high", "max"]);
   if (effort) args.push("--variant", effort);
-  args.push("--", prompt);
   let announced = false;
   return spawnAgent({
     binary,
     args,
+    stdin: prompt,
     cwd: scratch.directory,
     env: { OPENCODE_CONFIG: configPath, OPENCODE_DISABLE_AUTOUPDATE: "1" },
     onExit: sharedScratch ? undefined : scratch.cleanup,
@@ -393,6 +397,23 @@ export function start({
         reasoning: reasoningText || null,
         thread: events.find((event) => event.sessionID)?.sessionID ?? null,
       };
+    },
+  });
+}
+
+/** Delete the persisted OpenCode session associated with a finished browser chat. */
+export async function endThread(handle, scratchDirectory_, binary) {
+  if (
+    !/^[A-Za-z0-9_-]{1,100}$/.test(String(handle ?? "")) ||
+    !scratchDirectory_ ||
+    !binary
+  )
+    return;
+  await run(binary, ["session", "delete", handle], {
+    cwd: scratchDirectory_,
+    env: {
+      OPENCODE_CONFIG: join(scratchDirectory_, "opencode.json"),
+      OPENCODE_DISABLE_AUTOUPDATE: "1",
     },
   });
 }

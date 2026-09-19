@@ -222,7 +222,7 @@ try {
       namespaceWritable: Object.getOwnPropertyDescriptor(window, "ai").writable,
     })),
     {
-      version: "1.1.0",
+      version: "1.2.0",
       writable: false,
       configurable: false,
       namespaceWritable: false,

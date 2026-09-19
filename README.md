@@ -8,13 +8,13 @@
 
 - **Visitors** install the extension once and bring an OpenAI API key, or pair the desktop app to lend their Claude Code, Codex, or OpenCode subscription to websites.
 - **Websites** either publish an assistant contract and let the extension host the chat, or call `enable()` and get completions from the visitor's chosen model.
-
+- **Chats can show more than text.** A site tool can return an interactive card, report progress while it runs, and keep the conversation in the site's own store. The same chat widget is published as [`arjunah-widget`](packages/widget/README.md) for sites that want to run it against their own backend, without the extension and without any of the wallet guarantees.
 
 ## Install the extension
 
 Download the latest build from [GitHub releases](../../releases): `arjunah-chrome-<version>.zip` for Chrome, Brave, and Edge, or `arjunah-firefox-<version>.xpi` for Firefox. Unzip the Chrome build, open `chrome://extensions`, turn on Developer mode, choose **Load unpacked**, and select the folder. Then open the extension's settings and enter an OpenAI API key, or pair the desktop app below.
 
-Step-by-step instructions, Firefox notes, and updating are in [docs/INSTALL.md](docs/INSTALL.md). This is a 1.1.0 alpha: store listings and signed builds come with the first stable release.
+Step-by-step instructions, Firefox notes, and updating are in [docs/INSTALL.md](docs/INSTALL.md). This is a 1.2.0 alpha: store listings and signed builds come with the first stable release.
 
 ## Install the desktop app (optional)
 
@@ -44,7 +44,11 @@ await registerSite({
     {
       name: "order_status",
       description: "Look up the current order.",
-      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
       handler: async () => ({ status: "shipped" }),
     },
   ],
@@ -80,10 +84,10 @@ npm run validate       # check + Firefox lint + Chrome, Firefox, security, deskt
 npm run pack           # dist/arjunah-chrome-<version>.zip and dist/arjunah-firefox-<version>.xpi
 ```
 
-The repository is an npm workspace: the extension in `src/`, the `arjunah` SDK in `packages/sdk/`, the `arjunah-desktop` companion in `desktop/`. Browser suites use temporary profiles and local mock services; `ARJUNAH_E2E_LIVE=opencode` (or `codex`, `claude-code`) drives a real CLI, and `CHROME_PATH` or `FIREFOX_PATH` picks a browser. Tags matching `v*` build a GitHub release; npm publishing is a manual workflow. Contributor context is in [AGENTS.md](AGENTS.md); verification history is in [docs/PROGRESS.md](docs/PROGRESS.md).
+The repository is an npm workspace: the extension in `src/`, the shared chat renderer in `src/renderer/`, the `arjunah` SDK in `packages/sdk/`, the `arjunah-widget` standalone renderer in `packages/widget/`, the `arjunah-desktop` companion in `desktop/`. Browser suites use temporary profiles and local mock services; `ARJUNAH_E2E_LIVE=opencode` (or `codex`, `claude-code`) drives a real CLI, and `CHROME_PATH` or `FIREFOX_PATH` picks a browser. Tags matching `v*` build a GitHub release; npm publishing is a manual workflow. Contributor context is in [AGENTS.md](AGENTS.md); verification history is in [docs/PROGRESS.md](docs/PROGRESS.md).
 
 ## Status
 
-1.1.0-alpha. Chrome Manifest V3 and Firefox Manifest V3 are tested targets; the desktop app has been exercised on macOS with OpenCode, Codex, and Claude Code and on the fake-agent end-to-end suite. Linux and Windows autostart are implemented and unit-tested but not yet exercised on real machines. This is not an independent security certification; see [docs/REMEDIATION.md](docs/REMEDIATION.md) for the audit findings and their regression tests.
+1.2.0-alpha. Chrome Manifest V3 and Firefox Manifest V3 are tested targets; the desktop app has been exercised on macOS with OpenCode, Codex, and Claude Code and on the fake-agent end-to-end suite. Linux and Windows autostart are implemented and unit-tested but not yet exercised on real machines. This is not an independent security certification; see [docs/REMEDIATION.md](docs/REMEDIATION.md) for the audit findings and their regression tests.
 
 License: MIT.

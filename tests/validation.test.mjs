@@ -16,6 +16,23 @@ test("context fields are deduplicated and capability duplicates are rejected", (
       validateAccessRequest({ capabilities: ["models.list", "models.list"] }),
     /unique/,
   );
+  // A level bundle restating a capability the site also listed is the
+  // expansion's duplicate, not the site's, so it is merged rather than refused.
+  assert.deepEqual(
+    validateAccessRequest({
+      level: "completion",
+      capabilities: ["models.generate"],
+    }).capabilities,
+    ["models.list", "models.generate"],
+  );
+  assert.throws(
+    () =>
+      validateAccessRequest({
+        level: "completion",
+        capabilities: ["models.list", "models.list"],
+      }),
+    /unique/,
+  );
   assert.deepEqual(
     validateAccessRequest({
       capabilities: ["models.list", "context.read"],
@@ -218,6 +235,17 @@ test("site tool content results are declared, bounded, and retain a text fallbac
       validateSiteToolResult({ kind: "content", content: [image] }, ["image"]),
     /text fallback/,
   );
+  // A non-array `content` is a protocol error, not an internal TypeError.
+  for (const malformed of ["hello", null, { type: "text" }])
+    assert.throws(
+      () =>
+        validateSiteToolResult({ kind: "content", content: malformed }, [
+          "text",
+        ]),
+      (error) =>
+        error.code === "INVALID_REQUEST" &&
+        /kind: "content"/.test(error.message),
+    );
   assert.throws(
     () =>
       validateSiteToolResult(

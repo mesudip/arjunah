@@ -16,7 +16,7 @@ import {
 } from "./common.mjs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { readdirSync, rmdirSync } from "node:fs";
+import { readdirSync, rmdirSync, writeFileSync } from "node:fs";
 
 export const id = "claude-code";
 export const name = "Claude Code";
@@ -490,8 +490,9 @@ export function start({
   const effort = effortOf(reasoning, CLAUDE_EFFORTS);
   if (effort) args.push("--effort", effort);
   if (mcp) {
-    args.push(
-      "--mcp-config",
+    const mcpConfig = join(scratch.directory, "arjunah-mcp.json");
+    writeFileSync(
+      mcpConfig,
       JSON.stringify({
         mcpServers: {
           arjunah: {
@@ -501,6 +502,11 @@ export function start({
           },
         },
       }),
+      { mode: 0o600 },
+    );
+    args.push(
+      "--mcp-config",
+      mcpConfig,
       "--allowedTools",
       "mcp__arjunah",
       "--permission-mode",

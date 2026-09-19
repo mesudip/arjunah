@@ -27,8 +27,8 @@ import {
 import { enrichProviders, mapT3Providers } from "./t3/catalog.mjs";
 
 export const APP_NAME = "arjunah-desktop";
-export const APP_VERSION = "1.1.0";
-export const PROTOCOL_VERSION = "1.1.0";
+export const APP_VERSION = "1.2.0";
+export const PROTOCOL_VERSION = "1.2.0";
 const BODY_LIMIT = 5_000_000;
 const EXTENSION_ORIGIN = /^(chrome|moz|safari-web)-extension:\/\/[a-z0-9-]+$/i;
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -111,12 +111,19 @@ export function createDesktopApp({
   // generate call is in flight. Keyed by the browser-supplied progress id.
   const progress = new Map();
   const PROGRESS_TTL = 10 * 60_000;
-  function progressFor(id) {
+  const PROGRESS_LIMIT = 100;
+  function sweepProgress() {
     for (const [key, entry] of progress)
       if (Date.now() - entry.updatedAt > PROGRESS_TTL) progress.delete(key);
+  }
+  function progressFor(id) {
+    sweepProgress();
     if (!id) return null;
-    if (!progress.has(id))
+    if (!progress.has(id)) {
+      if (progress.size >= PROGRESS_LIMIT)
+        progress.delete(progress.keys().next().value);
       progress.set(id, { items: [], updatedAt: Date.now(), done: false });
+    }
     return progress.get(id);
   }
   function pushProgress(live, item) {
@@ -278,19 +285,30 @@ export function createDesktopApp({
   const threads = new Map();
   const THREAD_IDLE_MS = 30 * 60_000;
   const THREAD_ID = /^[A-Za-z0-9_-]{1,100}$/;
+  const threadCleanups = new Set();
   function endThread(id) {
     const thread = threads.get(id);
     if (!thread) return false;
     threads.delete(id);
     try {
-      resolveAdapter(thread.providerId)?.endThread?.(
+      const cleanup = () => thread.scratch.cleanup();
+      const result = resolveAdapter(thread.providerId)?.endThread?.(
         thread.handle,
         thread.scratch.directory,
+        thread.binary,
       );
+      if (result && typeof result.finally === "function") {
+        // An adapter that deletes a persisted session asynchronously must finish
+        // before its scratch directory goes away; close() waits on this too.
+        const pending = result
+          .catch(() => {})
+          .finally(cleanup)
+          .finally(() => threadCleanups.delete(pending));
+        threadCleanups.add(pending);
+      } else cleanup();
     } catch {
-      /* best effort */
+      thread.scratch.cleanup();
     }
-    thread.scratch.cleanup();
     record("thread-ended", `${thread.providerId} thread for ${id}`);
     return true;
   }
@@ -605,6 +623,15 @@ export function createDesktopApp({
     const live = progressFor(progressId);
     const results = trailingToolResults(messages);
     let session = results ? sessions.findByResults(results) : null;
+    if (results && !session) {
+      const stale = sessions.findByAnyResult(results);
+      if (stale) {
+        stale.end(true);
+        if (stale.thread)
+          for (const [id, item] of threads)
+            if (item === stale.thread) endThread(id);
+      }
+    }
     if (session) {
       record(
         "tool-results",
@@ -632,7 +659,7 @@ export function createDesktopApp({
       const systemHash = createHash("sha256")
         .update(systemPrompt)
         .update("\n")
-        .update(tools.map((tool) => tool.name).join(","))
+        .update(JSON.stringify(tools))
         .digest("hex");
       let thread = null;
       let prompt = fullPrompt;
@@ -658,6 +685,7 @@ export function createDesktopApp({
             model: selectedModel,
             systemHash,
             handle: null,
+            binary: info.binary,
             scratch: scratchDirectory(`${providerId}-thread`),
             seen: 0,
             lastAt: Date.now(),
@@ -924,6 +952,7 @@ export function createDesktopApp({
     }
     if (path.startsWith("/api/progress/") && request.method === "GET") {
       requireClient(request);
+      sweepProgress();
       const id = path.slice("/api/progress/".length);
       const entry = /^[A-Za-z0-9_-]{1,100}$/.test(id) ? progress.get(id) : null;
       const after = Math.max(0, Number(url.searchParams.get("after")) || 0);
@@ -1143,12 +1172,13 @@ export function createDesktopApp({
         });
       });
     },
-    close() {
+    async close() {
       clearTimeout(providerTimer);
       for (const client of eventClients) client.socket.destroy();
       eventClients.clear();
       for (const id of [...threads.keys()]) endThread(id);
       sessions.endAll();
+      await Promise.all([...threadCleanups]);
       return new Promise((resolve) => server.close(() => resolve()));
     },
   };

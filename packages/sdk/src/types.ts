@@ -4,7 +4,7 @@
  */
 
 export interface Arjunah {
-  readonly version: "1.1.0";
+  readonly version: "1.2.0";
   /** True when this origin holds a grant at level 1 or 2. */
   isEnabled(): Promise<boolean>;
   /**
@@ -186,11 +186,82 @@ export interface AIToolDefinition {
   description?: string;
   inputSchema?: AIJSONSchema & { type?: "object" };
 }
-export type AIToolOutputKind = "text" | "image";
+export type AIToolOutputKind = "text" | "image" | "card";
+export interface AICardPart {
+  type: "card";
+  card: AICard;
+}
 export interface AISiteToolContentResult {
   kind: "content";
-  /** Images require a text fallback for models without vision. */
-  content: Array<AITextPart | AIImagePart>;
+  /** Images and cards require a text fallback; the model sees only the text. */
+  content: Array<AITextPart | AIImagePart | AICardPart>;
+}
+
+/**
+ * Transcript cards (SPEC 7.4): bounded site-authored UI drawn inside the
+ * hosted chat. No HTML, Markdown, links or images; at most 200 nodes, 6 levels,
+ * 16 buttons and 16 form fields, within the 64 KiB tool-result limit.
+ */
+export interface AICard {
+  type: "card";
+  /** Lowercase identifier used to update this card in place. */
+  id?: string;
+  title?: string;
+  children: AICardNode[];
+}
+export type AICardNode =
+  | { type: "text"; text: string; style?: "body" | "muted" | "heading" }
+  | { type: "list"; items: AICardListItem[] }
+  | {
+      type: "button";
+      label: string;
+      action: AICardAction;
+      style?: "primary" | "secondary" | "danger";
+    }
+  | {
+      type: "form";
+      id: string;
+      submitLabel?: string;
+      action: AICardAction;
+      fields: AICardField[];
+    };
+export interface AICardListItem {
+  title: string;
+  description?: string;
+  action?: AICardAction;
+}
+export type AICardField =
+  | {
+      type: "input";
+      id: string;
+      label: string;
+      placeholder?: string;
+      required?: boolean;
+      default?: string;
+    }
+  | {
+      type: "select";
+      id: string;
+      label: string;
+      options: Array<{ value: string; label?: string }>;
+      default?: string;
+    }
+  | { type: "checkbox"; id: string; label: string; default?: boolean };
+/**
+ * A `message` action sends its exact text as a visible user turn, so the model
+ * never receives something the user did not see. A `local` action reaches only
+ * `onCardAction` and never becomes a model message or a tool argument.
+ */
+export type AICardAction =
+  | { type: "message"; text: string }
+  | { type: "local"; name: string; payload?: JSONValue };
+export interface AICardActionEvent {
+  /** The card the action came from, when it declared an id. */
+  cardId: string | null;
+  name: string;
+  payload?: JSONValue;
+  /** Validated field values when the action came from a form. */
+  values: Record<string, string | boolean> | null;
 }
 export interface AIToolUserInput {
   /** Lowercase identifier that is deliberately absent from the model schema. */
@@ -217,6 +288,12 @@ export interface AISiteTool extends AIToolDefinition {
       name: string;
       controls: AIControlValues;
       requestInput(id: string): Promise<JSONValue>;
+      /**
+       * Ephemeral status for a slow tool (SPEC 7.5): at most 200 characters,
+       * 50 reports per invocation. Never enters model messages, chat history
+       * or a stored transcript.
+       */
+      reportProgress(text: string): void;
     },
   ):
     | JSONValue
@@ -228,6 +305,60 @@ export interface AIMcpServer {
   name?: string;
   url: string;
   headers?: Record<string, string>;
+  /**
+   * Declared tools (SPEC 7.7). When present the extension never calls
+   * `tools/list` for this server, the definitions join the fingerprinted
+   * contract, and consent is single-stage like site tools. This is how a site
+   * runs first-party tools on its own backend without the page holding the
+   * secret; `tools/call` carries the conversation id in `params._meta`.
+   */
+  tools?: AIToolDefinition[];
+}
+
+/** One conversation the site stores on the assistant's behalf (SPEC 7.6). */
+export interface AIThreadSummary {
+  id: string;
+  title: string;
+  /** ISO-8601. */
+  updatedAt: string;
+}
+export type AITranscriptEntry =
+  | {
+      type: "message";
+      id: string;
+      role: "user" | "assistant";
+      content: string | Array<AITextPart | AIImagePart>;
+      reasoning?: string;
+      createdAt: string;
+    }
+  | {
+      type: "activity";
+      id: string;
+      turnId: string;
+      steps: AITranscriptStep[];
+    };
+export interface AITranscriptStep {
+  id: string;
+  name: string;
+  source: "site" | "mcp" | "backend" | "agent";
+  status: "ok" | "error";
+  /** Bounded previews, at most 2,000 characters each. */
+  arguments?: string;
+  result?: string;
+  card?: AICard;
+}
+/**
+ * Local functions that make the site the owner of its conversations. Declaring
+ * them is part of the fingerprinted contract and consent says the site stores
+ * the conversation; loaded messages reach the model marked as untrusted.
+ */
+export interface AIThreadStore {
+  list(): Promise<AIThreadSummary[]>;
+  create(): Promise<AIThreadSummary>;
+  load(id: string): Promise<AITranscriptEntry[]>;
+  append(id: string, entries: AITranscriptEntry[]): Promise<void>;
+  rename?(id: string, title: string): Promise<void>;
+  delete(id: string): Promise<void>;
 }
 /** A user-facing option in the hosted widget's Options drawer (SPEC 7.2). */
 export type AIWidgetControl =
@@ -272,11 +403,21 @@ export interface AISiteManifest {
   widget?: AIWidgetOptions;
   tools?: AISiteTool[];
   mcpServers?: AIMcpServer[];
+  /** Conversations stored by the site instead of the extension (SPEC 7.6). */
+  threads?: AIThreadStore;
   onControlChange?(
     id: string,
     value: boolean | string,
     values: AIControlValues,
   ): void;
+  /**
+   * A card's `local` action (SPEC 7.4). Returning a card replaces the one the
+   * action came from; anything else leaves it unchanged. The model is not
+   * involved either way.
+   */
+  onCardAction?(
+    event: AICardActionEvent,
+  ): AICard | void | Promise<AICard | void>;
 }
 export interface AIGenerateRequest {
   messages: AIMessage[];

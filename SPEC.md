@@ -1,9 +1,11 @@
 # अर्जुनः Protocol
 
-Version: **1.1.0-alpha**
+Version: **1.2.0-alpha**
 
-Status: **Implemented draft with a bounded schema subset, tiered site access, extension-collected tool inputs, and an optional desktop companion**
+Status: **Implemented draft with a bounded schema subset, tiered site access, extension-collected tool inputs, transcript cards, tool progress, site-owned threads, declared remote tools, an optional desktop companion, and a standalone renderer**
 License: MIT
+
+Sections 7.4 through 7.7, 8.1, and 14 are the 1.2 additions: transcript cards, tool progress, site-owned threads, declared remote tools, and the standalone renderer. The reference extension reports `version` `1.2.0` and implements them; the standalone renderer ships as the `arjunah-widget` package built from the same renderer source the extension loads.
 
 This document is normative. The words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted as requirements.
 
@@ -24,7 +26,9 @@ Actors are:
 - **Provider**: any model backend the user configured, such as an API-compatible endpoint or a subscription agent exposed by the desktop companion. An extension can hold several providers at once; one model is the **global default**. The protocol does not require an OpenAI API, SDK, wire format, account, or hosted service.
 - **Desktop companion**: an optional application on the user's computer that pairs with the extension, synchronizes extension configuration, and runs locally installed subscription agents (Claude Code, Codex, OpenCode) on the extension's behalf. See section 12.
 - **Site tool**: a page-owned function callable by the extension during hosted chat.
-- **MCP server**: a remote Streamable HTTP Model Context Protocol endpoint declared by the site and approved by the user.
+- **MCP server**: a remote Streamable HTTP Model Context Protocol endpoint declared by the site and approved by the user. A site's own backend is an MCP server too; section 7.7 lets it declare its tools up front.
+- **Renderer**: the chat user interface (transcript, activity feed, cards, composer, thread panel). The extension hosts it inside its closed shadow root in **wallet mode**. The same renderer runs without the extension in **standalone mode** (section 14), where a site backend takes the extension's place.
+- **Site backend**: in standalone mode, the server that owns inference, tools, and threads and streams renderer events to the page. It is the site's own trust domain; no wallet consent applies.
 
 ## 2. Security boundaries
 
@@ -40,6 +44,9 @@ Actors are:
 10. Only top-level `http:` and `https:` documents are in scope. Sandboxed/cross-origin frames and opaque origins are not supported.
 11. A site sees only the model catalog the user exposed to it (section 4.1). Model identifiers, provider identifiers, display names, and capability flags are the only provider metadata a page can observe.
 12. Extension-collected tool inputs (section 7.3) MUST be separately disclosed, bound to one active invocation, and omitted from the model-facing tool schema, model messages, and extension chat history. The site tool receives the value and remains a trust boundary: the extension cannot prevent page code from transmitting it or returning it in a tool result.
+13. A transcript card (section 7.4) is site-authored UI inside the extension's UI. It MUST be bounded and validated at every trust boundary, MUST carry a text fallback that is the only thing the model receives, MUST NOT contain HTML, scripts, or navigable links, and its actions MUST NOT produce model messages the user cannot see or tool arguments the model did not author.
+14. A site-owned transcript (section 7.6) is untrusted model input. The extension MUST disclose in consent that the site stores and supplies the conversation, MUST mark site-supplied history as untrusted in the provider request, MUST apply its own history budget after any site truncation, and MUST NOT let a supplied transcript widen the disclosed contract.
+15. Tool progress (section 7.5) is presentation only. It MUST NOT enter model messages, chat history, or the site-owned transcript.
 
 ## 3. Discovery and versioning
 
@@ -55,7 +62,7 @@ interface AINamespace {
 }
 
 interface Arjunah {
-  readonly attribute DOMString version; // "1.1.0"
+  readonly attribute DOMString version; // "1.2.0"
   Promise<boolean> isEnabled();
   Promise<Session> enable(optional AccessRequest request = {});
   Promise<boolean> disable();
@@ -78,7 +85,7 @@ Feature detection MUST use members, not version string comparison. Unknown input
 
 If `window.ai.arjunah` already exists, or `window.ai` exists but is not an extensible object, the extension MUST NOT overwrite either. It SHOULD dispatch `arjunah:conflict` on `window`.
 
-After successful installation of the object, the extension SHOULD dispatch `arjunah:ready` on `window`; its `detail` is `{ "version": "1.1.0" }`. Pages MUST still check `window.ai.arjunah` first so they work when injection precedes their event listener.
+After successful installation of the object, the extension SHOULD dispatch `arjunah:ready` on `window`; its `detail` is `{ "version": "1.2.0" }`. Pages MUST still check `window.ai.arjunah` first so they work when injection precedes their event listener.
 
 ## 4. Access levels, capabilities, and consent
 
@@ -123,7 +130,7 @@ The session's `grant` is metadata, not a bearer credential:
 
 Consent is additive: requesting already granted capabilities MUST NOT prompt again. Requesting any new capability MUST show both the new request and the resulting effective grant. When a request raises the site to level 1 or 2 the consent dialog MUST let the user choose the model for this site (defaulting to the global default) and, at level 2, which providers the site may see (defaulting to every available provider).
 
-Capability grants do not silently authorize newly declared external resources. The extension MUST retain private approval metadata for hosted assistant contract fingerprints, MCP origins, and discovered tool-set fingerprints. The full system prompt, site tool definitions, and widget controls MUST be available for inspection in consent. A changed contract, previously undisclosed MCP origin, or changed remote tool metadata MUST trigger fresh consent before the next hosted model request. Both the consent layer and background execution layer MUST enforce these approvals. This metadata is extension-internal and MUST NOT be exposed by `session.permissions.query()`.
+Capability grants do not silently authorize newly declared external resources. The extension MUST retain private approval metadata for hosted assistant contract fingerprints, MCP origins, and discovered tool-set fingerprints. The full system prompt, site tool definitions (including declared output kinds such as cards), declared remote tool definitions (section 7.7), widget controls, and whether the site stores the conversation (section 7.6) MUST be available for inspection in consent. A changed contract, previously undisclosed MCP origin, or changed remote tool metadata MUST trigger fresh consent before the next hosted model request. Both the consent layer and background execution layer MUST enforce these approvals. This metadata is extension-internal and MUST NOT be exposed by `session.permissions.query()`.
 
 ### 4.1 Per-site model settings
 
@@ -180,8 +187,8 @@ Every model has an opaque identifier `<provider-id>/<model>`: `openai/gpt-5.6-so
 
 - `messages` (required): 1–100 objects with role `system`, `user`, `assistant`, or `tool`. `content` is a string of at most 12,000 UTF-16 code units, or, for user messages, an array of 1–8 content parts. A text part is `{ "type": "text", "text": "…" }` with the same length bound. An image part is `{ "type": "image", "mediaType": "image/png" | "image/jpeg" | "image/webp" | "image/gif", "data": "<base64>" }` with at most 2,000,000 base64 characters; at most 4 image parts per message. Image parts require a model whose `capabilities.vision` is true; otherwise the extension rejects the request with `NOT_SUPPORTED` before contacting any provider. A page MAY supply `name`, `toolCallId`, and OpenAI-compatible `toolCalls`. Tool messages MUST include `toolCallId`; only assistant messages may carry `toolCalls`. Each call has a unique non-empty `id`, `type: "function"`, and `function: { name, arguments }`, with arguments encoded as a JSON string. There are at most 32 calls per message.
 - `model` (optional): a model id exposed by `models.list`. Absent, or the literal string `"default"`, means the site model. At level 1 any other value MUST be rejected with `INVALID_REQUEST`; at level 2 the value MUST belong to the exposed catalog.
-- `temperature` (optional): finite number from 0 through 2.
-- `maxTokens` (optional): integer from 1 through 32768.
+- `temperature` (optional): finite number from 0 through 2. Providers that expose no sampling control (the subscription agents of section 12) MUST drop it and warn in the page console rather than fail the request; a site cannot tell at level 1 which kind answers it.
+- `maxTokens` (optional): integer from 1 through 32768. The same drop-and-warn rule applies.
 - `tools` (optional): up to 64 function definitions using the schema subset in section 7.1. Tools require a model whose `capabilities.tools` is true.
 - `reasoning` (optional): `{ "effort": "none" | "low" | "medium" | "high" | "xhigh" | "max" }` (or the bare string). The extension maps the effort to the provider's own control (OpenAI `reasoning_effort`, Codex `model_reasoning_effort`, Claude Code `--effort`, OpenCode `--variant`) and clamps to what the model supports; unknown values are rejected with `INVALID_REQUEST`. Absent means the provider's default.
 
@@ -232,15 +239,17 @@ Manifest fields:
 - `description` (optional, up to 280 characters)
 - `systemPrompt` (optional, up to 12,000 characters; disclosed during hosted-chat consent)
 - `widget` (optional): see section 7.2.
-- `tools` (optional): up to 32 `{ name, description, inputSchema, outputContent?, userInputs?, handler }` values. Names match `^[A-Za-z0-9_-]{1,64}$`; `handler(args, invocation)` is async or sync. `invocation` is `{ id, name, controls, requestInput(id) }` where `controls` is the current widget control state (section 7.2) and `requestInput` follows section 7.3.
-- `mcpServers` (optional): up to 8 descriptors `{ id, name, url, headers? }`. URL MUST be HTTPS, except loopback HTTP for development. URL credentials and fragments are forbidden.
+- `tools` (optional): up to 32 `{ name, description, inputSchema, outputContent?, userInputs?, handler }` values. Names match `^[A-Za-z0-9_-]{1,64}$`; `handler(args, invocation)` is async or sync. `invocation` is `{ id, name, controls, requestInput(id), reportProgress(text) }` where `controls` is the current widget control state (section 7.2), `requestInput` follows section 7.3, and `reportProgress` follows section 7.5.
+- `mcpServers` (optional): up to 8 descriptors `{ id, name, url, headers?, tools? }`. URL MUST be HTTPS, except loopback HTTP for development. URL credentials and fragments are forbidden. `tools` declares the server's tool definitions up front (section 7.7).
 - `onControlChange(id, value, values)` (optional, local function): called when the user changes a widget control.
+- `onCardAction(action)` (optional, local function): called when the user activates a `local` card action (section 7.4).
+- `threads` (optional, local functions): the site stores conversations and supplies the thread list (section 7.6).
 
 At most one active registration exists per page. A later successful registration replaces it and clears the prior hosted-chat history. The extension MUST fingerprint the validated contract, including widget controls; a new fingerprint requires redisclosure before use. The extension MAY show a launcher when a site registers; `autoShow` opens the chat panel but MUST NOT approve capabilities or send a model request.
 
 Site tool invocations have a random id, tool name, parsed arguments, and abort-neutral metadata. Arguments MUST be JSON objects matching the declared schema; malformed JSON and schema failures MUST produce a tool error without calling the handler. When `outputContent` is absent, results MUST be JSON-serializable and their serialized UTF-8 representation is limited to 65,536 bytes (64 KiB). Exceptions and invalid/oversized results become safe tool error results; they do not expose extension internals. A result in flight after registration replacement or revocation MUST NOT be forwarded to the provider.
 
-When `outputContent` is present, it is a unique subset of `"text" | "image"` and the handler result MUST be `{ "kind": "content", "content": [...] }`. Content contains 1–8 text/image parts, no more than four images, and every returned part type MUST be declared. Text uses the ordinary 12,000-character part limit. Images use the section 5.3 MIME, base64, and 2,000,000-character limits. Every result containing an image MUST also contain text so a non-vision model receives a useful fallback.
+When `outputContent` is present, it is a unique subset of `"text" | "image" | "card"` and the handler result MUST be `{ "kind": "content", "content": [...] }`. Content contains 1–8 text/image/card parts, no more than four images, no more than one card, and every returned part type MUST be declared. Card parts follow section 7.4. Text uses the ordinary 12,000-character part limit. Images use the section 5.3 MIME, base64, and 2,000,000-character limits. Every result containing an image MUST also contain text so a non-vision model receives a useful fallback.
 
 Output modes are part of the fingerprinted contract and consent disclosure. The broker appends the textual fallback as the ordinary matching `role: "tool"` message. Only when the selected model advertises `capabilities.vision`, and only after all matching tool results for that round, the broker appends user messages containing the returned images in the provider-neutral section 5.3 shape. This bridge is necessary because function outputs are textual while vision inputs are user-message image parts. Non-vision models receive only the text. Base64 data MUST NOT appear in consent activity cards, logs, errors, or progress events; those surfaces show bounded metadata such as `[image/webp, 84 KB]`. Page API, content bridge, and background broker each validate content results independently. A result in flight after registration replacement or revocation MUST NOT be forwarded to the provider.
 
@@ -323,6 +332,63 @@ tools: [
 ];
 ```
 
+### 7.4 Transcript cards
+
+A tool that declares `"card"` in `outputContent` may return one card part, `{ "type": "card", "card": <CardNode> }`, alongside its mandatory text part. The renderer shows the card inside the conversation under that tool's activity entry; the model receives only the text parts. The word _card_ is used deliberately: `widget` in this document means the panel options of section 7.2.
+
+A card is a JSON tree whose root has `type: "card"`:
+
+- `{ "type": "card", "id"?, "title"?, "children": [...] }`: the root, and the only node that may contain other containers.
+- `{ "type": "text", "text", "style"?: "body" | "muted" | "heading" }`.
+- `{ "type": "list", "items": [{ "title", "description"?, "action"? }] }`: at most 50 items.
+- `{ "type": "button", "label", "action", "style"?: "primary" | "secondary" | "danger" }`.
+- `{ "type": "form", "id", "submitLabel"?, "action", "fields": [...] }` where each field is `{ "type": "input" | "select" | "checkbox", "id", "label", "placeholder"?, "required"?, "options"?, "default"? }`. `options` is required for `select` and holds at most 20 `{ value, label? }` entries; field ids follow the control id syntax of section 7.2 and are unique within the form.
+
+Bounds, enforced by the page API, the content bridge, the background broker, and the renderer independently: at most 200 nodes, nesting depth 6, text of 2,000 Unicode code points per node, labels and titles of 80, at most 16 buttons and 16 form fields per card, and the whole card part within the 64 KiB tool-result limit. Images, links, raw HTML, Markdown, styles, and unknown node types MUST be rejected. Card ids follow the control id syntax and are unique within a turn.
+
+An action is one of:
+
+- `{ "type": "message", "text" }` (≤ 2,000 code points): activating it submits `text` as a new user turn. The renderer MUST show the exact text as the user's own bubble before sending it, so the model never receives an action the user did not see. A form with a `message` action appends one line per field, `label: value`, to the bubble. The turn runs under the ordinary hosted-chat consent and MUST NOT bypass a pending consent.
+- `{ "type": "local", "name", "payload"? }` (name ≤ 64 characters, payload a JSON value ≤ 4,096 UTF-8 bytes): activating it calls the manifest's `onCardAction({ cardId, name, payload, values })` in wallet mode, or posts it to the site backend in standalone mode (section 14.4). `values` holds validated form field values when the action came from a form. A `local` action never produces a model message. The callback MAY return a replacement `CardNode`, which the renderer validates and swaps in place; anything else leaves the card unchanged.
+
+`outputContent` including `"card"` is part of the fingerprinted contract and consent MUST say that the assistant can show interactive site-authored cards. Cards remain active for the lifetime of the registration; registration replacement clears them with the rest of the conversation. Both `toolCallView` modes render cards inline and keep the underlying arguments and text result user-expandable, so a card can never hide a tool call. A card is part of the activity entry of its turn in the transcript (section 7.6), so a stored conversation replays it.
+
+### 7.5 Tool progress
+
+A site tool handler may call `invocation.reportProgress(text)` while it runs. The extension renders the text as an ephemeral line under that tool's activity step, replacing the previous line. Each report is limited to 200 code points and each invocation to 50 reports; further reports and reports after the handler settles are dropped silently. Progress never enters model messages, chat history, or a stored transcript, and is discarded with the turn on cancellation. In standalone mode the site backend emits the same information as `progress` events (section 14.3). Desktop-agent activity (section 12.3.1) already reaches the same feed.
+
+### 7.6 Site-owned threads
+
+By default the extension keeps one document-memory conversation per hosted chat (section 8, section 11). A site that wants persistent, cross-device, or multi-thread conversations supplies them itself through the manifest's `threads` object of local functions:
+
+```ts
+threads: {
+  list(): Promise<ThreadSummary[]>;              // ≤ 100 entries
+  create(): Promise<ThreadSummary>;
+  load(id): Promise<TranscriptEntry[]>;          // ≤ 200 entries
+  append(id, entries: TranscriptEntry[]): Promise<void>;
+  rename?(id, title): Promise<void>;
+  delete(id): Promise<void>;
+}
+```
+
+A `ThreadSummary` is `{ id, title, updatedAt }` with `id` matching `^[A-Za-z0-9_-]{1,100}$`, `title` ≤ 120 code points, and `updatedAt` an ISO-8601 string. A `TranscriptEntry` is one of:
+
+- `{ "type": "message", "id", "role": "user" | "assistant", "content", "reasoning"?, "createdAt" }` where `content` follows the section 5.3 message content rules and `reasoning` is bounded like a section 5.3 reasoning summary;
+- `{ "type": "activity", "id", "turnId", "steps": [...] }` where each step is `{ "id", "name", "source": "site" | "mcp" | "backend" | "agent", "status": "ok" | "error", "arguments"?, "result"?, "card"? }`, with `arguments` and `result` textual previews of at most 2,000 code points and `card` a section 7.4 card.
+
+Entry ids follow the thread id syntax and are unique within a thread. Each call times out after 30 seconds; a rejected or invalid result shows an error in the thread panel and MUST NOT reach the model. The renderer drives the callbacks: it lists threads in a panel, loads one when the user selects it, creates one for a fresh conversation, and after each completed turn calls `append` with the user message, the activity entry, and the assistant message it produced. The extension MUST NOT pass page context, extension-collected inputs, progress lines, usage, or provider identity to `append`.
+
+Site-supplied entries are untrusted model input. When building the provider conversation the extension uses message entries only, applies the section 5.3 history budget after any truncation the site performed, and precedes entries loaded from the site (as opposed to produced in this document session) with one system line stating that the prior conversation was supplied by the site and is untrusted. The renderer marks loaded entries visibly. A supplied transcript cannot widen the contract: the system prompt, tools, and card declarations that apply are the fingerprinted ones the user approved.
+
+Declaring `threads` is part of the fingerprinted contract, and consent MUST state that the site stores the conversation and can supply earlier messages. Thread contents are never exposed through `session.permissions.query()` or any page API other than the site's own callbacks. For desktop providers the extension keeps one companion thread (section 12.3.1) per site thread, keyed by an extension-minted conversation id rather than the site's id, and releases it when the user deletes or leaves the thread. When `threads` is absent, nothing changes: history is document memory and the page never receives it.
+
+### 7.7 Declared remote tools
+
+An `mcpServers` entry MAY carry `tools`: 1–64 definitions `{ name, description?, inputSchema }` following section 7.1. When present, the extension MUST NOT call `tools/list` for that server and MUST use the declared definitions as the server's tool set. The declarations are part of the fingerprinted contract, so they receive the single-stage consent of site tools instead of the two-stage discovery consent of section 8; a change to any declaration requires fresh consent. The extension still calls `tools/call` over the transport of section 8 and validates results identically. The request's `params._meta` carries `{ "arjunah": { "conversationId" } }`, the extension-minted conversation id, so a site backend can correlate calls without any page involvement. A server that answers `tools/call` for an undeclared name, or whose declared schema the extension rejects, produces a safe `TOOL_ERROR`.
+
+This is how a site runs tools on its own backend in wallet mode: the backend holds its secrets, the page holds only a short-lived token in `headers`, and the model never sees either. Because `headers` are set by page JavaScript they are never secret from the page. The same handler definitions serve the standalone turn endpoint of section 14, so a site writes each tool once.
+
 ## 8. Hosted chat and tools
 
 `chat.open()` asks the extension to show the hosted chat and resolves after the request is accepted; `chat.close()` hides it. The extension toolbar popup also opens it for the active tab. The first submitted message requests the effective hosted capabilities:
@@ -330,13 +396,19 @@ tools: [
 - always `chat.hosted` (the extension generates on the site's behalf; the page itself receives no `models.generate`);
 - `context.read` when sharing page context;
 - `tools.site` when site tools exist;
-- `tools.mcp` when MCP servers exist.
+- `tools.mcp` when MCP servers exist, including servers with declared tools (section 7.7).
+
+The consent text additionally states, when the contract declares them, that the assistant can show site-authored cards (section 7.4) and that the site stores the conversation (section 7.6).
 
 The extension constructs the provider conversation as: extension safety instruction, disclosed site `systemPrompt`, widget option state (section 7.2), optional page context, then chat history. Site instructions, widget labels, and page text are untrusted with respect to provider credentials and extension policy.
 
 The hosted chat runs on the site model (section 4.1). Its extension-owned chrome MUST show the current provider and model and MUST let the user switch to any model of any available provider; the reference UI keeps this selector in the composer. The switch updates the site model. When the model advertises `reasoningLevels`, the composer MUST offer a thinking-effort picker whose value is sent as the turn's `reasoning`; the footer MUST show the context window in use as a meter of the last turn's prompt tokens against `contextWindow`, plus cached and thinking token counts when reported.
 
-Each open hosted chat is one **conversation** with a random id that changes on reset, registration replacement, and navigation. The extension passes the id to desktop providers as the thread id (section 12.3) so an agent can keep one session per browser tab instead of replaying the transcript, and MUST release the thread when the conversation ends. The panel MUST be resizable and movable by its header, MUST show live activity (contacting the model, each tool call with its arguments and result, elapsed time), and MUST preserve user-expandable arguments and results even when the site selects the compact tool presentation. It SHOULD render normalized answer and reasoning deltas as they arrive, MUST render provider reasoning summaries and image attachments when present, MUST let the user attach images when the site model advertises `vision`, MUST show the tokens the last turn used and the session total, the hosted history budget in use, and the provider's quota status when known (section 11.1). A provider that cannot emit deltas still participates and renders its final answer normally. All of this is extension-owned UI in the closed shadow root; the page cannot read it.
+Each open hosted chat is one **conversation** with a random id that changes on reset, registration replacement, navigation, and, with site-owned threads, thread switch. The extension passes the id to desktop providers as the thread id (section 12.3) so an agent can keep one session per browser tab instead of replaying the transcript, and MUST release the thread when the conversation ends. The panel MUST be resizable and movable by its header, MUST show live activity (contacting the model, each tool call with its arguments and result, elapsed time), and MUST preserve user-expandable arguments and results even when the site selects the compact tool presentation. It SHOULD render normalized answer and reasoning deltas as they arrive, MUST render provider reasoning summaries and image attachments when present, MUST let the user attach images when the site model advertises `vision`, MUST show the tokens the last turn used and the session total, the hosted history budget in use, and the provider's quota status when known (section 11.1). A provider that cannot emit deltas still participates and renders its final answer normally. All of this is extension-owned UI in the closed shadow root; the page cannot read it.
+
+### 8.1 Renderer requirements
+
+The renderer is the same code in wallet and standalone mode (section 14) and MUST behave identically for everything it owns: transcript and activity rendering, cards, progress lines, the thread panel, the composer, and attachments. Cards render inline under their tool step in both `toolCallView` modes. Progress lines are ephemeral and never persisted. The thread panel appears only when threads exist (site-owned in wallet mode, backend-owned in standalone mode); its actions are select, new, rename when supported, and delete. Switching threads MUST NOT cancel a running turn: the turn completes in the thread that submitted it, and the panel shows that thread as busy. Deleting a thread cancels its turn. Wallet-only chrome (consent, provider and model pickers, thinking effort, context sharing, usage and quota, launcher) belongs to the extension shell around the renderer and is absent in standalone mode.
 
 The extension popup MUST NOT host a chat of its own. When the active page has registered an assistant, the popup opens that assistant on the page (or offers to hide it); otherwise it states that the page does not implement the protocol. All user-visible chat therefore happens inside the page the user is looking at, under that origin's grant, with the page's disclosed contract.
 
@@ -344,7 +416,7 @@ For tool-capable responses, the extension MAY execute up to six sequential tool 
 
 MCP transport is JSON-RPC 2.0 over Streamable HTTP, negotiating version `2025-03-26`. The extension performs `initialize`, `notifications/initialized`, `tools/list`, and `tools/call`. It accepts JSON or `text/event-stream` responses, parses complete multi-line SSE events incrementally, validates response IDs, and honors `Mcp-Session-Id`. Response bodies are limited to 1,000,000 UTF-8 bytes while reading. On a session-bearing 404 the client reinitializes and retries once. Tool pagination is bounded to 64 tools per server and 16 continuation cursors; descriptions are limited to 500 characters. Sessions are scoped to the page session and endpoint/headers. Redirects are rejected and ambient cookies are omitted for provider and MCP requests. OAuth flows, acting on server-sent requests/notifications, resources, prompts, sampling, and stdio transport are outside this version. Unrelated stream messages are ignored while locating the matching response.
 
-For remote tools, consent has two stages: approve the contract and endpoints for discovery, then inspect and approve the discovered tool metadata. The extension stores a short-lived, single-use preparation token bound to the page session, registration, and discovered routes. Completion MUST execute that prepared tool set and MUST NOT substitute newly discovered definitions. Subsequent turns rediscover metadata and request approval if its fingerprint changed. Preparation expires after five minutes or on cancellation/background restart; the user can start a new turn to prepare again.
+For remote tools without declared definitions (section 7.7), consent has two stages: approve the contract and endpoints for discovery, then inspect and approve the discovered tool metadata. The extension stores a short-lived, single-use preparation token bound to the page session, registration, and discovered routes. Completion MUST execute that prepared tool set and MUST NOT substitute newly discovered definitions. Subsequent turns rediscover metadata and request approval if its fingerprint changed. Preparation expires after five minutes or on cancellation/background restart; the user can start a new turn to prepare again.
 
 ## 9. Errors
 
@@ -368,11 +440,11 @@ The reference implementation uses `window.postMessage` because extension content
 
 Requests time out after 30 seconds, except `models.generate`, which times out after 180 seconds. Site tool invocations and extension-collected input prompts time out after 120 seconds. Navigation destroys pending requests. The bridge is transport, not authority: every privileged background method independently checks the stored origin grant.
 
-Hosted-chat progress (model start/end, tool start/end, usage, bounded `output.delta`, and reasoning delta events) travels from the background to the content script over the extension's own messaging and never through the page bridge. Provider-specific streams are normalized before this hop; the content script does not parse provider wire formats.
+Hosted-chat progress (model start/end, tool start/end, usage, bounded `output.delta`, reasoning delta, `progress`, `card`, and `card.update` events, the same vocabulary as section 14.3) travels from the background to the content script over the extension's own messaging and never through the page bridge. Page-originated `reportProgress` calls and `threads` callback results cross the page bridge as bounded, invocation- or request-bound messages that the content script validates before use; `threads` callbacks are invoked through the bridge like tool handlers and time out after 30 seconds. Provider-specific streams are normalized before this hop; the content script does not parse provider wire formats.
 
 ## 11. Data retention and user controls
 
-The reference extension stores provider configuration, the global default model, grants with their per-site settings, and a local usage ledger in `chrome.storage.local`. Chat history, assistant registrations, and widget control state are document-memory only. New documents and tab close discard them; explicit panel reset clears history and cancels outstanding work while retaining the registration. On back/forward-cache restoration a browser may restore that document UI, but all outstanding operations from before pagehide are cancelled. After an extension reload, existing pages should be reloaded to reconnect the content script. It does not add analytics or remote telemetry. Provider and MCP endpoints necessarily receive approved request data under their own policies.
+The reference extension stores provider configuration, the global default model, grants with their per-site settings, and a local usage ledger in `chrome.storage.local`. Chat history, assistant registrations, and widget control state are document-memory only. With site-owned threads (section 7.6) the site stores the conversation and the extension keeps only the loaded thread in document memory; the extension never persists thread contents itself. New documents and tab close discard them; explicit panel reset clears history and cancels outstanding work while retaining the registration. On back/forward-cache restoration a browser may restore that document UI, but all outstanding operations from before pagehide are cancelled. After an extension reload, existing pages should be reloaded to reconnect the content script. It does not add analytics or remote telemetry. Provider and MCP endpoints necessarily receive approved request data under their own policies.
 
 ### 11.1 Usage ledger and quota disclosure
 
@@ -414,13 +486,13 @@ The extension MUST show detected providers in its options UI and popup with thei
 
 ### 12.3 Generation bridge
 
-`POST /api/generate` accepts `{ providerId, model, messages, tools?, temperature?, maxTokens? }` using the same validated message and tool shapes as section 5 (wire fields `tool_calls` and `tool_call_id`; text content only unless the provider advertises `supportsVision`) and returns the section 5 result shape with `finishReason` `stop` or `tool_calls`. Companion errors use the section 9 codes.
+`POST /api/generate` accepts `{ providerId, model, messages, tools? }` using the same validated message and tool shapes as section 5 (wire fields `tool_calls` and `tool_call_id`; text content only unless the provider advertises `supportsVision`) and returns the section 5 result shape with `finishReason` `stop` or `tool_calls`. Subscription-agent CLIs expose no sampling controls, so a section 5 `temperature` or `maxTokens` is dropped rather than sent; the extension MUST warn in the page console when it drops one, and MUST NOT fail the request. Companion errors use the section 9 codes.
 
 The companion MUST run each agent with its built-in file, shell, web, and editing tools disabled (`claude --tools ""`, OpenCode agent permissions set to deny, and for Codex the read-only sandbox with the documented notice), in an empty scratch working directory, with a minimal environment, and with the user's own MCP servers and project instructions excluded. Where the agent cannot drop its shell tool, the companion SHOULD add an operating-system sandbox around the whole agent process that denies access to the user's files (the reference companion uses macOS `sandbox-exec` for Codex) and MUST report `sandboxed: true` on the provider only when that outer sandbox is active.
 
 ### 12.3.1 Threads
 
-`POST /api/generate` MAY carry a `threadId` (`^[A-Za-z0-9_-]{1,100}$`, the extension's conversation id) and a `reasoning` effort (section 5.3). For adapters that support resumable sessions the companion keeps one **thread** per `threadId`: the agent's own session handle, a working directory that lives as long as the thread, the hash of the system prompt and tool names, and how much of the conversation the agent has seen. The first turn runs the full transcript and records the handle; later turns resume the agent's session and send only the messages the thread has not seen. The companion MUST start a fresh thread when the provider, model, or system-prompt hash changes or when the conversation no longer extends the one it saw, MUST expire idle threads (the reference companion after 30 minutes), MUST end them on `DELETE /api/threads/<threadId>`, and MUST delete the agent's persisted session data when a thread ends. The result carries `thread: true` when a thread was used. Page-level `models.generate` calls carry no thread id and always run fresh.
+`POST /api/generate` MAY carry a `threadId` (`^[A-Za-z0-9_-]{1,100}$`, the extension's conversation id) and a `reasoning` effort (section 5.3). For adapters that support resumable sessions the companion keeps one **thread** per `threadId`: the agent's own session handle, a working directory that lives as long as the thread, the hash of the system prompt and tool names, and how much of the conversation the agent has seen. The first turn runs the full transcript and records the handle; later turns resume the agent's session and send only the messages the thread has not seen. The companion MUST start a fresh thread when the provider, model, or system-prompt hash changes or when the conversation no longer extends the one it saw, MUST expire idle threads (the reference companion after 30 minutes), MUST end them on `DELETE /api/threads/<threadId>`, and MUST delete the agent's persisted session data when a thread ends. The result carries `thread: true` when a thread was used. Page-level `models.generate` calls carry no thread id and always run fresh. With site-owned threads (section 7.6) the extension mints one conversation id per site thread and ends the companion thread when the user deletes or leaves that thread.
 
 The companion SHOULD expose the agent's own activity. `POST /api/generate` accepts an optional `progressId` (`^[A-Za-z0-9_-]{1,100}$`); while the run is in flight, `GET /api/progress/<progressId>?after=<n>` returns `{ items, total, done }` where each item is `{ type: "command", phase: "start" | "end", id, command, exitCode?, output? }`, `{ type: "reasoning", text }`, `{ type: "reasoning_delta", text }`, or `{ type: "output_delta", text }`. Adjacent text deltas MAY be coalesced without changing their order. Items MAY also be `{ type: "thinking", tokens }` (a running estimate of hidden reasoning tokens). The result additionally carries `steps` (the completed commands), `reasoning`, `contextWindow` (when the agent reported the model's window), and `quota` (section 11.1) when the agent reported its rate-limit state. The extension forwards these to the hosted widget as activity and MUST NOT return them to pages. Only the tools the browser extension disclosed and the user approved for the current hosted turn MAY be offered, via a per-session MCP endpoint on the companion whose URL contains a random session id and whose requests carry a random session bearer token.
 
@@ -442,7 +514,7 @@ The reference companion monitors provider discovery centrally and emits when ava
 
 ## 13. Conformance
 
-A conforming v1.1 extension MUST pass tests for:
+A conforming v1.2 extension MUST pass tests for:
 
 1. immutable discovery and version;
 2. exact-origin grant isolation and denial;
@@ -460,4 +532,60 @@ A conforming v1.1 extension MUST pass tests for:
 14. desktop companion pairing, provider selection, configuration sync, and bridged tool rounds through a desktop provider (section 12), when the desktop companion is implemented.
 15. extension-collected tool input declaration, disclosure, scalar validation, invocation binding, cancellation, and absence from model traffic and chat history.
 
-Extensions MAY implement additional APIs under another namespace. They MUST NOT change the semantics of the members defined here while claiming v1.1 conformance.
+and, for the 1.2 surfaces:
+
+16. transcript cards: node and size bounds, rejection of HTML, links, and unknown nodes, text-only model input, visible `message` actions, `local` actions never reaching the model, and consent disclosure of the card output kind;
+17. tool progress: bounds, ephemeral rendering, and absence from model messages, history, and stored transcripts;
+18. site-owned threads: callback validation and timeouts, the untrusted marker and extension-side history budget on loaded entries, consent disclosure of site storage, replay of stored cards, and companion thread release on delete;
+19. declared remote tools: fingerprinted declarations, single-stage consent, no `tools/list` call, `_meta` conversation id, and fresh consent after a declaration change;
+20. standalone renderer: the section 14 event stream and routes against a mock backend, including a client tool round, a card update, and thread switching, with the same rendering bounds as wallet mode.
+
+Extensions MAY implement additional APIs under another namespace. They MUST NOT change the semantics of the members defined here while claiming v1.1 or v1.2 conformance.
+
+## 14. Standalone renderer
+
+The renderer of section 8.1 is published as a dependency-free ES module that a site can embed without the extension. In this **standalone mode** the site backend owns inference, tools, and threads; the renderer is a view. There are no access levels, grants, or consent dialogs, because the site is already the trust domain of its own page. The renderer MUST NOT present itself as the extension or as a wallet, and MUST NOT expose `window.ai.arjunah`.
+
+### 14.1 Embedding
+
+The site mounts the renderer with `{ mount, backend: { baseUrl, headers?, credentials? }, widget?, tools? }`. `widget` accepts the presentation fields of section 7.2 (`greeting`, `placeholder`, `suggestions`, `theme`, `toolCallView`, `controls`); `autoShow` and consent-related behavior do not apply. `tools` accepts section 7 site tool definitions whose handlers run in the page when the backend requests them (section 14.3, `tool.client`); `userInputs` and `reportProgress` work as in sections 7.3 and 7.5. `baseUrl` MUST be same-origin or HTTPS; `credentials` selects whether cookies are sent and defaults to same-origin only.
+
+### 14.2 Transcript
+
+Standalone mode uses the `ThreadSummary` and `TranscriptEntry` shapes of section 7.6 unchanged. The backend is the store; the renderer keeps only the loaded thread in memory.
+
+### 14.3 Event stream
+
+A turn is a `POST` that answers with `text/event-stream`. Each SSE event has `event: <type>` and a JSON `data` object. Event types and their bounds are the wallet-mode progress vocabulary of section 10:
+
+- `turn.start { turnId, threadId }` and `turn.end { turnId, usage? }`;
+- `model.start { round }` and `model.end { round, usage? }`;
+- `output.delta { text }` and `reasoning.delta { text }`, bounded and coalescable like section 12.3.1 deltas;
+- `message { entry }`: a complete assistant `TranscriptEntry`, authoritative over any deltas;
+- `tool.start { id, name, source, arguments }` and `tool.end { id, name, ok, result, card? }` with the preview bounds of section 7.6;
+- `tool.client { id, name, arguments }`: the backend asks the page to run a declared site tool; the renderer validates the arguments against the declared schema, runs the handler, and posts the result (section 14.4), after which the same stream continues;
+- `progress { toolId, text }` (section 7.5);
+- `card { toolId, card }` and `card.update { cardId, card }` (section 7.4);
+- `error { code, message }` using the section 9 codes, which ends the turn.
+
+The renderer reads the body incrementally with a 2,000,000-byte ceiling, ignores unknown event types, rejects malformed data, and applies every section 7.4 and 7.6 bound to what it renders. Provider wire formats never reach the renderer; the backend normalizes them.
+
+### 14.4 Routes
+
+Relative to `baseUrl`:
+
+- `GET threads` → `ThreadSummary[]`; `POST threads` → `ThreadSummary`; `GET threads/{id}` → `TranscriptEntry[]`; `PATCH threads/{id}` with `{ title }`; `DELETE threads/{id}`.
+- `POST threads/{id}/turns` with `{ content, controls? }` where `content` follows section 5.3 user message content → event stream.
+- `POST threads/{id}/turns/{turnId}/tool-results` with `{ id, result }` where `result` follows section 7 result validation → `204`; the open stream continues.
+- `POST threads/{id}/actions` with `{ cardId, name, payload?, values? }` → `204`, or `{ card }` to update the card in place.
+- `POST threads/{id}/turns/{turnId}/cancel` → `204`.
+
+Backends MAY require their own authentication through `headers` or cookies. Responses other than the event stream are JSON bounded to 1,000,000 bytes. The renderer applies the section 7.6 list and entry limits to every response.
+
+### 14.5 Backend tools and the shared definition
+
+In standalone mode server tools need no protocol: the backend runs them inside the turn and reports them with `tool.start` and `tool.end` using `source: "backend"`. A backend that also serves wallet-mode sites exposes the same handlers as a section 7.7 MCP endpoint. The reference SDK provides one definition helper that produces both, so a site writes each tool once and chooses per deployment whether the extension or its own backend runs the model.
+
+### 14.6 Security
+
+The renderer renders answers as text and Markdown-derived DOM, never HTML; it evaluates no code, loads no remote code, and works under a strict content security policy. Card, transcript, and stream bounds are enforced by the renderer itself because no broker sits in front of it. Standalone mode provides none of the wallet guarantees of section 2: the site sees everything the user types, and the renderer MUST NOT display any wording that suggests otherwise.

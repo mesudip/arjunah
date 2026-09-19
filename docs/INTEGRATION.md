@@ -29,7 +29,7 @@ dependency for the types only.
 
 Root, window.ai.arjunah, always present once the extension is installed:
 
-version: protocol version string, currently "1.1.0". Feature-detect by members, not version.
+version: protocol version string, currently "1.2.0". Feature-detect by members, not version.
 isEnabled(): Promise<boolean>. True when this origin holds level 1 or 2 access.
 enable(request?): Promise<Session>. Asks the visitor for access and resolves to the session. No argument means level 1. Does not prompt when the access is already held. Rejects with code USER_DENIED.
 disable(): Promise<true>. Drops the origin's whole grant, including a hosted-chat grant.
@@ -92,15 +92,47 @@ name: required, 1 to 80 characters.
 description: up to 280 characters.
 systemPrompt: up to 12,000 characters. Disclosed to the visitor verbatim at consent.
 tools: up to 32 of { name, description, inputSchema, outputContent?, userInputs?, handler }. Names match ^[A-Za-z0-9_-]{1,64}$. inputSchema uses the JSON Schema subset in SPEC section 7.1 (object schemas with typed properties; keep them small and set additionalProperties false).
-handler(args, invocation): sync or async. invocation is { id, name, controls, requestInput(id) }. Without outputContent, return JSON-serialisable data at most 64 KiB. With outputContent: ["text"] or ["text", "image"], return { kind: "content", content: [...] }; 1–8 bounded parts, at most four supported base64 images, and every image requires a text fallback. Vision models see broker-generated user image parts after all ordinary tool results in the round; other models receive only the text.
+handler(args, invocation): sync or async. invocation is { id, name, controls, requestInput(id), reportProgress(text) }. Without outputContent, return JSON-serialisable data at most 64 KiB. With outputContent: ["text"], ["text", "image"] or ["text", "card"], return { kind: "content", content: [...] }; 1–8 bounded parts, at most four supported base64 images, at most one card, and every image or card requires a text fallback. Vision models see broker-generated user image parts after all ordinary tool results in the round; other models receive only the text. A card is drawn in the transcript and never reaches any model.
 userInputs: scalars the model must never supply (passphrase, one-time code, confirmation). Declared outside inputSchema, collected by the extension in its own labelled prompt, delivered only to your handler via await invocation.requestInput(id), never added to model messages or history. Your handler receives the value, so this protects against accidental model exposure, not against your own code. See SPEC 7.3.
-mcpServers: up to 8 { id, name, url, headers? }. HTTPS only, loopback HTTP for development. The visitor approves the server, then its discovered tool metadata, before any model call.
+mcpServers: up to 8 { id, name, url, headers?, tools? }. HTTPS only, loopback HTTP for development. Without tools the visitor approves the server, then its discovered tool metadata, before any model call. With tools (up to 64 definitions) the extension never calls tools/list, the definitions join the fingerprinted contract, and one approval covers them — this is how you run first-party tools on your own backend while the secret stays there. tools/call carries { arjunah: { conversationId } } in params.\_meta.
+
+threads: your own conversation store, as local functions { list, create, load, append, rename?, delete }. Declaring it means the extension keeps no history of its own: it asks you for the thread list, loads the one the visitor picks, and hands you the entries each finished turn produced. Consent says your site stores the conversation, and messages you supply reach the model labelled as untrusted. See SPEC 7.6.
+
+onCardAction(event): a card's local action. Return a card to replace the one the action came from. The model is never involved.
+
+reportProgress(text): one ephemeral line under that tool's step while it runs. At most 200 characters, 50 reports per invocation. Never model input, never stored.
 widget: { autoShow, toolCallView: "compact" | "detailed", greeting (500), placeholder (80), suggestions (6 x 120), theme: { accent: "#rrggbb", mode }, controls (8) }. Controls are { id, label, type: toggle | select | button, default?, options?, model? }; values reach handlers as invocation.controls and fire onControlChange(id, value, values). Widget options never change permissions, the model, or the consent text.
 onControlChange(id, value, values): local function, never crosses to the extension.
 
 One registration per page. Registering again replaces the previous one and clears
 the hosted chat history. Any change to the contract, including widget controls,
 changes its fingerprint and the visitor is asked again before the next model call.
+
+## Cards, progress, and threads in one paragraph each
+
+A card is a small JSON tree (text, list, button, form) a tool returns beside its
+text. The extension draws it in the transcript; the model sees only the text. A
+button or form carries one action: { type: "message", text } sends that exact text
+as a visible user turn, and { type: "local", name, payload } calls your
+onCardAction and never becomes a model message. No HTML, Markdown, links, or
+images; bounds are in SPEC 7.4.
+
+Progress is invocation.reportProgress(text) inside a slow handler. It replaces one
+line under that tool's step and is discarded with the turn.
+
+Threads are yours when you declare manifest.threads. Without it the extension
+keeps one document-memory conversation, as before, and the page never sees it.
+
+## Without the extension
+
+The same widget is published as arjunah-widget, mounted against your own backend.
+Your server then owns inference, tools, and threads, and there is no wallet: no
+consent, no visitor-chosen model, and your backend sees everything typed. The
+package README and SPEC section 14 have the event stream and routes.
+
+```sh
+npm install arjunah-widget
+```
 
 ## models.generate request and result
 
@@ -110,6 +142,10 @@ text } or { type: "image", mediaType: image/png | image/jpeg | image/webp |
 image/gif, data: base64 }), model?, temperature? (0 to 2), maxTokens? (1 to 32768),
 tools? (up to 64, needs a model with capabilities.tools), reasoning? ({ effort } or
 the bare effort string: none, low, medium, high, xhigh, max).
+
+temperature and maxTokens are dropped, with a warning in the page console, when
+the user's chosen model is a desktop subscription agent: those CLIs expose no
+sampling controls. The request still succeeds, so a site may always send them.
 
 Result: { id, model, message: { role, content, toolCalls, attachments, reasoning },
 finishReason, usage: { promptTokens, completionTokens, totalTokens, cachedTokens,
