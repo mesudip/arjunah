@@ -1,0 +1,289 @@
+main {
+  width: min(760px, calc(100% - 32px));
+  margin: 44px auto 64px;
+  display: grid;
+  gap: 16px;
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+.mark {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  background: transparent;
+  object-fit: contain;
+  font-weight: 800;
+  font-size: 17px;
+  flex: none;
+}
+h1 {
+  font-size: 26px;
+  letter-spacing: -0.02em;
+}
+h2 {
+  font-size: 17px;
+}
+.card {
+  padding: 22px 24px;
+}
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.help {
+  color: var(--muted);
+  margin: 6px 0 16px;
+  font-size: 13.5px;
+}
+form {
+  display: grid;
+  gap: 14px;
+}
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.keep-key {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.keep-key input {
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+/* Provider cards */
+.providers {
+  display: grid;
+  gap: 10px;
+}
+.provider {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 6px 14px;
+  align-items: start;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-2);
+}
+.provider.available {
+  background: var(--surface);
+}
+.provider.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.provider > .dot {
+  margin-top: 7px;
+}
+.provider .title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.provider .title strong {
+  font-size: 15px;
+}
+.provider .meta,
+.provider .reason {
+  grid-column: 2;
+  font-size: 13px;
+  color: var(--muted);
+}
+.provider .reason {
+  color: var(--warn);
+}
+.provider .notice {
+  grid-column: 2;
+  font-size: 13px;
+  color: var(--danger);
+}
+.provider .controls {
+  grid-column: 3;
+  grid-row: 1 / span 6;
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  justify-items: stretch;
+  min-width: 190px;
+}
+.provider .controls select {
+  max-width: 240px;
+}
+.provider .not-ready {
+  font-size: 12px;
+  color: var(--warn);
+  text-align: center;
+}
+.provider .stats {
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.provider .stats b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* Connection line: the account a request is billed to */
+.provider .connection {
+  grid-column: 2;
+  margin-top: 2px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--ok-soft);
+  border: 1px solid #bbf7d0;
+  font-size: 13px;
+  color: #065f46;
+}
+.provider .connection.none {
+  background: var(--surface-2);
+  border-color: var(--line);
+  color: var(--muted);
+}
+.provider .connection-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+}
+.provider .connection .label {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 11px;
+  font-weight: 600;
+}
+.provider .connection .account {
+  font-size: 14px;
+  color: #064e3b;
+}
+.provider .connection .plan {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #bbf7d0;
+  font-size: 11px;
+  font-weight: 600;
+}
+.provider .connection-detail {
+  margin-top: 3px;
+  color: #047857;
+}
+
+/* A pairing or connectivity problem that blocks every subscription provider */
+.provider.alert-row {
+  display: block;
+  background: var(--danger-soft);
+  border-color: #fecaca;
+  color: var(--danger);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.provider.alert-row a {
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+}
+
+/* Guidance for unavailable providers */
+.provider .guidance {
+  grid-column: 2;
+  margin-top: 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  font-size: 13px;
+}
+.provider .guidance.missing,
+.provider .guidance.signed-out {
+  background: var(--warn-soft);
+  border-color: #fde68a;
+}
+.provider .guidance.error {
+  background: var(--danger-soft);
+  border-color: #fecaca;
+}
+.guidance-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.guidance .pill {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--surface);
+}
+.guidance ol {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 4px;
+}
+.guidance code,
+.provider .notice code {
+  user-select: all;
+}
+.guidance .note {
+  margin: 8px 0 0;
+  color: var(--muted);
+}
+.guidance .links {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+/* Grants */
+.grants {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.grant {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 12px;
+  align-items: center;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.grant .origin {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.grant .detail {
+  grid-column: 1;
+  font-size: 12.5px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.grant .btn {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}

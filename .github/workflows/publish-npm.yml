@@ -1,0 +1,36 @@
+name: Publish to npm
+
+# Manual: publishes the `arjunah` SDK and `arjunah-desktop` companion at the
+# version in their package.json files. Needs the NPM_TOKEN repository secret
+# (an npm automation token). Pre-release versions go to the `alpha` dist-tag by
+# default so `npm install arjunah` keeps resolving to the last stable release.
+on:
+  workflow_dispatch:
+    inputs:
+      dist_tag:
+        description: npm dist-tag (alpha for pre-releases, latest for stable)
+        default: alpha
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm run check
+      - run: npm publish --workspace arjunah --access public --provenance --tag "${{ inputs.dist_tag }}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: npm publish --workspace arjunah-desktop --access public --provenance --tag "${{ inputs.dist_tag }}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

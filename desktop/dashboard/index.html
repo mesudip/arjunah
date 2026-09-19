@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="dashboard-token" content="__DASHBOARD_TOKEN__" />
+    <title>अर्जुनः Desktop</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <span class="mark">AI</span>
+        <div>
+          <h1>अर्जुनः Desktop</h1>
+          <p id="subtitle">Local companion for the browser extension.</p>
+        </div>
+      </header>
+      <section id="pairing">
+        <h2>Pair a browser</h2>
+        <p class="help">
+          In the extension settings, open <strong>Desktop app</strong> and enter
+          this code. Codes expire after ten minutes and rotate after each
+          pairing.
+        </p>
+        <div class="code" id="code">······</div>
+        <div class="actions">
+          <button id="rotate" class="secondary">New code</button>
+        </div>
+        <h3>Paired browsers</h3>
+        <div id="clients" class="list"></div>
+      </section>
+      <section>
+        <h2>Subscription providers on this computer</h2>
+        <p class="help">
+          Detected coding-agent CLIs signed in with your own accounts. Paired
+          browsers can use them without API keys. Built-in file and shell tools
+          are disabled for browser requests.
+        </p>
+        <div id="providers" class="list"></div>
+        <div class="actions">
+          <button id="recheck" class="secondary">Re-check providers</button>
+        </div>
+        <label class="toggle"
+          ><input id="codex-toggle" type="checkbox" /> Enable Codex (keeps a
+          read-only shell sandbox; read the notice)</label
+        >
+      </section>
+      <section id="t3">
+        <h2>T3 Code (optional)</h2>
+        <p class="help">
+          If you run <code>npx t3 serve</code> (or the T3 Code desktop app),
+          pair it here. अर्जुनः then lists every model T3 knows, with names,
+          context windows, reasoning levels, sign-in state, and subscription
+          usage windows. अर्जुनः still runs the agents itself, without tools.
+        </p>
+        <p id="t3-state" class="status"></p>
+        <form id="t3-form">
+          <label
+            >T3 Code address<input
+              id="t3-url"
+              type="url"
+              value="http://127.0.0.1:3777"
+              required
+          /></label>
+          <label
+            >Pairing token<input
+              id="t3-token"
+              placeholder="Printed by npx t3 serve / npx t3 pair"
+              autocomplete="off"
+          /></label>
+          <div class="actions">
+            <button type="button" id="t3-unpair" class="danger" hidden>
+              Disconnect
+            </button>
+            <button type="submit" id="t3-pair">Connect</button>
+          </div>
+        </form>
+      </section>
+      <section>
+        <h2>Synced configuration</h2>
+        <p class="help">
+          Settings saved in a paired browser sync here. Edits below sync back to
+          every paired browser.
+        </p>
+        <form id="config-form">
+          <label
+            >OpenAI default model<input
+              id="openai-model"
+              placeholder="gpt-5.6-sol"
+          /></label>
+          <label
+            >OpenAI API key<input
+              id="openai-key"
+              type="password"
+              autocomplete="off"
+              placeholder="Leave blank to keep the synced key"
+          /></label>
+          <label
+            >Active provider<select id="active">
+              <option value="openai">OpenAI API key</option>
+              <option value="desktop:claude-code">Claude Code (desktop)</option>
+              <option value="desktop:codex">Codex (desktop)</option>
+              <option value="desktop:opencode">OpenCode (desktop)</option>
+            </select></label
+          >
+          <label
+            >Active desktop model<input id="active-model" placeholder="default"
+          /></label>
+          <div class="actions">
+            <button type="submit">Save and sync</button>
+          </div>
+        </form>
+        <p id="sync-meta" class="meta"></p>
+      </section>
+      <section>
+        <h2>Activity</h2>
+        <div id="activity" class="log"></div>
+        <p class="meta" id="data-path"></p>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

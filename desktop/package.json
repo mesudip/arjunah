@@ -1,0 +1,32 @@
+{
+  "name": "arjunah-desktop",
+  "version": "1.0.0-alpha.1",
+  "description": "अर्जुनः Desktop: pairs with the अर्जुनः browser extension and lends websites your Claude Code, Codex, or OpenCode subscription over loopback.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mesudip/arjunah.git",
+    "directory": "desktop"
+  },
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "arjunah-desktop": "bin/arjunah-desktop.mjs"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "dashboard",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.22.0"
+  },
+  "keywords": [
+    "ai",
+    "arjunah",
+    "claude-code",
+    "codex",
+    "opencode",
+    "desktop-companion"
+  ]
+}

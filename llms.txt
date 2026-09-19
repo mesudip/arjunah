@@ -1,0 +1,28 @@
+# अर्जुनः (Arjunah)
+
+> A browser extension and open protocol that lets a website use the AI its visitor already has. The extension injects window.ai.arjunah into every page; the site publishes an assistant contract (level 0) or enables access and calls the visitor's chosen model (level 1 or 2). The visitor approves per exact origin; the site never sees credentials, accounts, or quotas.
+
+Names: everything a person sees says अर्जुनः; code, packages, and identifiers use arjunah. npm: arjunah (TypeScript SDK and types for sites), arjunah-desktop (desktop companion that lends Claude Code, Codex, or OpenCode subscriptions). Page API: window.ai.arjunah with isEnabled(), enable() (defaults to level 1, resolves to a session carrying models, providers, context, permissions), disable(), site.register(), chat.*.
+
+## Integrate a website
+
+- [Integration guide](docs/INTEGRATION.md): the API on one screen, level choice, manifest bounds, generate request and result, error codes, traps, how to verify locally. Start here.
+- [SDK types](packages/sdk/src/types.ts): every request and result shape, with the limits in doc comments.
+- [SDK entry point](packages/sdk/src/index.ts): the helpers the arjunah package exports.
+- [Playground](demo/index.html): a complete level 0, 1, and 2 integration to copy from.
+- [Test fixture](tests/fixtures/site.html): minimal registrations used by the browser suites.
+
+## Protocol
+
+- [Specification](SPEC.md): normative. Sections 3 (discovery), 4 (levels and consent), 5.3 (generation), 7 (site contracts, schema subset, widget, collected inputs), 9 (errors).
+- [Security model](SECURITY.md): what stays in the extension, what the page can never see.
+
+## Install and run
+
+- [Install guide](docs/INSTALL.md): extension for Chrome and Firefox, desktop companion for macOS, Linux, Windows.
+- [Desktop companion](docs/DESKTOP.md): pairing, autostart, provider states, subscription agents.
+
+## Optional
+
+- [Contributor context](AGENTS.md): repository map and working rules for changing this codebase.
+- [Progress log](docs/PROGRESS.md): what was verified and when.

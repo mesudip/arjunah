@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>अर्जुनः</title>
+    <link rel="stylesheet" href="theme.css" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <header class="top">
+        <img
+          class="mark"
+          src="icons/icon-128.png"
+          alt=""
+          width="38"
+          height="38"
+        />
+        <div class="title">
+          <strong>अर्जुनः</strong>
+          <small id="origin" class="muted">Current tab</small>
+        </div>
+        <button
+          id="settings"
+          class="btn btn-ghost btn-icon"
+          title="Settings"
+          aria-label="Settings"
+        >
+          ⚙
+        </button>
+      </header>
+
+      <section class="card site" aria-labelledby="site-heading">
+        <div class="card-head">
+          <span id="site-heading" class="eyebrow">This site</span>
+          <span id="level" class="badge" hidden></span>
+        </div>
+        <p id="state" role="status" class="state">Checking this page…</p>
+        <div id="site-dashboard" hidden>
+          <p id="assistant" class="assistant"></p>
+          <label class="field">
+            <span>Model for this site</span>
+            <select id="site-model" aria-label="Model for this site"></select>
+          </label>
+          <p id="fallback" class="small muted" hidden></p>
+          <div id="exposed" class="exposed" hidden>
+            <span class="eyebrow">Providers this site may list</span>
+            <div id="exposed-list"></div>
+          </div>
+          <p id="context-fields" class="small muted"></p>
+        </div>
+        <div class="row">
+          <button id="toggle-site" class="btn btn-primary" hidden>
+            Open assistant
+          </button>
+          <button id="revoke-site" class="btn btn-danger btn-sm" hidden>
+            Revoke access
+          </button>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="providers-heading">
+        <div class="card-head">
+          <span id="providers-heading" class="eyebrow">Providers</span>
+          <a id="manage" class="small" href="#">Manage</a>
+        </div>
+        <div id="provider-alert" role="alert" hidden></div>
+        <label class="field">
+          <span>Global default model</span>
+          <select id="default-model" aria-label="Global default model"></select>
+        </label>
+        <div id="providers" class="providers"></div>
+        <p id="provider-label" class="small muted"></p>
+      </section>
+      <p id="note" role="status"></p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

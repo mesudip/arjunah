@@ -1,0 +1,147 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>अर्जुनः test page</title>
+  </head>
+  <body>
+    <main>
+      <h1>Extension fixture</h1>
+      <p id="context">A visible context marker: cobalt-orchid.</p>
+      <output id="status">loading</output>
+    </main>
+    <script>
+      window.toolCalls = 0;
+      window.controlEvents = [];
+      window.lastInvocation = null;
+      window.safeInputRequested = false;
+      window.receivedUserInput = null;
+      window.changeContract = () =>
+        window.ai.arjunah.site.register({
+          name: "Changed fixture assistant",
+          systemPrompt: "This changed instruction must be redisclosed.",
+          widget: { autoShow: false },
+          tools: [
+            {
+              name: "echo",
+              description: "Echo after contract change",
+              inputSchema: { type: "object" },
+              handler: async (args) => {
+                window.toolCalls++;
+                return { echoed: args.value };
+              },
+            },
+          ],
+        });
+      window.registerBrokerInput = () =>
+        window.ai.arjunah.site.register({
+          name: "Broker input fixture",
+          systemPrompt: "Use the declared site tool.",
+          widget: { autoShow: false },
+          tools: [
+            {
+              name: "secure_echo",
+              description: "Echo using a separately collected confirmation",
+              inputSchema: {
+                type: "object",
+                properties: { value: { type: "string" } },
+                required: ["value"],
+                additionalProperties: false,
+              },
+              userInputs: [
+                {
+                  id: "confirmation",
+                  label: "One-time confirmation",
+                  description: "This value is delivered only to the page tool.",
+                  schema: { type: "string", minLength: 1, maxLength: 80 },
+                  secret: true,
+                },
+              ],
+              handler: async (args, invocation) => {
+                window.toolCalls++;
+                window.safeInputRequested = true;
+                const confirmation =
+                  await invocation.requestInput("confirmation");
+                window.receivedUserInput = confirmation;
+                return {
+                  echoed: args.value,
+                  confirmed: confirmation === "violet-private-2718",
+                };
+              },
+            },
+          ],
+        });
+      window.registerMcp = (url) =>
+        window.ai.arjunah.site.register({
+          name: "MCP fixture assistant",
+          systemPrompt: "Use the declared MCP tool.",
+          widget: { autoShow: false },
+          mcpServers: [{ id: "demo", name: "Demo MCP", url }],
+        });
+      window.registerAutoShow = () =>
+        window.ai.arjunah.site.register({
+          name: "Auto-show fixture",
+          widget: { autoShow: true, greeting: "Opened automatically" },
+        });
+      window.ready = new Promise((resolve) => {
+        const start = async () => {
+          window.registration = await window.ai.arjunah.site.register({
+            name: "Fixture assistant",
+            description: "Exercises hosted chat",
+            systemPrompt: "Use tools when useful.",
+            widget: {
+              autoShow: false,
+              toolCallView: "detailed",
+              greeting: "Fixture ready",
+              placeholder: "Try the echo tool…",
+              suggestions: ["Please use the echo tool", "What can you do?"],
+              theme: { accent: "#0f766e" },
+              controls: [
+                {
+                  id: "verbose",
+                  type: "toggle",
+                  label: "Verbose answers",
+                  description: "Ask for longer replies",
+                  default: false,
+                },
+                {
+                  id: "tone",
+                  type: "select",
+                  label: "Tone",
+                  options: [
+                    { value: "neutral" },
+                    { value: "friendly", label: "Friendly" },
+                  ],
+                  default: "neutral",
+                  model: false,
+                },
+                { id: "reset", type: "button", label: "Reset demo" },
+              ],
+            },
+            onControlChange: (id, value, values) =>
+              window.controlEvents.push({ id, value, values }),
+            tools: [
+              {
+                name: "echo",
+                description: "Echo an input value",
+                inputSchema: {
+                  type: "object",
+                  properties: { value: { type: "string" } },
+                },
+                handler: async (args, invocation) => {
+                  window.toolCalls++;
+                  window.lastInvocation = invocation;
+                  return { echoed: args.value };
+                },
+              },
+            ],
+          });
+          document.querySelector("#status").textContent = "ready";
+          resolve(true);
+        };
+        if (window.ai?.arjunah) start();
+        else window.addEventListener("arjunah:ready", start, { once: true });
+      });
+    </script>
+  </body>
+</html>

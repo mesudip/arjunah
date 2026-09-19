@@ -1,0 +1,1228 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { broker, toolReply } from "./helpers/broker.mjs";
+
+const manifest = {
+  name: "Test",
+  tools: [
+    {
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+    },
+  ],
+};
+
+test("direct tool fields survive the actual background/provider path; unlisted models never fetch", async (t) => {
+  const b = await broker(t);
+  await b.approve(["models.generate"]);
+  await b.ok("models.generate", {
+    messages: [
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: "c",
+            type: "function",
+            function: { name: "echo", arguments: "{}" },
+          },
+        ],
+      },
+      { role: "tool", content: "ok", toolCallId: "c" },
+    ],
+  });
+  const messages = b.requests[0].payload.messages;
+  assert.equal(messages[0].tool_calls[0].id, "c");
+  assert.equal(messages[1].tool_call_id, "c");
+  assert.equal(
+    (
+      await b.call("models.generate", {
+        model: "expensive",
+        messages: [{ role: "user", content: "hi" }],
+      })
+    ).error.code,
+    "INVALID_REQUEST",
+  );
+  assert.equal(b.requests.length, 1);
+});
+
+test("OpenAI key retention works for both Save and Test, and settings never receives the secret", async (t) => {
+  const b = await broker(t);
+  const input = {
+    baseUrl: "https://api.openai.com/v1",
+    model: "allowed",
+    keepApiKey: true,
+  };
+  b.hooks.fetch = async (url) =>
+    Response.json(
+      url.endsWith("/models")
+        ? { data: [{ id: "allowed" }] }
+        : { choices: [{ message: { content: "Connected." } }] },
+    );
+  assert.equal(
+    (await b.call("provider.test", input, b.extension)).error.message,
+    "An OpenAI API key is required. Enter a key or select Use saved API key.",
+  );
+  assert.equal(b.requests.length, 0);
+  await b.ok("provider.save", { ...input, apiKey: "new-secret" }, b.extension);
+  await b.ok("provider.test", input, b.extension);
+  assert.equal(b.requests[0].init.headers.Authorization, "Bearer new-secret");
+  assert.equal(b.store.provider.apiKey, "new-secret");
+  assert.equal((await b.ok("provider.get", {}, b.extension)).apiKey, undefined);
+});
+
+for (const change of [
+  "navigation",
+  "registration",
+  "revoke",
+  "clear",
+  "tab-close",
+]) {
+  test(`${change} during a model round prevents tool execution and further transmission`, async (t) => {
+    const b = await broker(t);
+    const params = await b.prepare(manifest);
+    b.hooks.fetch = async () => {
+      if (change === "navigation")
+        b.sessions.set(1, {
+          origin: "https://other.test",
+          session: "new-session",
+          registrationId: "new",
+        });
+      if (change === "registration") b.sessions.get(1).registrationId = "new";
+      if (change === "revoke") await b.ok("grant.revoke");
+      if (change === "clear") await b.ok("grants.clear", {}, b.extension);
+      if (change === "tab-close") b.removed(1);
+      return toolReply("site__echo", '{"value":"test"}');
+    };
+    assert.equal(
+      (await b.call("chat.complete", params)).error.code,
+      "PERMISSION_REQUIRED",
+    );
+    assert.equal(b.invocations.length, 0);
+    assert.equal(b.requests.length, 1);
+  });
+}
+
+test("revocation during a tool handler prevents its result reaching the provider", async (t) => {
+  const b = await broker(t);
+  const params = await b.prepare(manifest);
+  b.hooks.fetch = async () => toolReply("site__echo", '{"value":"test"}');
+  b.hooks.tool = async () => {
+    await b.ok("grant.revoke");
+    return { secret: "do not send" };
+  };
+  assert.equal(
+    (await b.call("chat.complete", params)).error.code,
+    "PERMISSION_REQUIRED",
+  );
+  assert.equal(b.requests.length, 1);
+  assert.equal(b.invocations.length, 1);
+});
+
+test("grant mutation queue prevents a stale approval from resurrecting a revocation", async (t) => {
+  const b = await broker(t);
+  await b.approve(["models.generate"]);
+  const senderB = b.sender("https://b.test", 2);
+  b.sessions.set(2, { origin: "https://b.test", session: "b" });
+  let release, arrived;
+  const reached = new Promise((r) => (arrived = r)),
+    held = new Promise((r) => (release = r));
+  b.hooks.set = async (value) => {
+    if (
+      value.grants?.["https://b.test"] &&
+      value.grants?.["https://site.test"]
+    ) {
+      arrived();
+      await held;
+    }
+  };
+  const approval = b.approve(["models.list"], {}, senderB);
+  await reached;
+  const revoke = b.ok("grant.revoke");
+  release();
+  await Promise.all([approval, revoke]);
+  assert.equal(await b.ok("grant.query"), null);
+  assert.deepEqual((await b.ok("grant.query", {}, senderB)).capabilities, [
+    "models.list",
+  ]);
+});
+
+test("concurrent approvals preserve both origins and clear-all is ordered", async (t) => {
+  const b = await broker(t);
+  const senderB = b.sender("https://b.test", 2);
+  b.sessions.set(2, { origin: "https://b.test", session: "b" });
+  await Promise.all([
+    b.approve(["models.list"]),
+    b.approve(["models.generate"], {}, senderB),
+  ]);
+  assert.equal(Object.keys(b.store.grants).length, 2);
+  await Promise.all([
+    b.approve(["context.read"]),
+    b.ok("grants.clear", {}, b.extension),
+  ]);
+  assert.equal(Object.keys(b.store.grants ?? {}).length, 0);
+});
+
+test("documented context and tool-result maxima reach the model intact", async (t) => {
+  const b = await broker(t);
+  const text = "\u0001".repeat(20000);
+  assert.equal(
+    (await b.call("extension.chat", { history: [] }, b.extension)).error.code,
+    "NOT_SUPPORTED",
+    "the popup no longer hosts its own chat",
+  );
+  const params = await b.prepare(manifest, ["text"]);
+  let count = 0;
+  b.hooks.fetch = async () =>
+    ++count === 1
+      ? toolReply("site__echo", '{"value":"test"}')
+      : Response.json({ choices: [{ message: { content: "done" } }] });
+  b.hooks.tool = () => "x".repeat(65534);
+  await b.ok("chat.complete", { ...params, context: { text } });
+  assert.ok(
+    b.requests[0].payload.messages.some((m) =>
+      m.content.includes(JSON.stringify(text)),
+    ),
+  );
+  assert.equal(
+    b.requests.at(-1).payload.messages.find((m) => m.role === "tool").content
+      .length,
+    65536,
+  );
+});
+
+test("long valid site names receive callable provider aliases", async (t) => {
+  const b = await broker(t);
+  const name = "x".repeat(64);
+  const params = await b.prepare({ name: "Long", tools: [{ name }] });
+  let count = 0;
+  b.hooks.fetch = async (_url, _init, payload) =>
+    ++count === 1
+      ? toolReply(payload.tools[0].function.name)
+      : Response.json({ choices: [{ message: { content: "done" } }] });
+  await b.ok("chat.complete", params);
+  assert.equal(b.invocations[0].name, name);
+  assert.ok(b.requests[0].payload.tools[0].function.name.length <= 64);
+});
+
+for (const args of ["not JSON", "{}", '{"value":42}']) {
+  test(`invalid tool arguments are returned as a safe tool error without invoking a handler: ${args}`, async (t) => {
+    const b = await broker(t);
+    const params = await b.prepare(manifest);
+    let count = 0;
+    b.hooks.fetch = async () =>
+      ++count === 1
+        ? toolReply("site__echo", args)
+        : Response.json({ choices: [{ message: { content: "done" } }] });
+    await b.ok("chat.complete", params);
+    assert.equal(b.invocations.length, 0);
+    assert.equal(
+      JSON.parse(b.requests[1].payload.messages.at(-1).content).isError,
+      true,
+    );
+  });
+}
+
+test("unapproved contracts, foreign preparation tokens, and subframes are rejected", async (t) => {
+  const b = await broker(t);
+  const reg = await b.register(manifest);
+  await b.approve(["models.generate", "chat.hosted", "tools.site"]);
+  assert.equal(
+    (await b.call("chat.prepare", { manifest, registrationId: reg.id })).error
+      .code,
+    "PERMISSION_REQUIRED",
+  );
+  const params = await b.prepare(manifest);
+  b.sessions.get(1).session = "changed";
+  assert.equal(
+    (await b.call("chat.complete", params)).error.code,
+    "PERMISSION_REQUIRED",
+  );
+  assert.equal(
+    (await b.call("models.list", {}, { ...b.sender(), frameId: 1 })).error.code,
+    "NOT_SUPPORTED",
+  );
+  assert.equal(b.requests.length, 0);
+});
+
+function mcpMock(b, remoteTools) {
+  return async (_url, _init, request) => {
+    if (!request.method)
+      return Response.json({ choices: [{ message: { content: "done" } }] });
+    if (request.method === "notifications/initialized")
+      return new Response(null, { status: 202 });
+    return Response.json({
+      jsonrpc: "2.0",
+      id: request.id,
+      result:
+        request.method === "initialize"
+          ? { protocolVersion: "2025-03-26" }
+          : { tools: remoteTools },
+    });
+  };
+}
+
+test("MCP tool discovery requires origin approval and execution requires the exact disclosed tool set", async (t) => {
+  const b = await broker(t);
+  const remote = {
+    name: "Remote",
+    mcpServers: [{ id: "remote", url: "https://mcp.test/rpc" }],
+  };
+  const reg = await b.register(remote);
+  const capabilities = ["chat.hosted", "models.generate", "tools.mcp"];
+  await b.approve(capabilities, {
+    registrationId: reg.id,
+    _resources: { contractFingerprint: reg.fingerprint },
+  });
+  assert.equal(
+    (await b.call("chat.prepare", { manifest: remote, registrationId: reg.id }))
+      .error.code,
+    "PERMISSION_REQUIRED",
+  );
+  assert.equal(b.requests.length, 0);
+  const resources = {
+    contractFingerprint: reg.fingerprint,
+    mcpOrigins: ["https://mcp.test"],
+  };
+  await b.approve(capabilities, {
+    registrationId: reg.id,
+    _resources: resources,
+  });
+  b.hooks.fetch = mcpMock(b, [
+    {
+      name: "dangerous",
+      description: "Delete a document",
+      inputSchema: { type: "object" },
+    },
+  ]);
+  const prep = await b.ok("chat.prepare", {
+    manifest: remote,
+    registrationId: reg.id,
+  });
+  assert.equal(prep.tools[0].description, "Delete a document");
+  assert.equal(
+    (
+      await b.call("chat.complete", {
+        preparedId: prep.id,
+        fingerprint: reg.fingerprint,
+        registrationId: reg.id,
+        history: [{ role: "user", content: "hi" }],
+      })
+    ).error.code,
+    "PERMISSION_REQUIRED",
+  );
+  assert.equal(b.requests.filter((r) => !r.payload.method).length, 0);
+  const prep2 = await b.ok("chat.prepare", {
+    manifest: remote,
+    registrationId: reg.id,
+  });
+  await b.approve(capabilities, {
+    registrationId: reg.id,
+    preparedId: prep2.id,
+    _resources: { ...resources, toolFingerprint: prep2.toolFingerprint },
+  });
+  await b.ok("chat.complete", {
+    preparedId: prep2.id,
+    fingerprint: reg.fingerprint,
+    registrationId: reg.id,
+    history: [{ role: "user", content: "hi" }],
+  });
+  assert.equal(b.requests.filter((r) => !r.payload.method).length, 1);
+  b.hooks.fetch = mcpMock(b, [
+    {
+      name: "dangerous",
+      description: "Changed semantics",
+      inputSchema: { type: "object" },
+    },
+  ]);
+  const prep3 = await b.ok("chat.prepare", {
+    manifest: remote,
+    registrationId: reg.id,
+  });
+  assert.notEqual(prep3.toolFingerprint, prep2.toolFingerprint);
+  assert.equal(
+    (
+      await b.call("chat.complete", {
+        preparedId: prep3.id,
+        fingerprint: reg.fingerprint,
+        registrationId: reg.id,
+        history: [{ role: "user", content: "hi" }],
+      })
+    ).error.code,
+    "PERMISSION_REQUIRED",
+  );
+});
+
+test("MCP aliases preserve distinct names and aggregate limits fail before model requests", async (t) => {
+  const b = await broker(t);
+  const remote = {
+    name: "Remote",
+    mcpServers: [{ id: "s".repeat(64), url: "https://mcp.test/rpc" }],
+  };
+  b.hooks.fetch = mcpMock(b, [
+    { name: "a.b" },
+    { name: "a_b" },
+    { name: "x".repeat(128) },
+  ]);
+  const params = await b.prepare(remote);
+  await b.ok("chat.complete", params);
+  const aliases = b.requests.at(-1).payload.tools.map((t) => t.function.name);
+  assert.equal(new Set(aliases).size, 3);
+  assert.ok(aliases.every((name) => name.length <= 64));
+  b.hooks.fetch = mcpMock(
+    b,
+    Array.from({ length: 64 }, (_, i) => ({ name: `tool_${i}` })),
+  );
+  const tooMany = { ...remote, tools: [{ name: "site_tool" }] };
+  const before = b.requests.filter((r) => !r.payload.method).length;
+  await assert.rejects(
+    b.prepare(tooMany),
+    (error) => error.code === "INVALID_REQUEST",
+  );
+  assert.equal(b.requests.filter((r) => !r.payload.method).length, before);
+});
+
+test("throwing or oversized site results become safe tool errors", async (t) => {
+  const b = await broker(t);
+  for (const bad of [
+    () => {
+      throw new Error("private tool details");
+    },
+    () => "界".repeat(30000),
+  ]) {
+    const params = await b.prepare(manifest);
+    let count = 0;
+    b.hooks.tool = bad;
+    b.hooks.fetch = async () =>
+      ++count === 1
+        ? toolReply("site__echo", '{"value":"test"}')
+        : Response.json({ choices: [{ message: { content: "done" } }] });
+    await b.ok("chat.complete", params);
+    const result = JSON.parse(
+      b.requests.at(-1).payload.messages.at(-1).content,
+    );
+    assert.equal(result.isError, true);
+    assert.equal(
+      JSON.stringify(result).includes("private tool details"),
+      false,
+    );
+  }
+});
+
+test("connection test verifies selected-model tool requests without saving or invoking site tools", async (t) => {
+  const b = await broker(t);
+  const saved = structuredClone(b.store.provider);
+  b.hooks.fetch = async (url, _init, payload) => {
+    if (url.endsWith("/models"))
+      return Response.json({ data: [{ id: "gpt-5.6-sol" }] });
+    assert.equal(payload.model, "gpt-5.6-sol");
+    assert.equal(payload.reasoning_effort, "none");
+    assert.equal(payload.tools[0].function.name, "connection_check");
+    return Response.json({ choices: [{ message: { content: "Connected." } }] });
+  };
+  const result = await b.ok(
+    "provider.test",
+    {
+      baseUrl: "https://api.openai.com/v1",
+      model: "gpt-5.6-sol",
+      apiKey: "test-key",
+    },
+    b.extension,
+  );
+  assert.equal(result.generationVerified, true);
+  assert.equal(b.requests.length, 2);
+  assert.equal(b.invocations.length, 0);
+  assert.deepEqual(b.store.provider, saved);
+});
+
+for (const kind of ["rejected", "empty", "tool-call"]) {
+  test(`connection test does not report success for ${kind} generation`, async (t) => {
+    const b = await broker(t);
+    b.hooks.fetch = async (url) => {
+      if (url.endsWith("/models"))
+        return Response.json({ data: [{ id: "gpt-5.6-sol" }] });
+      if (kind === "rejected")
+        return new Response("secret-provider-body", { status: 400 });
+      if (kind === "tool-call") return toolReply("connection_check", "{}");
+      return Response.json({ choices: [{ message: { content: "" } }] });
+    };
+    const result = await b.call(
+      "provider.test",
+      {
+        baseUrl: "https://api.openai.com/v1",
+        model: "gpt-5.6-sol",
+        apiKey: "test-key",
+      },
+      b.extension,
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, "PROVIDER_ERROR");
+    assert.equal(
+      JSON.stringify(result).includes("secret-provider-body"),
+      false,
+    );
+    assert.equal(b.invocations.length, 0);
+  });
+}
+
+const DESKTOP = "http://127.0.0.1:48123";
+function desktopMock(b, options = {}) {
+  const state = {
+    paired: options.paired ?? true,
+    sync: options.sync ?? { revision: 0, updatedAt: null, config: null },
+    generate: options.generate,
+  };
+  b.hooks.fetch = async (url, init, payload) => {
+    const target = new URL(url);
+    if (target.origin !== "http://127.0.0.1:48123")
+      return Response.json({ choices: [{ message: { content: "openai" } }] });
+    const authorized =
+      init.headers?.Authorization === "Bearer desktop-token-1234567890";
+    if (target.pathname === "/api/status")
+      return Response.json({
+        app: "arjunah-desktop",
+        version: "0.2.0",
+        device: "Mac",
+        paired: authorized,
+        sync: { revision: state.sync.revision },
+      });
+    if (target.pathname === "/api/pair")
+      return payload?.code === "123456"
+        ? Response.json({
+            token: "desktop-token-1234567890",
+            client: { id: "c1" },
+          })
+        : Response.json(
+            {
+              error: {
+                code: "USER_DENIED",
+                message: "Incorrect pairing code.",
+              },
+            },
+            { status: 403 },
+          );
+    if (!authorized)
+      return Response.json(
+        { error: { code: "UNAUTHORIZED", message: "Pair first." } },
+        { status: 401 },
+      );
+    if (target.pathname === "/api/providers")
+      return Response.json({
+        providers: [
+          {
+            id: "claude-code",
+            name: "Claude Code",
+            vendor: "Anthropic",
+            installed: true,
+            available: true,
+            supportsTools: true,
+            supportsThreads: true,
+            account: "me@example.test",
+            models: [
+              { id: "default", displayName: "Default" },
+              { id: "sonnet", displayName: "Sonnet" },
+            ],
+            defaultModel: "default",
+          },
+          {
+            id: "codex",
+            name: "Codex",
+            vendor: "OpenAI",
+            installed: true,
+            available: false,
+            reason: "Not signed in.",
+            models: [],
+          },
+        ],
+      });
+    if (target.pathname === "/api/sync" && init.method === "PUT") {
+      state.sync = {
+        revision: state.sync.revision + 1,
+        updatedAt: "now",
+        config: payload.config,
+      };
+      return Response.json(state.sync);
+    }
+    if (target.pathname === "/api/sync") return Response.json(state.sync);
+    if (target.pathname.startsWith("/api/threads/"))
+      return Response.json({ ended: true });
+    if (target.pathname.startsWith("/api/progress/"))
+      return Response.json({
+        items: state.progress?.splice(0) ?? [],
+        total: 0,
+        done: true,
+      });
+    if (target.pathname === "/api/generate")
+      return state.generate
+        ? state.generate(payload)
+        : Response.json({
+            id: "d1",
+            model: "claude-code/default",
+            message: {
+              role: "assistant",
+              content: "from desktop",
+              toolCalls: [],
+            },
+            finishReason: "stop",
+            usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+          });
+    return new Response("nope", { status: 404 });
+  };
+  return state;
+}
+
+test("desktop pairing stores the token privately, lists providers, and syncs browser settings up", async (t) => {
+  const b = await broker(t);
+  const mock = desktopMock(b);
+  const wrong = await b.call("desktop.pair", { code: "000000" }, b.extension);
+  assert.equal(wrong.error.code, "USER_DENIED");
+  const paired = await b.ok("desktop.pair", { code: "123456" }, b.extension);
+  assert.equal(paired.paired, true);
+  assert.equal(paired.accepted, true);
+  assert.deepEqual(
+    paired.providers.map((item) => item.id),
+    ["claude-code", "codex"],
+  );
+  assert.equal(b.store.desktop.token, "desktop-token-1234567890");
+  assert.equal(
+    mock.sync.config.openai.apiKey,
+    "dummy-audit-key",
+    "the browser's saved key syncs to the desktop app",
+  );
+  assert.deepEqual(mock.sync.config.active, { type: "openai" });
+  assert.equal(
+    JSON.stringify(paired).includes("desktop-token"),
+    false,
+    "settings never receives the desktop token",
+  );
+  const summary = await b.ok("desktop.status", {}, b.extension);
+  assert.equal(summary.label, "OpenAI API (allowed)");
+  assert.equal(
+    (await b.call("desktop.pair", { code: "123456" }, b.sender())).error.code,
+    "PERMISSION_REQUIRED",
+  );
+});
+
+test("selecting a desktop provider routes generation through the desktop app and exposes its model", async (t) => {
+  const b = await broker(t);
+  const mock = desktopMock(b);
+  await b.ok("desktop.pair", { code: "123456" }, b.extension);
+  const unavailable = await b.call(
+    "provider.select",
+    { type: "desktop", providerId: "codex" },
+    b.extension,
+  );
+  assert.equal(unavailable.error.code, "NOT_CONFIGURED");
+  const selected = await b.ok(
+    "provider.select",
+    { type: "desktop", providerId: "claude-code", model: "sonnet" },
+    b.extension,
+  );
+  assert.equal(selected.label, "Claude Code on this computer (sonnet)");
+  assert.deepEqual(mock.sync.config.active, {
+    type: "desktop",
+    providerId: "claude-code",
+    model: "sonnet",
+  });
+  await b.approve(["models.list", "models.generate"]);
+  assert.deepEqual(await b.ok("models.list"), [
+    {
+      id: "claude-code/sonnet",
+      provider: "claude-code",
+      displayName: "Sonnet",
+      default: true,
+      capabilities: { tools: true, vision: false, reasoning: false },
+      contextWindow: null,
+      reasoningLevels: [],
+    },
+  ]);
+  const status = await b.ok("broker.status");
+  assert.equal(status.provider, "Claude Code on this computer (Sonnet)");
+  const result = await b.ok("models.generate", {
+    messages: [{ role: "user", content: "hi" }],
+  });
+  assert.equal(result.message.content, "from desktop");
+  assert.equal(result.model, "claude-code/sonnet");
+  const request = b.requests.find(
+    (item) => new URL(item.url).pathname === "/api/generate",
+  );
+  assert.equal(request.payload.providerId, "claude-code");
+  assert.equal(request.payload.model, "sonnet");
+  assert.equal(
+    request.init.headers.Authorization,
+    "Bearer desktop-token-1234567890",
+  );
+  assert.equal(
+    (
+      await b.call("models.generate", {
+        model: "allowed",
+        messages: [{ role: "user", content: "hi" }],
+      })
+    ).error.code,
+    "INVALID_REQUEST",
+  );
+  await b.ok("provider.select", { type: "openai" }, b.extension);
+  assert.deepEqual(
+    (await b.ok("models.list")).map((item) => item.id),
+    ["openai/allowed"],
+  );
+});
+
+test("hosted chat tool rounds work through a desktop provider", async (t) => {
+  const b = await broker(t);
+  desktopMock(b, {
+    generate: (payload) =>
+      payload.messages.some((item) => item.role === "tool")
+        ? Response.json({
+            id: "d2",
+            message: {
+              role: "assistant",
+              content: `tool gave ${payload.messages.at(-1).content}`,
+              toolCalls: [],
+            },
+            finishReason: "stop",
+            usage: {},
+          })
+        : Response.json({
+            id: "d1",
+            message: {
+              role: "assistant",
+              content: "",
+              toolCalls: [
+                {
+                  id: "call_1",
+                  name: "site__echo",
+                  arguments: '{"value":"x"}',
+                },
+              ],
+            },
+            finishReason: "tool_calls",
+            usage: {},
+          }),
+  });
+  await b.ok("desktop.pair", { code: "123456" }, b.extension);
+  await b.ok(
+    "provider.select",
+    { type: "desktop", providerId: "claude-code" },
+    b.extension,
+  );
+  b.hooks.tool = () => ({ echoed: "x" });
+  const prepared = await b.prepare(manifest);
+  const result = await b.ok("chat.complete", prepared);
+  assert.equal(result.message.content, 'tool gave {"echoed":"x"}');
+  assert.equal(b.invocations.length, 1);
+  const rounds = b.requests.filter(
+    (item) => new URL(item.url).pathname === "/api/generate",
+  );
+  assert.equal(rounds.length, 2);
+  assert.equal(rounds[1].payload.messages.at(-2).tool_calls[0].id, "call_1");
+});
+
+test("a newer desktop revision is pulled into the browser and a bad desktop payload is rejected safely", async (t) => {
+  const b = await broker(t);
+  const mock = desktopMock(b, {
+    sync: {
+      revision: 5,
+      updatedAt: "now",
+      config: {
+        openai: { model: "gpt-5.6-luna", apiKey: "synced-key" },
+        active: { type: "desktop", providerId: "claude-code", model: "opus" },
+      },
+    },
+  });
+  delete b.store.provider;
+  await b.ok("desktop.pair", { code: "123456" }, b.extension);
+  assert.equal(b.store.provider.apiKey, "synced-key");
+  assert.equal(b.store.provider.model, "gpt-5.6-luna");
+  assert.deepEqual(b.store.active, {
+    type: "desktop",
+    providerId: "claude-code",
+    model: "opus",
+  });
+  assert.equal(b.store.desktop.revision, 5);
+  mock.generate = () =>
+    Response.json({
+      id: "d",
+      message: {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "", name: "bad name!", arguments: 1 }],
+      },
+    });
+  await b.approve(["models.generate"]);
+  const failed = await b.call("models.generate", {
+    messages: [{ role: "user", content: "hi" }],
+  });
+  assert.equal(failed.error.code, "PROVIDER_ERROR");
+  mock.generate = () => new Response("secret desktop body", { status: 502 });
+  const rejected = await b.call("models.generate", {
+    messages: [{ role: "user", content: "hi" }],
+  });
+  assert.equal(rejected.error.code, "PROVIDER_ERROR");
+  assert.equal(JSON.stringify(rejected).includes("secret desktop body"), false);
+  await b.ok("desktop.unpair", {}, b.extension);
+  assert.equal(b.store.desktop, undefined);
+  // Without the desktop link the browser falls back to its own synced OpenAI key.
+  await b.approve(["models.list"]);
+  assert.deepEqual(
+    (await b.ok("models.list")).map((item) => item.id),
+    ["openai/gpt-5.6-luna"],
+  );
+  delete b.store.provider;
+  assert.equal(
+    (
+      await b.call("models.generate", {
+        messages: [{ role: "user", content: "hi" }],
+      })
+    ).error.code,
+    "NOT_CONFIGURED",
+  );
+});
+
+test("level 1 sites see exactly their model, level 2 sites see the exposed catalog and never account details", async (t) => {
+  const b = await broker(t);
+  desktopMock(b);
+  await b.ok("desktop.pair", { code: "123456" }, b.extension);
+  // Level 1: the user picks Claude Code for this site in the consent dialog.
+  const grant = await b.approve(["models.generate", "models.list"], {
+    model: "claude-code/sonnet",
+  });
+  assert.equal(grant.level, "completion");
+  assert.equal(grant.model, "claude-code/sonnet");
+  assert.deepEqual(
+    (await b.ok("models.list")).map((item) => item.id),
+    ["claude-code/sonnet"],
+  );
+  assert.equal(
+    (await b.call("providers.list")).error.code,
+    "PERMISSION_REQUIRED",
+  );
+  assert.equal(
+    (
+      await b.call("models.generate", {
+        model: "openai/allowed",
+        messages: [{ role: "user", content: "hi" }],
+      })
+    ).error.code,
+    "INVALID_REQUEST",
+  );
+  const routed = await b.ok("models.generate", {
+    model: "default",
+    messages: [{ role: "user", content: "hi" }],
+  });
+  assert.equal(routed.model, "claude-code/sonnet");
+  assert.equal(routed.message.content, "from desktop");
+  assert.deepEqual(routed.message.attachments, []);
+  assert.equal(routed.message.reasoning, null);
+  // Level 2: catalog access exposes both available providers.
+  const upgraded = await b.approve(["models.catalog"]);
+  assert.equal(upgraded.level, "catalog");
+  const providers = await b.ok("providers.list");
+  assert.deepEqual(providers.map((item) => item.id).sort(), [
+    "claude-code",
+    "openai",
+  ]);
+  assert.equal(
+    JSON.stringify(providers).includes("me@example.test"),
+    false,
+    "account identities never reach the page",
+  );
+  const models = await b.ok("models.list");
+  assert.equal(models.filter((item) => item.default).length, 1);
+  assert.ok(models.some((item) => item.id === "openai/allowed"));
+  const viaOpenAI = await b.ok("models.generate", {
+    model: "openai/allowed",
+    messages: [{ role: "user", content: "hi" }],
+  });
+  assert.equal(viaOpenAI.model, "openai/allowed");
+  // The user narrows the exposed providers from the popup.
+  const summary = await b.ok(
+    "site.update",
+    { origin: "https://site.test", providers: ["claude-code"] },
+    b.extension,
+  );
+  assert.deepEqual(summary.providers, ["claude-code"]);
+  assert.equal(
+    (
+      await b.call("models.generate", {
+        model: "openai/allowed",
+        messages: [{ role: "user", content: "hi" }],
+      })
+    ).error.code,
+    "INVALID_REQUEST",
+  );
+  const usage = await b.ok("usage.get", {}, b.extension);
+  assert.equal(usage["claude-code"].dayRequests, 1);
+  assert.equal(usage.openai.dayRequests, 1);
+  const wallet = await b.ok("catalog.get", {}, b.extension);
+  assert.equal(
+    wallet.providers.find((item) => item.id === "claude-code").account,
+    "me@example.test",
+  );
+});
+
+test("the site model follows the global default until pinned, and pinning cancels in-flight work", async (t) => {
+  const b = await broker(t);
+  desktopMock(b);
+  await b.ok("desktop.pair", { code: "123456" }, b.extension);
+  await b.approve(["models.generate", "models.list"], {
+    model: "openai/allowed",
+  });
+  assert.equal((await b.ok("grant.query")).model, "openai/allowed");
+  await b.ok(
+    "provider.select",
+    { type: "desktop", providerId: "claude-code", model: "sonnet" },
+    b.extension,
+  );
+  assert.equal(
+    (await b.ok("grant.query")).model,
+    "claude-code/sonnet",
+    "an unpinned site follows the new global default",
+  );
+  await b.ok(
+    "site.update",
+    { origin: "https://site.test", model: "openai/allowed" },
+    b.extension,
+  );
+  await b.ok("provider.select", { type: "openai" }, b.extension);
+  await b.ok(
+    "provider.select",
+    { type: "desktop", providerId: "claude-code", model: "sonnet" },
+    b.extension,
+  );
+  assert.equal(
+    (await b.ok("grant.query")).model,
+    "openai/allowed",
+    "a pinned site keeps its model",
+  );
+  assert.equal(
+    (await b.call("hosted.model", { model: "claude-code/sonnet" })).error.code,
+    "PERMISSION_REQUIRED",
+    "the widget model switch requires a hosted-chat grant",
+  );
+});
+
+test("widget controls reach the model only when disclosed, and tool handlers receive them", async (t) => {
+  const b = await broker(t);
+  const withControls = {
+    ...manifest,
+    widget: {
+      controls: [
+        { id: "verbose", type: "toggle", label: "Verbose", default: false },
+        {
+          id: "tone",
+          type: "select",
+          label: "Tone",
+          options: [{ value: "a" }, { value: "b" }],
+          model: false,
+        },
+      ],
+    },
+  };
+  const prepared = await b.prepare(withControls);
+  await b.ok("chat.complete", {
+    ...prepared,
+    controls: { verbose: true, tone: "b" },
+  });
+  const systemLines = b.requests[0].payload.messages.filter(
+    (item) => item.role === "system",
+  );
+  const disclosed = systemLines.find((item) =>
+    item.content.startsWith("Widget options"),
+  );
+  assert.ok(disclosed);
+  assert.match(disclosed.content, /"verbose":true/);
+  assert.equal(disclosed.content.includes("tone"), false);
+  const again = await b.prepare(withControls);
+  const bad = await b.call("chat.complete", {
+    ...again,
+    controls: { verbose: "yes" },
+  });
+  assert.equal(bad.error.code, "INVALID_REQUEST");
+});
+
+test("image parts are converted for vision models and refused for models without vision", async (t) => {
+  const b = await broker(t);
+  b.store.provider.model = "gpt-5.6-sol";
+  const image = { type: "image", mediaType: "image/png", data: "iVBORw0KGgo=" };
+  await b.approve(["models.generate", "models.list"]);
+  await b.ok("models.generate", {
+    messages: [
+      { role: "user", content: [{ type: "text", text: "describe" }, image] },
+    ],
+  });
+  const wire = b.requests[0].payload.messages[0].content;
+  assert.equal(wire[1].type, "image_url");
+  assert.equal(wire[1].image_url.url, "data:image/png;base64,iVBORw0KGgo=");
+  desktopMock(b);
+  await b.ok("desktop.pair", { code: "123456" }, b.extension);
+  await b.ok(
+    "site.update",
+    { origin: "https://site.test", model: "claude-code/sonnet" },
+    b.extension,
+  );
+  const refused = await b.call("models.generate", {
+    messages: [{ role: "user", content: [image] }],
+  });
+  assert.equal(refused.error.code, "NOT_SUPPORTED");
+  assert.equal(
+    b.requests.some((item) => new URL(item.url).pathname === "/api/generate"),
+    false,
+    "no provider request is made for unsupported images",
+  );
+});
+
+test("hosted chat emits progress events to the initiating document only", async (t) => {
+  const b = await broker(t);
+  const events = [];
+  const original = globalThis.chrome.tabs.sendMessage;
+  globalThis.chrome.tabs.sendMessage = async (tabId, message, options) => {
+    if (message.kind === "arjunah-progress") {
+      events.push({ tabId, ...message });
+      return undefined;
+    }
+    return original(tabId, message, options);
+  };
+  b.hooks.fetch = async (url, init, payload) => {
+    if (!payload.messages.some((item) => item.role === "tool"))
+      return toolReply("site__echo", '{"value":"x"}');
+    assert.equal(payload.stream, true);
+    return new Response(
+      [
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "do" } }] })}\n\n`,
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "ne" }, finish_reason: "stop" }] })}\n\n`,
+        "data: [DONE]\n\n",
+      ].join(""),
+      { headers: { "Content-Type": "text/event-stream" } },
+    );
+  };
+  b.hooks.tool = () => ({ echoed: "x" });
+  const prepared = await b.prepare(manifest);
+  await b.ok("chat.complete", { ...prepared, turnId: "turn-1" });
+  assert.deepEqual(
+    events.map((item) => item.type),
+    [
+      "model.start",
+      "model.end",
+      "tool.start",
+      "tool.end",
+      "model.start",
+      "output.delta",
+      "output.delta",
+      "model.end",
+    ],
+  );
+  assert.ok(
+    events.every((item) => item.turnId === "turn-1" && item.tabId === 1),
+  );
+  assert.equal(events[2].name, "echo");
+  assert.match(events[3].result, /echoed/);
+  assert.equal(
+    events
+      .filter((item) => item.type === "output.delta")
+      .map((item) => item.text)
+      .join(""),
+    "done",
+  );
+});
+
+test("commands a desktop agent ran are shown as activity but never returned to the page", async (t) => {
+  const b = await broker(t);
+  desktopMock(b, {
+    generate: () =>
+      Response.json({
+        id: "d1",
+        message: { role: "assistant", content: "done", toolCalls: [] },
+        finishReason: "stop",
+        usage: {},
+        steps: [
+          {
+            command: "ls ~/Documents",
+            exitCode: 71,
+            output: "Operation not permitted",
+          },
+        ],
+      }),
+  });
+  await b.ok("desktop.pair", { code: "123456" }, b.extension);
+  await b.ok(
+    "provider.select",
+    { type: "desktop", providerId: "claude-code" },
+    b.extension,
+  );
+  const events = [];
+  const original = globalThis.chrome.tabs.sendMessage;
+  globalThis.chrome.tabs.sendMessage = async (tabId, message, options) => {
+    if (message.kind === "arjunah-progress") {
+      events.push(message);
+      return undefined;
+    }
+    return original(tabId, message, options);
+  };
+  const prepared = await b.prepare(manifest);
+  const result = await b.ok("chat.complete", { ...prepared, turnId: "t" });
+  assert.equal(result.agentSteps, undefined);
+  const step = events.find((item) => item.type === "agent.step");
+  assert.equal(step.command, "ls ~/Documents");
+  assert.equal(step.exitCode, 71);
+  assert.equal(step.provider, "Claude Code");
+  const generateCall = b.requests.find(
+    (item) => new URL(item.url).pathname === "/api/generate",
+  );
+  assert.equal(generateCall.payload.progressId, "t-0");
+  assert.ok(
+    b.requests.some((item) =>
+      new URL(item.url).pathname.startsWith("/api/progress/t-0"),
+    ),
+    "live progress is polled while the desktop generates",
+  );
+  await b.approve(["models.generate"]);
+  const direct = await b.ok("models.generate", {
+    messages: [{ role: "user", content: "hi" }],
+  });
+  assert.equal("agentSteps" in direct, false);
+});
+
+test("reasoning effort reaches OpenAI as reasoning_effort and is validated", async (t) => {
+  const b = await broker(t);
+  b.store.provider.model = "gpt-5.6-sol";
+  await b.approve(["models.generate"]);
+  await b.ok("models.generate", {
+    messages: [{ role: "user", content: "hi" }],
+    reasoning: { effort: "high" },
+  });
+  assert.equal(b.requests[0].payload.reasoning_effort, "high");
+  const bad = await b.call("models.generate", {
+    messages: [{ role: "user", content: "hi" }],
+    reasoning: "ultra",
+  });
+  assert.equal(bad.error.code, "INVALID_REQUEST");
+  // Function tools on GPT-5.6 still force non-reasoning mode (API limitation).
+  await b.ok("models.generate", {
+    messages: [{ role: "user", content: "hi" }],
+    reasoning: "high",
+    tools: [{ name: "t", inputSchema: { type: "object" } }],
+  });
+  assert.equal(b.requests.at(-1).payload.reasoning_effort, "none");
+});
+
+test("hosted conversations carry a thread id to the desktop app and release it on session end", async (t) => {
+  const b = await broker(t);
+  const mock = desktopMock(b);
+  await b.ok("desktop.pair", { code: "123456" }, b.extension);
+  await b.ok(
+    "provider.select",
+    { type: "desktop", providerId: "claude-code" },
+    b.extension,
+  );
+  const prepared = await b.prepare(manifest);
+  await b.ok("chat.complete", {
+    ...prepared,
+    conversationId: "conv-abc",
+    reasoning: "medium",
+  });
+  const generateCall = b.requests.find(
+    (item) => new URL(item.url).pathname === "/api/generate",
+  );
+  assert.equal(generateCall.payload.threadId, "conv-abc");
+  assert.equal(generateCall.payload.reasoning, "medium");
+  await b.ok("session.end", { conversationId: "conv-abc" });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const ended = b.requests.find(
+    (item) =>
+      new URL(item.url).pathname === "/api/threads/conv-abc" &&
+      item.init.method === "DELETE",
+  );
+  assert.ok(ended, "the thread is released when the page session ends");
+  void mock;
+  const settings = await b.ok("hosted.settings");
+  assert.equal(settings.model.threads, true);
+  assert.deepEqual(settings.model.reasoningLevels, []);
+});
+
+test("a paired but unreachable desktop app makes its providers unavailable everywhere, with a clear error", async (t) => {
+  const b = await broker(t);
+  desktopMock(b);
+  await b.ok("desktop.pair", { code: "123456" }, b.extension);
+  await b.ok(
+    "provider.select",
+    { type: "desktop", providerId: "claude-code", model: "sonnet" },
+    b.extension,
+  );
+  await b.approve(["models.generate", "models.list"]);
+  // The companion goes away: every request to its origin now fails.
+  const live = b.hooks.fetch;
+  b.hooks.fetch = async (url, init, payload) => {
+    if (new URL(url).origin === "http://127.0.0.1:48123")
+      throw new TypeError("fetch failed");
+    return live(url, init, payload);
+  };
+  const wallet = await b.ok("catalog.get", {}, b.extension);
+  assert.deepEqual(wallet.desktop, {
+    paired: true,
+    running: false,
+    accepted: false,
+  });
+  const claude = wallet.providers.find((item) => item.id === "claude-code");
+  assert.equal(claude.available, false);
+  assert.match(claude.reason, /अर्जुनः Desktop is not running/);
+  const failed = await b.call("models.generate", {
+    messages: [{ role: "user", content: "hi" }],
+  });
+  assert.equal(failed.error.code, "NOT_CONFIGURED");
+  assert.match(failed.error.message, /अर्जुनः Desktop is not running/);
+  const settings = await b.ok("hosted.settings");
+  assert.equal(settings.desktop.running, false);
+  assert.equal(settings.model, null);
+});
+
+test("a companion that forgot this browser's pairing is reported as unpaired, not as available", async (t) => {
+  const b = await broker(t);
+  desktopMock(b);
+  await b.ok("desktop.pair", { code: "123456" }, b.extension);
+  await b.ok(
+    "provider.select",
+    { type: "desktop", providerId: "claude-code", model: "sonnet" },
+    b.extension,
+  );
+  await b.approve(["models.generate", "models.list"]);
+  const live = b.hooks.fetch;
+  b.hooks.fetch = async (url, init, payload) => {
+    const target = new URL(url);
+    if (target.origin !== "http://127.0.0.1:48123")
+      return live(url, init, payload);
+    if (target.pathname === "/api/status")
+      return Response.json({
+        app: "arjunah-desktop",
+        version: "1.0.0",
+        paired: false,
+        sync: { revision: 0 },
+      });
+    return Response.json(
+      { error: { code: "UNAUTHORIZED", message: "Pair first." } },
+      { status: 401 },
+    );
+  };
+  const wallet = await b.ok("catalog.get", {}, b.extension);
+  assert.deepEqual(wallet.desktop, {
+    paired: true,
+    running: true,
+    accepted: false,
+  });
+  assert.match(
+    wallet.providers.find((item) => item.id === "claude-code").reason,
+    /no longer recognises this browser's pairing/,
+  );
+  const failed = await b.call("models.generate", {
+    messages: [{ role: "user", content: "hi" }],
+  });
+  assert.equal(failed.error.code, "NOT_CONFIGURED");
+  assert.match(failed.error.message, /pair again/);
+  const settings = await b.ok("hosted.settings");
+  assert.equal(settings.model, null);
+  assert.equal(settings.desktop.accepted, false);
+});

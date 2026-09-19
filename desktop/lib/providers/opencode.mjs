@@ -1,0 +1,398 @@
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  which,
+  run,
+  spawnAgent,
+  jsonLines,
+  usageFrom,
+  summarizeFailure,
+  scratchDirectory,
+  guidance,
+  connection,
+  effortOf,
+} from "./common.mjs";
+
+export const id = "opencode";
+export const name = "OpenCode";
+export const vendor = "OpenCode";
+export const supportsTools = true;
+export const supportsThreads = true;
+export const supportsReasoning = true;
+const LINKS = [
+  { label: "OpenCode website", url: "https://opencode.ai" },
+  { label: "OpenCode docs", url: "https://opencode.ai/docs" },
+];
+let modelCache = { at: 0, models: [] };
+
+/**
+ * `opencode models --verbose` prints each `provider/model` id followed by a JSON
+ * object with limits and capabilities. Plain ids (older versions) still work.
+ */
+export function parseModelList(stdout) {
+  const models = [];
+  const lines = String(stdout ?? "").split("\n");
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index].trim();
+    if (!/^[a-z0-9_.-]+\/[^\s]+$/i.test(line)) continue;
+    let meta = null;
+    if (lines[index + 1]?.trim().startsWith("{")) {
+      let depth = 0;
+      const buffer = [];
+      for (let j = index + 1; j < lines.length; j++) {
+        buffer.push(lines[j]);
+        for (const char of lines[j]) {
+          if (char === "{") depth++;
+          else if (char === "}") depth--;
+        }
+        if (depth <= 0) {
+          index = j;
+          break;
+        }
+      }
+      try {
+        meta = JSON.parse(buffer.join("\n"));
+      } catch {
+        meta = null;
+      }
+    }
+    // OpenCode lists retired models too; only active ones are selectable.
+    if (meta?.status && meta.status !== "active") continue;
+    const cost = meta?.cost;
+    const free =
+      cost && Number(cost.input ?? 0) === 0 && Number(cost.output ?? 0) === 0;
+    models.push({
+      id: line,
+      displayName: meta?.name
+        ? `${meta.name}${free && !/free/i.test(meta.name) ? " (free)" : ""} (${line})`
+        : line,
+      free: Boolean(free),
+      contextWindow: Number.isInteger(meta?.limit?.context)
+        ? meta.limit.context
+        : null,
+      reasoningLevels: meta?.capabilities?.reasoning
+        ? ["low", "medium", "high", "max"]
+        : [],
+      defaultReasoning: null,
+      capabilities: {
+        tools: meta?.capabilities?.toolcall !== false,
+        vision: meta?.capabilities?.input?.image === true,
+        reasoning: meta?.capabilities?.reasoning === true,
+      },
+    });
+    if (models.length >= 400) break;
+  }
+  return models;
+}
+
+/**
+ * OpenCode has no account of its own: it stores one credential per upstream
+ * provider in its auth file. This is the same signal `opencode auth list`
+ * prints and the `connected` list T3 Code reads from `provider.list`.
+ */
+export function readOpenCodeCredentials(
+  path = join(
+    process.env.XDG_DATA_HOME ??
+      join(process.env.HOME ?? "", ".local", "share"),
+    "opencode",
+    "auth.json",
+  ),
+) {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    return describeOpenCodeCredentials(parsed);
+  } catch {
+    return [];
+  }
+}
+const PROVIDER_LABELS = {
+  "opencode-go": "OpenCode Go",
+  opencode: "OpenCode",
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  google: "Google",
+  openrouter: "OpenRouter",
+  github: "GitHub Copilot",
+  "github-copilot": "GitHub Copilot",
+  amazon: "Amazon Bedrock",
+  "amazon-bedrock": "Amazon Bedrock",
+};
+export function describeOpenCodeCredentials(authJson) {
+  if (!authJson || typeof authJson !== "object") return [];
+  return Object.entries(authJson)
+    .slice(0, 32)
+    .map(([id, entry]) => ({
+      id: String(id).slice(0, 64),
+      label:
+        PROVIDER_LABELS[id] ??
+        String(id)
+          .split(/[-_]/)
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join(" "),
+      type:
+        entry?.type === "oauth"
+          ? "sign-in"
+          : entry?.type === "api"
+            ? "API key"
+            : String(entry?.type ?? "credential").slice(0, 20),
+    }));
+}
+
+export async function detect(settings = {}) {
+  const binary =
+    settings.opencodePath ||
+    (await which("opencode", [
+      "/opt/homebrew/bin",
+      `${process.env.HOME}/.opencode/bin`,
+      `${process.env.HOME}/.local/bin`,
+    ]));
+  if (!binary)
+    return {
+      installed: false,
+      available: false,
+      reason:
+        "OpenCode is not installed. See https://opencode.ai for installation and provider sign-in.",
+      guidance: guidance({
+        state: "missing",
+        summary: "The `opencode` command was not found on this computer.",
+        steps: [
+          "Install it in a terminal: `curl -fsSL https://opencode.ai/install | bash` or `npm install -g opencode-ai`.",
+          "Run `opencode auth login` and connect at least one model provider. OpenCode also offers free models that need no account.",
+          "Click Re-check below. If OpenCode lives somewhere unusual, paste the full path to the `opencode` binary in the field below and save.",
+        ],
+        links: LINKS,
+      }),
+    };
+  const version = await run(binary, ["--version"], { timeoutMs: 15_000 });
+  if (Date.now() - modelCache.at > 60_000) {
+    const listed = await run(binary, ["models", "--verbose"], {
+      timeoutMs: 60_000,
+    });
+    modelCache = { at: Date.now(), models: parseModelList(listed.stdout) };
+  }
+  const models = modelCache.models;
+  const providers = [...new Set(models.map((model) => model.id.split("/")[0]))];
+  const credentials = readOpenCodeCredentials();
+  const freeCount = models.filter((model) => model.free).length;
+  return {
+    installed: true,
+    binary,
+    version: version.stdout.trim() || null,
+    available: models.length > 0,
+    // OpenCode has no personal login of its own; it forwards to whichever model
+    // providers the user configured, so there is no single account to show.
+    account: credentials.length
+      ? credentials
+          .slice(0, 3)
+          .map((item) => `${item.label} (${item.type})`)
+          .join(", ")
+      : models.length
+        ? "free models only"
+        : null,
+    connection: models.length
+      ? connection({
+          account: credentials.length
+            ? credentials
+                .slice(0, 3)
+                .map((item) => `${item.label} (${item.type})`)
+                .join(", ")
+            : null,
+          method: credentials.length
+            ? `${credentials.length} upstream credential${credentials.length === 1 ? "" : "s"} in OpenCode`
+            : "OpenCode free models, no credential",
+          plan: null,
+          source: `${models.length} models from ${providers.length} provider${providers.length === 1 ? "" : "s"} (${freeCount} free): ${providers.slice(0, 6).join(", ")}${providers.length > 6 ? ", …" : ""}`,
+        })
+      : null,
+    // OpenCode forwards to upstream providers and has no rolling allowance of
+    // its own; upstream quotas are not exposed through its CLI.
+    quota: null,
+    reason: models.length
+      ? null
+      : "OpenCode has no configured model providers. Run `opencode auth login` or configure a provider first.",
+    guidance: models.length
+      ? null
+      : guidance({
+          state: "signed-out",
+          summary: `OpenCode ${version.stdout.trim()} is installed at ${binary} but lists no usable models.`,
+          steps: [
+            "Open a terminal and run `opencode auth login`, then pick a provider and sign in or paste its API key.",
+            "Run `opencode models` and confirm at least one model is printed.",
+            "Click Re-check.",
+          ],
+          links: LINKS,
+        }),
+    models,
+    defaultModel: models[0]?.id ?? null,
+  };
+}
+
+const BUILTIN_TOOLS = [
+  "bash",
+  "edit",
+  "write",
+  "read",
+  "glob",
+  "grep",
+  "list",
+  "patch",
+  "webfetch",
+  "websearch",
+  "todowrite",
+  "todoread",
+  "task",
+  "skill",
+  "question",
+  "lsp",
+  "codesearch",
+  "external_directory",
+];
+
+export function start({
+  binary,
+  model,
+  systemPrompt,
+  prompt,
+  mcp,
+  onProgress,
+  thread = null,
+  onThread,
+  reasoning = null,
+  scratch: sharedScratch = null,
+}) {
+  const scratch = sharedScratch ?? scratchDirectory("opencode");
+  const deny = Object.fromEntries(BUILTIN_TOOLS.map((tool) => [tool, "deny"]));
+  const tools = Object.fromEntries(BUILTIN_TOOLS.map((tool) => [tool, false]));
+  const config = {
+    $schema: "https://opencode.ai/config.json",
+    share: "disabled",
+    autoupdate: false,
+    permission: { ...deny, "arjunah_*": "allow" },
+    tools: { ...tools, "arjunah_*": true },
+    agent: {
+      arjunah: {
+        mode: "primary",
+        description: "अर्जुनः browser broker agent",
+        prompt: systemPrompt || "You are a helpful assistant.",
+        steps: 24,
+        permission: { ...deny, "arjunah_*": "allow" },
+        tools: { ...tools, "arjunah_*": true },
+      },
+    },
+  };
+  if (mcp)
+    config.mcp = {
+      arjunah: {
+        type: "remote",
+        url: mcp.url,
+        enabled: true,
+        oauth: false,
+        timeout: 600_000,
+        headers: { Authorization: `Bearer ${mcp.token}` },
+      },
+    };
+  const configPath = join(scratch.directory, "opencode.json");
+  writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
+  const args = [
+    "run",
+    "--format",
+    "json",
+    "--pure",
+    "--agent",
+    "arjunah",
+    "--dir",
+    scratch.directory,
+  ];
+  if (model && model !== "default") args.push("-m", model);
+  if (thread?.handle) args.push("--session", thread.handle);
+  const effort = effortOf(reasoning, ["low", "medium", "high", "max"]);
+  if (effort) args.push("--variant", effort);
+  args.push("--", prompt);
+  let announced = false;
+  return spawnAgent({
+    binary,
+    args,
+    cwd: scratch.directory,
+    env: { OPENCODE_CONFIG: configPath, OPENCODE_DISABLE_AUTOUPDATE: "1" },
+    onExit: sharedScratch ? undefined : scratch.cleanup,
+    onLine: (event) => {
+      if (!announced && typeof event?.sessionID === "string") {
+        announced = true;
+        onThread?.(event.sessionID.slice(0, 80));
+      }
+      if (
+        onProgress &&
+        event?.type === "reasoning" &&
+        typeof event.part?.text === "string" &&
+        event.part.text
+      )
+        onProgress({ type: "reasoning", text: event.part.text.slice(0, 4000) });
+      if (
+        onProgress &&
+        event?.type === "text" &&
+        typeof event.part?.text === "string" &&
+        event.part.text
+      )
+        onProgress({
+          type: "output_delta",
+          text: event.part.text.slice(0, 4000),
+        });
+    },
+    parse(stdout, stderr, code) {
+      const events = jsonLines(stdout);
+      const failure = events.find((event) => event.type === "error");
+      const texts = events.filter(
+        (event) =>
+          event.type === "text" && typeof event.part?.text === "string",
+      );
+      const lastMessage = texts.at(-1)?.part?.messageID;
+      const content = texts
+        .filter((event) => event.part.messageID === lastMessage)
+        .map((event) => event.part.text)
+        .join("");
+      if (
+        failure ||
+        (!texts.length && !events.some((event) => event.type === "step_finish"))
+      )
+        return {
+          isError: true,
+          errorMessage: String(
+            failure?.error?.message ??
+              failure?.error?.data?.message ??
+              summarizeFailure(stderr, `OpenCode exited with status ${code}.`),
+          ).slice(0, 300),
+        };
+      let input = 0;
+      let output = 0;
+      let cached = 0;
+      let reasoningTokens = 0;
+      for (const event of events)
+        if (event.type === "step_finish") {
+          input +=
+            Number(event.part?.tokens?.input ?? 0) +
+            Number(event.part?.tokens?.cache?.read ?? 0);
+          output += Number(event.part?.tokens?.output ?? 0);
+          cached += Number(event.part?.tokens?.cache?.read ?? 0);
+          reasoningTokens += Number(event.part?.tokens?.reasoning ?? 0);
+        }
+      const reasoningText = events
+        .filter(
+          (event) =>
+            event.type === "reasoning" && typeof event.part?.text === "string",
+        )
+        .map((event) => event.part.text)
+        .join("\n\n")
+        .slice(0, 12_000);
+      return {
+        content,
+        usage: usageFrom(input, output, {
+          cached,
+          reasoning: reasoningTokens,
+        }),
+        model,
+        reasoning: reasoningText || null,
+        thread: events.find((event) => event.sessionID)?.sessionID ?? null,
+      };
+    },
+  });
+}

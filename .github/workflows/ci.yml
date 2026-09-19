@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Static checks, SDK build, formatting, and unit tests.
+      - run: npm run check
+      # Firefox add-on lint on the packaged event-page build.
+      - run: npm run lint:firefox
+      # Release archives; uploaded so every commit has an installable build.
+      - run: npm run pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extension-${{ github.sha }}
+          path: |
+            dist/*.zip
+            dist/*.xpi
+          if-no-files-found: error
+      # Browser end-to-end suites need a display and downloaded browsers; they run
+      # locally with `npm run validate` and are not part of CI yet.

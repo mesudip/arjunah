@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>अर्जुनः settings</title>
+    <link rel="stylesheet" href="theme.css" />
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <img
+          class="mark"
+          src="icons/icon-128.png"
+          alt=""
+          width="52"
+          height="52"
+        />
+        <div>
+          <h1>अर्जुनः</h1>
+          <p class="muted">
+            Bring your own AI provider or subscription to the web. Websites see
+            only the models you expose to them.
+          </p>
+        </div>
+      </header>
+
+      <section class="card">
+        <div class="section-head">
+          <h2>Providers and default model</h2>
+          <span class="eyebrow">Wallet</span>
+        </div>
+        <p class="help">
+          Every website you approve uses the global default model unless you
+          pick another one for that site in the toolbar popup or the chat
+          header. Account details stay here; sites see model names only.
+        </p>
+        <div id="providers" class="providers"></div>
+        <p id="active-status" class="status" role="status"></p>
+      </section>
+
+      <section class="card" id="desktop-section">
+        <div class="section-head">
+          <h2>Desktop app</h2>
+          <span class="eyebrow">Subscriptions</span>
+        </div>
+        <p id="desktop-state" class="status" role="status"></p>
+        <p class="help">
+          अर्जुनः Desktop runs on this computer and shares your Claude Code,
+          Codex, or OpenCode sign-in with paired browsers. Settings saved here
+          sync to the app and back.
+        </p>
+        <form id="pair-form">
+          <label class="field"
+            >Desktop address<input
+              id="desktop-url"
+              type="url"
+              value="http://127.0.0.1:48123"
+              required
+          /></label>
+          <label class="field"
+            >Pairing code<input
+              id="desktop-code"
+              inputmode="numeric"
+              pattern="[0-9 ]{6,7}"
+              autocomplete="one-time-code"
+              placeholder="Shown in the desktop app"
+          /></label>
+          <div class="actions">
+            <button type="button" id="unpair" class="btn btn-danger">
+              Unpair
+            </button>
+            <button
+              type="button"
+              id="refresh-desktop"
+              class="btn btn-secondary"
+            >
+              Refresh
+            </button>
+            <a
+              id="dashboard-link"
+              class="btn btn-secondary"
+              target="_blank"
+              rel="noreferrer"
+              >Open dashboard</a
+            >
+            <button type="submit" id="pair" class="btn btn-primary">
+              Pair
+            </button>
+          </div>
+        </form>
+        <p class="help">
+          Start the app with <code>npm run desktop</code> from the repository,
+          then enter the six-digit code it prints. Pairing is per browser
+          profile and can be revoked from either side.
+        </p>
+      </section>
+
+      <section class="card">
+        <div class="section-head">
+          <h2>OpenAI API key</h2>
+          <span class="eyebrow">API key</span>
+        </div>
+        <p class="help">
+          Your credential stays in this browser profile and syncs only to a
+          desktop app you paired. Use a restricted key and provider-side
+          spending limits.
+        </p>
+        <form id="provider-form">
+          <label class="field"
+            >Base URL<input id="base-url" type="url" required readonly /></label
+          ><label class="field"
+            >Default model<input
+              id="model"
+              required
+              list="openai-models" /><datalist
+              id="openai-models"
+            ></datalist></label
+          ><label class="field"
+            >API key<input
+              id="api-key"
+              type="password"
+              autocomplete="off"
+              placeholder="Stored locally"
+          /></label>
+          <label class="keep-key"
+            ><input id="keep-key" type="checkbox" /> Use the saved OpenAI API
+            key</label
+          >
+          <div class="actions">
+            <button type="button" id="clear-provider" class="btn btn-danger">
+              Clear key
+            </button>
+            <button type="button" id="test" class="btn btn-secondary">
+              Test connection
+            </button>
+            <button type="submit" class="btn btn-primary">Save key</button>
+          </div>
+        </form>
+        <p id="provider-status" class="status" role="status"></p>
+        <p class="help">
+          Test connection sends a short sample request to the selected model.
+          GPT-5.6 tool requests use non-reasoning mode for compatibility.
+        </p>
+      </section>
+
+      <section class="card">
+        <div class="section-head">
+          <h2>Site grants</h2>
+          <span class="eyebrow">Access</span>
+        </div>
+        <p class="help">
+          Grants are exact-origin permissions with an access level and the model
+          you chose for that site. Revoking forces the site to ask again.
+        </p>
+        <div id="grants" class="grants"></div>
+        <div class="actions">
+          <button id="clear-grants" class="btn btn-danger">
+            Revoke all site grants
+          </button>
+        </div>
+        <p id="grant-status" class="status" role="status"></p>
+      </section>
+
+      <section class="card">
+        <div class="section-head">
+          <h2>Protocol</h2>
+          <span class="eyebrow">v1.0.0</span>
+        </div>
+        <p class="help">
+          This build implements अर्जुनः Protocol v1.0.0: tiered site access, a
+          unified model catalog, widget options, and extension-collected tool
+          inputs that stay out of model traffic. It has no analytics or
+          extension-operated relay. Desktop providers run locally installed CLIs
+          with their file and shell tools disabled.
+        </p>
+        <a id="open-popup" href="popup.html"
+          >Open the toolbar popup in this tab</a
+        >
+      </section>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>
