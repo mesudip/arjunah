@@ -1,6 +1,6 @@
 # ChatKit and machine-manager review
 
-Date: 2026-09-17 (updated 2026-09-20 for v1.2)
+Date: 2026-09-17 (updated 2026-09-20 for the renderer-owned composer surfaces)
 
 ## Decision
 
@@ -73,7 +73,7 @@ The extension cannot enforce information-flow policy inside page JavaScript. Onc
 
 See [SPEC.md](../SPEC.md#73-extension-collected-tool-inputs) for the normative contract and [SECURITY.md](../SECURITY.md) for the trust boundary.
 
-## What v1.2 built instead
+## What अर्जुनः built instead
 
 The four ChatKit capabilities this project actually needed are now in the
 protocol and the implementation, each shaped to keep the wallet boundary:
@@ -134,3 +134,39 @@ A ChatKit **server** adapter is a smaller and more plausible step: a translator
 from the ChatKit server event stream to the section 14 vocabulary would let a site
 already running a custom ChatKit backend swap in this renderer without touching
 that backend. It is not implemented, and it would not change any boundary above.
+
+## Closing the gap for a real ChatKit frontend
+
+Reviewing `machine-manager`'s own `useChatKit` call showed which ChatKit
+features a site cannot simply do without, and four of them were chrome each host
+had to build for itself. They are now the renderer's, so both modes get them and
+a standalone site configures data rather than controls:
+
+- **The model picker (SPEC 8.2).** The provider-grouped menu and the
+  thinking-effort control lived in `content.js`, filling a renderer slot, so the
+  widget shipped without them. They moved into `core.js`: a host supplies
+  section 5.2 model entries and receives the choice, and the wallet may refuse a
+  switch without leaving the composer claiming a model that is not answering.
+  `widget.models` is how a standalone site gets the same control, and the choice
+  rides with each turn as `model` and `reasoning`.
+- **Entity mentions (SPEC 8.3).** ChatKit's `entities.onTagSearch` has an
+  equivalent, and the composer became contenteditable so a mention can be one
+  atomic chip rather than text a visitor can edit into nonsense. A chip submits
+  as a `mention` content part, which is the point: `machine-manager` tags a host
+  so the **server** can describe it from the database, and flattening to
+  `@web-01` would have thrown the id away. Section 5.3 keeps the id away from
+  the provider, which only ever sees the label.
+- **Collected tool inputs in standalone mode (SPEC 7.3).** The mechanism was
+  already native, but its prompt lived in the extension's content script, so the
+  widget inherited a promise section 14.1 could not keep. The prompt is now the
+  renderer's and `invocation.requestInput(id)` works in both modes. A backend
+  that adopts it stops inventing a client tool whose only purpose is to make the
+  frontend open a dialog.
+- **Host callbacks (SPEC 14.1).** Turn, thread, model, control and error
+  reports, plus `openThread`, `setControls` and `setModels` on the mounted
+  object, so a usage panel, a remembered thread and an unauthorized handler have
+  somewhere to attach.
+
+What a ChatKit backend would still have to do is speak section 14: eight routes
+and the event vocabulary of 14.3 in place of the ChatKit server stream. The
+translator above is the smaller half of that, and it remains unwritten.

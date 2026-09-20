@@ -29,7 +29,7 @@ dependency for the types only.
 
 Root, window.ai.arjunah, always present once the extension is installed:
 
-version: protocol version string, currently "1.2.0". Feature-detect by members, not version.
+version: protocol version string, currently "1.0.0". Feature-detect by members, not version.
 isEnabled(): Promise<boolean>. True when this origin holds level 1 or 2 access.
 enable(request?): Promise<Session>. Asks the visitor for access and resolves to the session. No argument means level 1. Does not prompt when the access is already held. Rejects with code USER_DENIED.
 disable(): Promise<true>. Drops the origin's whole grant, including a hosted-chat grant.

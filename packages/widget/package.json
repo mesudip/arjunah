@@ -1,6 +1,6 @@
 {
   "name": "arjunah-widget",
-  "version": "1.2.0-alpha.1",
+  "version": "1.0.0-alpha.2",
   "description": "The अर्जुनः (Arjunah) chat renderer, mounted against your own backend — the same widget the browser extension hosts, without the extension.",
   "repository": {
     "type": "git",

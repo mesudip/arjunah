@@ -1,6 +1,6 @@
 {
   "name": "arjunah",
-  "version": "1.2.0-alpha.1",
+  "version": "1.0.0-alpha.2",
   "private": true,
   "type": "module",
   "description": "\u0905\u0930\u094d\u091c\u0941\u0928\u0903 (Arjunah): an open protocol, browser extension, TypeScript SDK, and desktop companion for user-controlled AI access on the web.",
@@ -29,7 +29,7 @@
     "build:sdk": "npm run build -w arjunah",
     "build:widget": "npm run build -w arjunah-widget",
     "test:e2e:widget": "node tests/e2e/widget.mjs",
-    "test:e2e:hosted": "node tests/e2e/hosted-1.2.mjs"
+    "test:e2e:hosted": "node tests/e2e/hosted-surfaces.mjs"
   },
   "devDependencies": {
     "@puppeteer/browsers": "3.2.2",

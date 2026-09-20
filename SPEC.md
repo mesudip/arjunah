@@ -1,11 +1,11 @@
 # अर्जुनः Protocol
 
-Version: **1.2.0-alpha**
+Version: **1.0.0-alpha**
 
-Status: **Implemented draft with a bounded schema subset, tiered site access, extension-collected tool inputs, transcript cards, tool progress, site-owned threads, declared remote tools, an optional desktop companion, and a standalone renderer**
+Status: **Implemented draft with a bounded schema subset, tiered site access, extension-collected tool inputs, transcript cards, tool progress, site-owned threads, declared remote tools, an optional desktop companion, and a standalone renderer with its own model picker and entity mentions**
 License: MIT
 
-Sections 7.4 through 7.7, 8.1, and 14 are the 1.2 additions: transcript cards, tool progress, site-owned threads, declared remote tools, and the standalone renderer. The reference extension reports `version` `1.2.0` and implements them; the standalone renderer ships as the `arjunah-widget` package built from the same renderer source the extension loads.
+The reference extension reports `version` `1.0.0` and implements everything here. One renderer serves both modes: sections 8.2 and 8.3 make the model and effort picker and the `@` entity mentions the renderer's own, as section 7.3's collected-input prompt already is, so a host supplies the data behind a control rather than building the control. The standalone renderer ships as the `arjunah-widget` package, built from the same renderer source the extension loads.
 
 This document is normative. The words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted as requirements.
 
@@ -27,8 +27,8 @@ Actors are:
 - **Desktop companion**: an optional application on the user's computer that pairs with the extension, synchronizes extension configuration, and runs locally installed subscription agents (Claude Code, Codex, OpenCode) on the extension's behalf. See section 12.
 - **Site tool**: a page-owned function callable by the extension during hosted chat.
 - **MCP server**: a remote Streamable HTTP Model Context Protocol endpoint declared by the site and approved by the user. A site's own backend is an MCP server too; section 7.7 lets it declare its tools up front.
-- **Renderer**: the chat user interface (transcript, activity feed, cards, composer, thread panel). The extension hosts it inside its closed shadow root in **wallet mode**. The same renderer runs without the extension in **standalone mode** (section 14), where a site backend takes the extension's place.
-- **Site backend**: in standalone mode, the server that owns inference, tools, and threads and streams renderer events to the page. It is the site's own trust domain; no wallet consent applies.
+- **Renderer**: the chat user interface (transcript, activity feed, cards, composer, thread panel). The extension hosts it inside its closed shadow root in **wallet mode**. The same renderer runs without the extension in **standalone mode** (section 14), where a site backend takes the extension's place, and in **bridged mode** (section 14.7), where the backend runs the loop and the renderer, as page code, supplies the visitor's model to it.
+- **Site backend**: in standalone and bridged mode, the server that owns the conversation, the tools, and the threads and streams renderer events to the page. It is the site's own trust domain; no wallet consent applies to what it does with the conversation. In bridged mode it does not hold a model credential: each completion is answered by the visitor's session on the page.
 
 ## 2. Security boundaries
 
@@ -62,7 +62,7 @@ interface AINamespace {
 }
 
 interface Arjunah {
-  readonly attribute DOMString version; // "1.2.0"
+  readonly attribute DOMString version; // "1.0.0"
   Promise<boolean> isEnabled();
   Promise<Session> enable(optional AccessRequest request = {});
   Promise<boolean> disable();
@@ -85,7 +85,7 @@ Feature detection MUST use members, not version string comparison. Unknown input
 
 If `window.ai.arjunah` already exists, or `window.ai` exists but is not an extensible object, the extension MUST NOT overwrite either. It SHOULD dispatch `arjunah:conflict` on `window`.
 
-After successful installation of the object, the extension SHOULD dispatch `arjunah:ready` on `window`; its `detail` is `{ "version": "1.2.0" }`. Pages MUST still check `window.ai.arjunah` first so they work when injection precedes their event listener.
+After successful installation of the object, the extension SHOULD dispatch `arjunah:ready` on `window`; its `detail` is `{ "version": "1.0.0" }`. Pages MUST still check `window.ai.arjunah` first so they work when injection precedes their event listener.
 
 ## 4. Access levels, capabilities, and consent
 
@@ -185,7 +185,7 @@ Every model has an opaque identifier `<provider-id>/<model>`: `openai/gpt-5.6-so
 
 `models.generate(request)` requires `models.generate`. Request fields:
 
-- `messages` (required): 1–100 objects with role `system`, `user`, `assistant`, or `tool`. `content` is a string of at most 12,000 UTF-16 code units, or, for user messages, an array of 1–8 content parts. A text part is `{ "type": "text", "text": "…" }` with the same length bound. An image part is `{ "type": "image", "mediaType": "image/png" | "image/jpeg" | "image/webp" | "image/gif", "data": "<base64>" }` with at most 2,000,000 base64 characters; at most 4 image parts per message. Image parts require a model whose `capabilities.vision` is true; otherwise the extension rejects the request with `NOT_SUPPORTED` before contacting any provider. A page MAY supply `name`, `toolCallId`, and OpenAI-compatible `toolCalls`. Tool messages MUST include `toolCallId`; only assistant messages may carry `toolCalls`. Each call has a unique non-empty `id`, `type: "function"`, and `function: { name, arguments }`, with arguments encoded as a JSON string. There are at most 32 calls per message.
+- `messages` (required): 1–100 objects with role `system`, `user`, `assistant`, or `tool`. `content` is a string of at most 12,000 UTF-16 code units, or, for user messages, an array of 1–8 content parts. A text part is `{ "type": "text", "text": "…" }` with the same length bound. An image part is `{ "type": "image", "mediaType": "image/png" | "image/jpeg" | "image/webp" | "image/gif", "data": "<base64>" }` with at most 2,000,000 base64 characters; at most 4 image parts per message. Image parts require a model whose `capabilities.vision` is true; otherwise the extension rejects the request with `NOT_SUPPORTED` before contacting any provider. A mention part is `{ "type": "mention", "id": "machine:12", "label": "web-01" }`: something the user picked from the renderer's entity picker (section 8.3) rather than typed. `id` matches `^[A-Za-z0-9_.:-]{1,128}$` and `label` is limited to 80 Unicode code points; a message carries at most 16 mention parts and they do not count toward the eight text and image parts. Pages MUST NOT send mention parts to `models.generate` and implementations MUST reject them there with `INVALID_REQUEST`: they exist so a stored transcript (section 7.6) and a standalone turn (section 14) keep the identity the user chose beside the label they saw. An implementation that forwards a conversation containing mention parts to a provider MUST flatten each one to `@` followed by its `label` and MUST NOT send the `id`, unless it first resolves the id into text of its own. A page MAY supply `name`, `toolCallId`, and OpenAI-compatible `toolCalls`. Tool messages MUST include `toolCallId`; only assistant messages may carry `toolCalls`. Each call has a unique non-empty `id`, `type: "function"`, and `function: { name, arguments }`, with arguments encoded as a JSON string. There are at most 32 calls per message.
 - `model` (optional): a model id exposed by `models.list`. Absent, or the literal string `"default"`, means the site model. At level 1 any other value MUST be rejected with `INVALID_REQUEST`; at level 2 the value MUST belong to the exposed catalog.
 - `temperature` (optional): finite number from 0 through 2. Providers that expose no sampling control (the subscription agents of section 12) MUST drop it and warn in the page console rather than fail the request; a site cannot tell at level 1 which kind answers it.
 - `maxTokens` (optional): integer from 1 through 32768. The same drop-and-warn rule applies.
@@ -302,6 +302,8 @@ A site tool may need a value that the model should neither invent nor see: for e
 
 The value is bound to that invocation, returned only to its page handler, kept only in memory, and MUST NOT be automatically merged into `args`, persisted, placed in model messages, or added to chat history. Cancellation, timeout, navigation, revocation, registration replacement, unregister, or chat reset MUST reject the pending request. Values MUST NOT be reused for another invocation without prompting again.
 
+The prompt itself is the renderer's (section 8.1), so it looks and validates the same in both modes. In standalone mode (section 14) the declaration and the prompt are unchanged and the wallet steps fall away: there is no consent dialog and no contract fingerprint, the origin shown is the page's own, and the recipient is the site's own handler. What remains is the separation that gives the mechanism its value, because the field is absent from the model-facing schema, bound to one invocation, and never written to the transcript the backend stores.
+
 This mechanism transports data; it does not add authority. It cannot grant a browser permission, widen an origin grant, or substitute for a platform-required user gesture. The page handler receives the value and can misuse it. The extension UI MUST say which origin and tool will receive it and MUST NOT promise that the site itself cannot transmit it. A conforming site SHOULD use the value only for the exact disclosed operation and MUST NOT include a secret value in its tool result, because tool results are model input.
 
 Example:
@@ -402,13 +404,13 @@ The consent text additionally states, when the contract declares them, that the 
 
 The extension constructs the provider conversation as: extension safety instruction, disclosed site `systemPrompt`, widget option state (section 7.2), optional page context, then chat history. Site instructions, widget labels, and page text are untrusted with respect to provider credentials and extension policy.
 
-The hosted chat runs on the site model (section 4.1). Its extension-owned chrome MUST show the current provider and model and MUST let the user switch to any model of any available provider; the reference UI keeps this selector in the composer. The switch updates the site model. When the model advertises `reasoningLevels`, the composer MUST offer a thinking-effort picker whose value is sent as the turn's `reasoning`; the footer MUST show the context window in use as a meter of the last turn's prompt tokens against `contextWindow`, plus cached and thinking token counts when reported.
+The hosted chat runs on the site model (section 4.1). It MUST show the current provider and model and MUST let the user switch to any model of any available provider; the picker is the renderer's, in the composer, and the extension supplies the catalog and applies the switch to the site model (section 8.2). When the model advertises `reasoningLevels`, the composer MUST offer a thinking-effort picker whose value is sent as the turn's `reasoning`; the footer MUST show the context window in use as a meter of the last turn's prompt tokens against `contextWindow`, plus cached and thinking token counts when reported.
 
 Each open hosted chat is one **conversation** with a random id that changes on reset, registration replacement, navigation, and, with site-owned threads, thread switch. The extension passes the id to desktop providers as the thread id (section 12.3) so an agent can keep one session per browser tab instead of replaying the transcript, and MUST release the thread when the conversation ends. The panel MUST be resizable and movable by its header, MUST show live activity (contacting the model, each tool call with its arguments and result, elapsed time), and MUST preserve user-expandable arguments and results even when the site selects the compact tool presentation. It SHOULD render normalized answer and reasoning deltas as they arrive, MUST render provider reasoning summaries and image attachments when present, MUST let the user attach images when the site model advertises `vision`, MUST show the tokens the last turn used and the session total, the hosted history budget in use, and the provider's quota status when known (section 11.1). A provider that cannot emit deltas still participates and renders its final answer normally. All of this is extension-owned UI in the closed shadow root; the page cannot read it.
 
 ### 8.1 Renderer requirements
 
-The renderer is the same code in wallet and standalone mode (section 14) and MUST behave identically for everything it owns: transcript and activity rendering, cards, progress lines, the thread panel, the composer, and attachments. Cards render inline under their tool step in both `toolCallView` modes. Progress lines are ephemeral and never persisted. The thread panel appears only when threads exist (site-owned in wallet mode, backend-owned in standalone mode); its actions are select, new, rename when supported, and delete. Switching threads MUST NOT cancel a running turn: the turn completes in the thread that submitted it, and the panel shows that thread as busy. Deleting a thread cancels its turn. Wallet-only chrome (consent, provider and model pickers, thinking effort, context sharing, usage and quota, launcher) belongs to the extension shell around the renderer and is absent in standalone mode.
+The renderer is the same code in wallet and standalone mode (section 14) and MUST behave identically for everything it owns: transcript and activity rendering, cards, progress lines, the thread panel, the composer, and attachments. Cards render inline under their tool step in both `toolCallView` modes. Progress lines are ephemeral and never persisted. The thread panel appears only when threads exist (site-owned in wallet mode, backend-owned in standalone mode); its actions are select, new, rename when supported, and delete. Switching threads MUST NOT cancel a running turn: the turn completes in the thread that submitted it, and the panel shows that thread as busy. Deleting a thread cancels its turn. The renderer also owns three surfaces that both modes need and neither should re-implement: the model and thinking-effort picker (section 8.2), the entity picker that produces mention parts (section 8.3), and the prompt that collects a declared tool input (section 7.3). In each case the renderer owns the control and the host owns the data behind it, so a host supplies a catalog, an entity source or a tool declaration and never markup. Wallet-only chrome (consent, context sharing, usage and quota, launcher) belongs to the extension shell around the renderer and is absent in standalone mode.
 
 The extension popup MUST NOT host a chat of its own. When the active page has registered an assistant, the popup opens that assistant on the page (or offers to hide it); otherwise it states that the page does not implement the protocol. All user-visible chat therefore happens inside the page the user is looking at, under that origin's grant, with the page's disclosed contract.
 
@@ -417,6 +419,20 @@ For tool-capable responses, the extension MAY execute up to six sequential tool 
 MCP transport is JSON-RPC 2.0 over Streamable HTTP, negotiating version `2025-03-26`. The extension performs `initialize`, `notifications/initialized`, `tools/list`, and `tools/call`. It accepts JSON or `text/event-stream` responses, parses complete multi-line SSE events incrementally, validates response IDs, and honors `Mcp-Session-Id`. Response bodies are limited to 1,000,000 UTF-8 bytes while reading. On a session-bearing 404 the client reinitializes and retries once. Tool pagination is bounded to 64 tools per server and 16 continuation cursors; descriptions are limited to 500 characters. Sessions are scoped to the page session and endpoint/headers. Redirects are rejected and ambient cookies are omitted for provider and MCP requests. OAuth flows, acting on server-sent requests/notifications, resources, prompts, sampling, and stdio transport are outside this version. Unrelated stream messages are ignored while locating the matching response.
 
 For remote tools without declared definitions (section 7.7), consent has two stages: approve the contract and endpoints for discovery, then inspect and approve the discovered tool metadata. The extension stores a short-lived, single-use preparation token bound to the page session, registration, and discovered routes. Completion MUST execute that prepared tool set and MUST NOT substitute newly discovered definitions. Subsequent turns rediscover metadata and request approval if its fingerprint changed. Preparation expires after five minutes or on cancellation/background restart; the user can start a new turn to prepare again.
+
+### 8.2 Model and effort picker
+
+The picker is the renderer's; the catalog behind it is the host's. The host supplies section 5.2 model entries and the current selection, and the renderer groups them by provider, labels each with `displayName` and, when known, a compact `contextWindow`, and marks the selected one. When the selected model lists `reasoningLevels` the renderer shows a thinking-effort control offering those levels plus the provider default, and sends the chosen level as the turn's `reasoning`; otherwise the control is hidden and no effort is sent. An empty catalog hides both controls rather than showing an empty menu.
+
+Choosing a model reports the choice to the host, which decides whether it holds: only the host knows whether the switch was permitted. The renderer applies the new selection when the host accepts it and restores the previous one when the host rejects or fails it, so a refused switch never leaves the composer claiming a model that is not answering. In wallet mode the host is the extension, the catalog is the exposed provider and model list of sections 4.1 and 5.2, and the switch updates the site model; a site cannot supply or filter that catalog, because widget options MUST NOT change the model (section 7.2). In standalone mode the site supplies the catalog directly (section 14.1), because the site already owns inference. In bridged mode (section 14.7) the renderer fills it from the visitor's session: one model at level 1, the exposed catalog at level 2, and a site-supplied `widget.models` is ignored, because the site does not own the model there either.
+
+### 8.3 Entity mentions
+
+A host MAY give the renderer an entity source, and the composer then offers mentions. Typing `@` at the start of the message or after whitespace opens a picker; the characters typed after it are the query. The renderer asks the host for matches, lists them grouped by their optional `group`, and inserts the chosen one as a chip: one atomic, non-editable token in the composer that a single backspace removes whole.
+
+An entity is `{ id, title, group?, description? }`. `id` follows the mention id syntax of section 5.3, `title` is limited to 80 Unicode code points, `group` to 40, and `description` to 120. A query is limited to 64 code points, a search to 20 results, and a message to 16 chips. Entities are untrusted host-supplied data: the renderer renders them as text, never as markup, and shows no images or icons. A search that rejects or times out shows no matches rather than an error in the transcript, and the renderer sends no query while the composer is disabled.
+
+On submit each chip becomes a mention part (section 5.3) in its position among the text, so the host receives both the identity the user picked and the text around it. A chip in the transcript is activatable exactly when the host offers somewhere to send the click, and activating it reports the mention's `id` and label; the renderer itself does nothing with it, and chips in the composer stay inert so editing around them is predictable. Because clickability follows the host rather than the entity, a chip replayed from a stored thread behaves like one just inserted. The model never receives an `id`; section 5.3 flattening decides what it sees.
 
 ## 9. Errors
 
@@ -514,7 +530,7 @@ The reference companion monitors provider discovery centrally and emits when ava
 
 ## 13. Conformance
 
-A conforming v1.2 extension MUST pass tests for:
+A conforming v1 extension MUST pass tests for:
 
 1. immutable discovery and version;
 2. exact-origin grant isolation and denial;
@@ -529,30 +545,41 @@ A conforming v1.2 extension MUST pass tests for:
 11. Firefox temporary installation with a compatible background page and no Mozilla linter warnings;
 12. popup wallet view (providers, global default, current-site dashboard) without a popup-owned chat, and fresh consent after an assistant contract change;
 13. widget controls: validation, disclosure, tool-handler delivery, and page callbacks;
-14. desktop companion pairing, provider selection, configuration sync, and bridged tool rounds through a desktop provider (section 12), when the desktop companion is implemented.
-15. extension-collected tool input declaration, disclosure, scalar validation, invocation binding, cancellation, and absence from model traffic and chat history.
-
-and, for the 1.2 surfaces:
-
+14. desktop companion pairing, provider selection, configuration sync, and bridged tool rounds through a desktop provider (section 12), when the desktop companion is implemented;
+15. extension-collected tool input declaration, disclosure, scalar validation, invocation binding, cancellation, and absence from model traffic and chat history;
 16. transcript cards: node and size bounds, rejection of HTML, links, and unknown nodes, text-only model input, visible `message` actions, `local` actions never reaching the model, and consent disclosure of the card output kind;
 17. tool progress: bounds, ephemeral rendering, and absence from model messages, history, and stored transcripts;
 18. site-owned threads: callback validation and timeouts, the untrusted marker and extension-side history budget on loaded entries, consent disclosure of site storage, replay of stored cards, and companion thread release on delete;
 19. declared remote tools: fingerprinted declarations, single-stage consent, no `tools/list` call, `_meta` conversation id, and fresh consent after a declaration change;
-20. standalone renderer: the section 14 event stream and routes against a mock backend, including a client tool round, a card update, and thread switching, with the same rendering bounds as wallet mode.
+20. standalone renderer: the section 14 event stream and routes against a mock backend, including a client tool round, a card update, and thread switching, with the same rendering bounds as wallet mode;
+21. model and effort picker: catalog grouping, a switch the host can refuse without leaving the composer claiming it, effort levels drawn from the selected model, and both controls hidden on an empty catalog;
+22. entity mentions: query and result bounds, chips as atomic composer tokens, mention parts in the submitted content, no `id` in model traffic, entities rendered as text, and a failing search that produces no matches rather than an error;
+23. collected tool inputs in standalone mode: the renderer-owned prompt, scalar validation, invocation binding, and absence from the stored transcript;
+24. standalone host callbacks: turn, thread, model, control, and error reports, and the mounted controller's thread, control, and catalog methods;
+25. bridged mode: the turn body's `bridge` announcement, a `model.client` round answered through a level 1 session with the result posted on its route, a refused or revoked session surfacing as a section 9 error on the stream rather than a dialog, the catalog drawn from the session and not from the site, and no `model.client` accepted on a turn that announced no bridge.
 
-Extensions MAY implement additional APIs under another namespace. They MUST NOT change the semantics of the members defined here while claiming v1.1 or v1.2 conformance.
+Extensions MAY implement additional APIs under another namespace. They MUST NOT change the semantics of the members defined here while claiming v1 conformance.
 
 ## 14. Standalone renderer
 
-The renderer of section 8.1 is published as a dependency-free ES module that a site can embed without the extension. In this **standalone mode** the site backend owns inference, tools, and threads; the renderer is a view. There are no access levels, grants, or consent dialogs, because the site is already the trust domain of its own page. The renderer MUST NOT present itself as the extension or as a wallet, and MUST NOT expose `window.ai.arjunah`.
+The renderer of section 8.1 is published as a dependency-free ES module that a site can embed without the extension. In this **standalone mode** the site backend owns inference, tools, and threads; the renderer is a view. There are no access levels, grants, or consent dialogs, because the site is already the trust domain of its own page. Section 14.7 adds **bridged mode**, in which the backend still owns the conversation and the loop but each completion is answered by the visitor's own model through an ordinary level 1 or 2 session the renderer holds as page code; the extension's consent applies to that session and to nothing else. In neither mode does the renderer present itself as the extension or as a wallet, and it MUST NOT expose or replace `window.ai.arjunah`; in bridged mode it uses that object exactly as any page may.
 
 ### 14.1 Embedding
 
-The site mounts the renderer with `{ mount, backend: { baseUrl, headers?, credentials? }, widget?, tools? }`. `widget` accepts the presentation fields of section 7.2 (`greeting`, `placeholder`, `suggestions`, `theme`, `toolCallView`, `controls`); `autoShow` and consent-related behavior do not apply. `tools` accepts section 7 site tool definitions whose handlers run in the page when the backend requests them (section 14.3, `tool.client`); `userInputs` and `reportProgress` work as in sections 7.3 and 7.5. `baseUrl` MUST be same-origin or HTTPS; `credentials` selects whether cookies are sent and defaults to same-origin only.
+The site mounts the renderer with `{ mount, backend: { baseUrl, headers?, credentials? }, widget?, tools?, entities?, bridge? }` plus the callbacks below. `bridge` turns on section 14.7 and is described there. `widget` accepts the presentation fields of section 7.2 (`greeting`, `placeholder`, `suggestions`, `theme`, `toolCallView`, `controls`); `autoShow` and consent-related behavior do not apply. `tools` accepts section 7 site tool definitions whose handlers run in the page when the backend requests them (section 14.3, `tool.client`); `userInputs` and `reportProgress` work as in sections 7.3 and 7.5, the prompt being the renderer's own. `baseUrl` MUST be same-origin or HTTPS; `credentials` selects whether cookies are sent and defaults to same-origin only.
+
+Two host-owned data sources drive renderer-owned controls, so a site configures them rather than building them:
+
+- `widget.models` is a list of section 5.2 model entries and `widget.defaultModel` the id to start on. The picker of section 8.2 appears when the list is non-empty, and the chosen `model` and `reasoning` ride with each turn (section 14.4). Nothing here is a wallet: the site names its own models and its own backend decides what they mean.
+- `entities` enables the mentions of section 8.3. `entities.search(query)` resolves to matching entities; when it is absent the renderer queries the backend route instead. `entities.onActivate(entity)` receives a click on a transcript chip, and omitting it leaves chips inert. Omitting `entities` leaves `@` an ordinary character.
+
+Callbacks are all optional and all local: `onClose()`, `onControlChange(id, value, values)`, `onModelChange({ model, reasoning })`, `onThreadChange({ threadId })`, `onTurnStart({ threadId, turnId })`, `onTurnEnd({ threadId, turnId, usage })`, and `onError({ code, message })` with a section 9 code. They report; they cannot veto, and a callback that throws MUST NOT break the turn.
+
+Mounting resolves to `{ panel, open(), close(), destroy(), openThread(id), newThread(), getControls(), setControls(values), setModels(models, selected?) }`. `openThread` is how a site restores the conversation the visitor last had; `setModels` replaces the catalog after the site loads it. `destroy` aborts a running turn and empties the shadow root.
 
 ### 14.2 Transcript
 
-Standalone mode uses the `ThreadSummary` and `TranscriptEntry` shapes of section 7.6 unchanged. The backend is the store; the renderer keeps only the loaded thread in memory.
+Standalone mode uses the `ThreadSummary` and `TranscriptEntry` shapes of section 7.6 unchanged. The backend is the store; the renderer keeps only the loaded thread in memory. A backend that stores a user message containing mention parts SHOULD return them as parts when the thread is loaded, so a replayed conversation keeps its chips; flattening them to text loses the ids and is permitted but lossy.
 
 ### 14.3 Event stream
 
@@ -564,6 +591,7 @@ A turn is a `POST` that answers with `text/event-stream`. Each SSE event has `ev
 - `message { entry }`: a complete assistant `TranscriptEntry`, authoritative over any deltas;
 - `tool.start { id, name, source, arguments }` and `tool.end { id, name, ok, result, card? }` with the preview bounds of section 7.6;
 - `tool.client { id, name, arguments }`: the backend asks the page to run a declared site tool; the renderer validates the arguments against the declared schema, runs the handler, and posts the result (section 14.4), after which the same stream continues;
+- `model.client { id, request }` (bridged mode, section 14.7): the backend asks the page for one completion; `request` is a section 5.3 `models.generate` request, the renderer runs it through the bridge, posts the result or error (section 14.4), and the same stream continues. A backend MUST NOT emit it on a turn whose body carried no `bridge`;
 - `progress { toolId, text }` (section 7.5);
 - `card { toolId, card }` and `card.update { cardId, card }` (section 7.4);
 - `error { code, message }` using the section 9 codes, which ends the turn.
@@ -575,10 +603,12 @@ The renderer reads the body incrementally with a 2,000,000-byte ceiling, ignores
 Relative to `baseUrl`:
 
 - `GET threads` → `ThreadSummary[]`; `POST threads` → `ThreadSummary`; `GET threads/{id}` → `TranscriptEntry[]`; `PATCH threads/{id}` with `{ title }`; `DELETE threads/{id}`.
-- `POST threads/{id}/turns` with `{ content, controls? }` where `content` follows section 5.3 user message content → event stream.
+- `POST threads/{id}/turns` with `{ content, controls?, model?, reasoning?, bridge? }` where `content` follows section 5.3 user message content and MAY contain the mention parts of section 8.3. `model` is an id from the catalog the picker shows and `reasoning` one of its `reasoningLevels`; both are absent when no picker is shown. `bridge` is present only in bridged mode and describes what the page can do for this turn (section 14.7). The response is the event stream.
 - `POST threads/{id}/turns/{turnId}/tool-results` with `{ id, result }` where `result` follows section 7 result validation → `204`; the open stream continues.
+- `POST threads/{id}/turns/{turnId}/model-results` with `{ id, result }` where `result` is a section 5.3 generation result, or `{ id, error: { code, message } }` with a section 9 code → `204`; the open stream continues. Bridged mode only.
 - `POST threads/{id}/actions` with `{ cardId, name, payload?, values? }` → `204`, or `{ card }` to update the card in place.
 - `POST threads/{id}/turns/{turnId}/cancel` → `204`.
+- `GET entities?q={query}` → `Entity[]` (section 8.3), at most 20 entries. The renderer calls it only when `entities` is configured without its own `search`, and a non-2xx answer or an invalid body means no matches.
 
 Backends MAY require their own authentication through `headers` or cookies. Responses other than the event stream are JSON bounded to 1,000,000 bytes. The renderer applies the section 7.6 list and entry limits to every response.
 
@@ -588,4 +618,40 @@ In standalone mode server tools need no protocol: the backend runs them inside t
 
 ### 14.6 Security
 
-The renderer renders answers as text and Markdown-derived DOM, never HTML; it evaluates no code, loads no remote code, and works under a strict content security policy. Card, transcript, and stream bounds are enforced by the renderer itself because no broker sits in front of it. Standalone mode provides none of the wallet guarantees of section 2: the site sees everything the user types, and the renderer MUST NOT display any wording that suggests otherwise.
+The renderer renders answers as text and Markdown-derived DOM, never HTML; it evaluates no code, loads no remote code, and works under a strict content security policy. Card, transcript, stream, entity, and collected-input bounds are enforced by the renderer itself because no broker sits in front of it. Standalone mode provides none of the wallet guarantees of section 2: the site sees everything the user types, and the renderer MUST NOT display any wording that suggests otherwise. Bridged mode restores exactly one of them, credential non-disclosure, and section 14.7 says which wording that permits.
+
+### 14.7 Bridged mode
+
+Standalone mode puts the loop and the model on the same server. Bridged mode separates them: the site backend runs the loop, and the page answers each completion from the visitor's own model. The backend keeps everything it owns in standalone mode, meaning the conversation, its tools, its policy, the threads, and the event stream. What it gives up is the model credential. It never holds one, because every completion is a `models.generate` call made by the renderer, as page code, through an ordinary level 1 or level 2 session (section 4). The extension's consent dialog for that session is the only consent involved, and it means what it always means at those levels: the site may send prompts to the model the visitor chose for it. Here the site's backend composes those prompts.
+
+**Enabling it.** The site passes `bridge` when mounting:
+
+```js
+bridge: {
+  arjunah: true | AccessRequest,          // hold a session on the visitor's extension
+  generate?(request): Promise<Result>,    // or answer completions some other way
+}
+```
+
+`arjunah: true` requests level 1; an `AccessRequest` may ask for level 2 and page context. The renderer calls `enable()` lazily, on the first send after mount, so the consent dialog follows a user gesture rather than a server event, and it keeps the session for the life of the mount. `generate` replaces the extension with a page function that accepts a section 5.3 request and resolves to a section 5.3 result; when both are given, `generate` wins. A site with neither has no bridge, and the turn body carries no `bridge` field.
+
+**Announcing it.** Every `POST threads/{id}/turns` in bridged mode carries:
+
+```json
+"bridge": {
+  "model": { "id": "openai/gpt-5.6-sol", "capabilities": { "tools": true, "vision": true, "reasoning": true }, "contextWindow": 272000, "reasoningLevels": ["low", "medium", "high"] },
+  "tools": [{ "name": "page_info", "description": "…", "inputSchema": { "type": "object", "additionalProperties": false } }]
+}
+```
+
+`model` is the section 5.2 entry of the model that will answer this turn, or `null` when the page has no session yet, was refused one, or lost it, so the backend can decide before composing whether to run the turn, fall back to a provider of its own, or fail. `tools` lists the site tools declared to the renderer as `{ name, description?, inputSchema }`, at most 32, without handlers or `userInputs`; they are what the backend may request with `tool.client`. The announcement is per turn because the grant can change between turns.
+
+**Running a completion.** When the loop needs the model, the backend emits `model.client { id, request }`. `request` is a section 5.3 request: `messages` (required), and optionally `model`, `tools`, `reasoning`, `temperature`, and `maxTokens`, all under section 5.3 bounds, with `tools` in the section 7.1 schema subset because the extension validates them as it validates any page's. The renderer passes the request to the bridge unchanged, shows the round as in progress, and posts to `model-results` either `{ id, result }` with the section 5.3 result, or `{ id, error }` with the section 9 code the session rejected with. The backend then continues the loop: it dispatches `toolCalls` to its own tools inline or to the page with `tool.client`, emits `message` or `output.delta` for the text, and ends the turn. The renderer does not display a completion result itself, because only the backend knows whether the round is the answer or the middle of a tool exchange.
+
+At level 1, `request.model` MUST be absent, `"default"`, or the announced id; anything else is rejected by the extension with `INVALID_REQUEST`, and the backend learns that through `error`. At level 2 the renderer's picker (section 8.2) shows the exposed catalog, the choice rides the turn as `model`, and a backend that echoes it into `request.model` gets that model. `messages` is the backend's to compose; the section 5.3 history budget (100 messages, 12,000 code units each) and the mention flattening rule of section 5.3 apply to what it sends. A completion MAY take up to 180 seconds (section 5.3), so the turn's stream MUST stay open for at least that long after `model.client`.
+
+**Failure.** A session that is refused, revoked, or invalidated by a per-site model change rejects the pending `models.generate` with a section 9 code; the renderer posts it as `error` on `model-results` and MUST NOT open a dialog of its own or retry. The backend ends the turn with a section 14.3 `error` event, or with a `message` if it answered another way. Revocation therefore cancels the completion the visitor was paying for and nothing else; the conversation stays on the backend. A `model.client` on a turn whose body carried no `bridge` is a backend defect: the renderer MUST answer it with `{ id, error: { code: "NOT_SUPPORTED" } }` and the backend MUST treat that as final.
+
+**What the visitor is and is not protected by.** The credential stays in the extension, the grant is per exact origin and revocable, and the visitor chooses the model. Those three claims are true and a renderer MAY state them. The backend sees everything the visitor types and composes every prompt, the wallet's system prompt disclosure does not exist because a level 1 site authors its own messages, and nothing prevents the backend from logging the conversation. A renderer MUST NOT describe bridged mode as the wallet, and the section 14.6 wording rule stands. The extension, for its part, sees a level 1 or 2 page like any other: it cannot tell that a server is behind the page and MUST NOT need to.
+
+**No deltas.** The completion arrives whole. Section 5.3 makes the page API non-streaming, so `model.client` cannot yield `output.delta` for the text the model is still producing; the backend MAY stream its own progress and tool activity as usual, and the visitor sees the answer when the round ends.

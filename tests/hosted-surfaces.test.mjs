@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { broker, toolReply } from "./helpers/broker.mjs";
 
 /**
- * SPEC 1.2 broker behaviour: declared remote tools (7.7), transcript cards
+ * Broker behaviour for the hosted surfaces: declared remote tools (7.7), transcript cards
  * (7.4) reaching the widget but not the model, and site-supplied history (7.6)
  * arriving marked as untrusted.
  */

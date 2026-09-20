@@ -27,8 +27,8 @@ import {
 import { enrichProviders, mapT3Providers } from "./t3/catalog.mjs";
 
 export const APP_NAME = "arjunah-desktop";
-export const APP_VERSION = "1.2.0";
-export const PROTOCOL_VERSION = "1.2.0";
+export const APP_VERSION = "1.0.0";
+export const PROTOCOL_VERSION = "1.0.0";
 const BODY_LIMIT = 5_000_000;
 const EXTENSION_ORIGIN = /^(chrome|moz|safari-web)-extension:\/\/[a-z0-9-]+$/i;
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";

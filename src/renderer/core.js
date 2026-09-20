@@ -24,7 +24,18 @@ var ArjunahRenderer = (function () {
     outputChars: 120000,
     attachments: 4,
     imageChars: 2000000,
+    composerChars: 12000,
+    mentions: 16,
+    entityQuery: 64,
+    entityResults: 20,
+    entityTitle: 80,
+    entityGroup: 40,
+    entityDescription: 120,
+    userInputChars: 4096,
+    userInputPrompts: 4,
   };
+  /** Mention ids carry host keys such as `machine:12`, so they allow `.:-`. */
+  const MENTION_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
 
   const STYLE = `
     *{box-sizing:border-box}button,input,select,textarea{font:inherit}
@@ -225,7 +236,19 @@ var ArjunahRenderer = (function () {
     .composer{position:relative;border-top:0;padding:8px 14px 12px;background:linear-gradient(180deg,transparent 0,var(--bg) 13%)}
     .compose-shell{position:relative;border:1px solid var(--line);border-radius:22px;padding:10px;background:var(--bg);box-shadow:0 10px 30px #0f172a0d,0 1px 2px #0f172a0d;transition:border-color .15s,box-shadow .15s}
     .compose-shell:focus-within{border-color:color-mix(in srgb,var(--ink) 22%,var(--line));box-shadow:0 12px 34px #0f172a14}
-    .compose-shell textarea{display:block;width:100%;min-height:45px;max-height:150px;padding:2px 5px 8px;border:0;outline:0;resize:none;background:transparent;color:var(--ink);line-height:1.5;font-size:14px}
+    .compose-shell .input{display:block;width:100%;min-height:45px;max-height:150px;overflow-y:auto;padding:2px 5px 8px;border:0;outline:0;background:transparent;color:var(--ink);line-height:1.5;font-size:14px;white-space:pre-wrap;overflow-wrap:anywhere}
+    .compose-shell .input:empty::before{content:attr(data-placeholder);color:var(--muted);pointer-events:none}
+    .compose-shell .input[aria-disabled=true]{opacity:.55}
+    /* Entity mentions (SPEC 8.3): one atomic token in the composer and the transcript. */
+    .mention{display:inline;padding:1px 5px;margin:0 1px;border-radius:7px;background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent);font-weight:600;white-space:nowrap}
+    button.mention{border:0;font:inherit;cursor:pointer}button.mention:hover{background:color-mix(in srgb,var(--accent) 26%,transparent)}
+    .msg.user .mention{background:#ffffff30;color:var(--accent-ink)}
+    .mention-menu{position:absolute;left:10px;right:10px;bottom:calc(100% + 8px);z-index:9;max-height:252px;overflow:auto;padding:6px;border:1px solid var(--line);border-radius:15px;background:var(--bg);box-shadow:0 20px 50px #0f172a2b,0 2px 8px #0f172a12;animation:popover-in .15s ease both}
+    .entity-option{width:100%;display:grid;gap:1px;border:0;border-radius:10px;background:transparent;color:var(--ink);padding:7px 9px;cursor:pointer;text-align:left}
+    .entity-option:hover,.entity-option[aria-selected=true]{background:var(--surface)}
+    .entity-option strong{font-size:12.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .entity-option small{color:var(--muted);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .entity-empty{padding:8px 10px;color:var(--muted);font-size:12px}
     .compose-actions{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
     .compose-left,.compose-right{display:flex;align-items:center;gap:4px;min-width:0}.compose-left{flex:1}
     .compose-control{height:32px;border:0;border-radius:10px;background:transparent;color:var(--ink);cursor:pointer;display:inline-flex;align-items:center;gap:6px;padding:0 8px;white-space:nowrap;font-size:12.5px}
@@ -280,11 +303,17 @@ var ArjunahRenderer = (function () {
   <footer class="composer">
     <div class="attach-strip" hidden></div>
     <div class="compose-shell">
-      <textarea rows="1" maxlength="12000" placeholder="Ask about this site…" aria-label="Message"></textarea>
+      <div class="mention-menu" role="listbox" hidden></div>
+      <div class="input" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Message" data-placeholder="Ask about this site…"></div>
       <div class="compose-actions">
         <div class="compose-left">
           <button class="attach compose-control" title="Attach image" aria-label="Attach image" hidden>＋</button>
           <span class="compose-left-slot"></span>
+          <div class="model-picker" hidden>
+            <button class="model-button compose-control" type="button" title="Select model" aria-label="Select model" aria-haspopup="listbox" aria-expanded="false"><span class="model-label">Select model</span><span class="chevron">⌄</span></button>
+            <div class="model-menu" role="listbox" hidden></div>
+          </div>
+          <select class="think" title="Thinking effort" aria-label="Thinking effort" hidden></select>
         </div>
         <div class="compose-right">
           <span class="compose-right-slot"></span>
@@ -640,6 +669,67 @@ var ArjunahRenderer = (function () {
     return crypto.randomUUID().replace(/-/g, "").slice(0, 24);
   }
 
+  /** 272000 → "272k". The model picker and the usage rows both want this. */
+  function compactNumber(value) {
+    const number = Number(value || 0);
+    if (number >= 1_000_000)
+      return `${(number / 1_000_000).toFixed(number >= 10_000_000 ? 0 : 1)}M`;
+    if (number >= 1000)
+      return `${(number / 1000).toFixed(number >= 100_000 ? 0 : 1)}k`;
+    return number.toLocaleString();
+  }
+
+  /**
+   * A provider only ever sees the label a mention displayed (SPEC 5.3). The id
+   * belongs to the host that resolved it and never leaves for a model.
+   */
+  function flattenMentions(content) {
+    if (!Array.isArray(content)) return content;
+    const parts = [];
+    for (const part of content) {
+      const text =
+        part?.type === "mention"
+          ? `@${part.label ?? ""}`
+          : part?.type === "text"
+            ? part.text
+            : null;
+      if (text == null) {
+        parts.push(part);
+        continue;
+      }
+      const previous = parts[parts.length - 1];
+      // Coalesce, so a flattened mention reads as one sentence to the model.
+      if (previous?.type === "text")
+        parts[parts.length - 1] = {
+          ...previous,
+          text: `${previous.text}${text}`,
+        };
+      else parts.push({ type: "text", text });
+    }
+    return parts;
+  }
+
+  /** One collected input against its declared scalar schema (SPEC 7.3). */
+  function userInputMatches(value, schema) {
+    if (schema.type === "string") {
+      if (typeof value !== "string") return false;
+      const length = [...value].length;
+      if (length < (schema.minLength ?? 0)) return false;
+      if (length > (schema.maxLength ?? LIMITS.userInputChars)) return false;
+    } else if (schema.type === "boolean") {
+      if (typeof value !== "boolean") return false;
+    } else {
+      if (typeof value !== "number" || !Number.isFinite(value)) return false;
+      if (schema.type === "integer" && !Number.isInteger(value)) return false;
+      if (value < (schema.minimum ?? -Infinity)) return false;
+      if (value > (schema.maximum ?? Infinity)) return false;
+    }
+    if (schema.enum && !schema.enum.some((item) => item === value))
+      return false;
+    if (Object.hasOwn(schema, "const") && schema.const !== value) return false;
+    return true;
+  }
+
   /**
    * Builds the panel and owns everything inside it. The host supplies callbacks
    * and fills the three slots with whatever chrome belongs to its mode.
@@ -666,7 +756,13 @@ var ArjunahRenderer = (function () {
       messages: q(".messages"),
       composer: q(".composer"),
       attachStrip: q(".attach-strip"),
-      input: q("textarea"),
+      input: q(".input"),
+      mentionMenu: q(".mention-menu"),
+      modelPicker: q(".model-picker"),
+      modelButton: q(".model-button"),
+      modelLabel: q(".model-label"),
+      modelMenu: q(".model-menu"),
+      thinkSelect: q(".think"),
       attachButton: q(".attach"),
       fileInput: q("input[type=file]"),
       sendButton: q(".send:not(.stop)"),
@@ -688,6 +784,16 @@ var ArjunahRenderer = (function () {
     };
     let controlValues = {};
     let attachments = [];
+    // Model picker (SPEC 8.2). The catalog is the host's; the control is ours.
+    let models = [];
+    let selectedModel = null;
+    let reasoningEffort = "";
+    // Entity mentions (SPEC 8.3) and the collected-input prompt (SPEC 7.3).
+    let mentionQuery = null;
+    let mentionResults = [];
+    let mentionIndex = 0;
+    let mentionSearch = 0;
+    let pendingInputPrompt = null;
     let busy = false;
     let composerBlocked = false;
     let activeThreadId = null;
@@ -733,16 +839,34 @@ var ArjunahRenderer = (function () {
       const parts = Array.isArray(entry.content)
         ? entry.content
         : [{ type: "text", text: entry.content }];
-      const text = parts
-        .filter((part) => part.type === "text")
-        .map((part) => part.text)
-        .join("\n");
-      if (text)
-        item.append(
-          entry.role === "assistant"
-            ? renderMarkdown(text, doc)
-            : doc.createTextNode(text),
-        );
+      const mentions = parts.filter((part) => part.type === "mention");
+      if (mentions.length && entry.role !== "assistant") {
+        // A stored mention keeps its chip, so a replayed turn reads the way it
+        // was written (SPEC 8.3).
+        for (const part of parts) {
+          if (part.type === "text") item.append(doc.createTextNode(part.text));
+          else if (part.type === "mention") {
+            const entity = normalizeEntity({ id: part.id, title: part.label });
+            if (entity)
+              item.append(
+                mentionChip(entity, {
+                  clickable: typeof host.activateEntity === "function",
+                }),
+              );
+          }
+        }
+      } else {
+        const text = parts
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("\n");
+        if (text)
+          item.append(
+            entry.role === "assistant"
+              ? renderMarkdown(text, doc)
+              : doc.createTextNode(text),
+          );
+      }
       const images = parts.filter(
         (part) => part.type === "image" && IMAGE_TYPES.includes(part.mediaType),
       );
@@ -912,7 +1036,7 @@ var ArjunahRenderer = (function () {
       return {
         messages: recent.map((entry) => ({
           role: entry.role,
-          content: entry.content,
+          content: flattenMentions(entry.content),
         })),
         untrustedPrefix: Math.max(
           0,
@@ -1422,8 +1546,7 @@ var ArjunahRenderer = (function () {
           button.type = "button";
           button.textContent = text;
           button.addEventListener("click", () => {
-            refs.input.value = text;
-            refs.input.dispatchEvent(new Event("input"));
+            setComposerText(text);
             refs.input.focus();
           });
           box.append(button);
@@ -1562,31 +1685,172 @@ var ArjunahRenderer = (function () {
       busy = value;
       refs.sendButton.hidden = value;
       refs.stopButton.hidden = !value;
-      refs.input.disabled = value || composerBlocked;
+      refs.modelButton.disabled = value;
+      setComposerEditable(!value && !composerBlocked);
       host.busyChanged?.(value);
       renderThreadList();
     }
 
     function setComposerBlocked(blocked, placeholder) {
       composerBlocked = blocked;
-      refs.input.disabled = blocked || busy;
+      setComposerEditable(!blocked && !busy);
       refs.sendButton.disabled = blocked;
       refs.attachButton.disabled = blocked;
-      refs.input.placeholder =
+      refs.input.dataset.placeholder =
         placeholder ?? options.placeholder ?? "Ask about this site…";
     }
 
-    async function submit(override) {
-      const value =
-        typeof override === "string" ? override : refs.input.value.trim();
-      if ((!value && !attachments.length) || busy) return;
-      if (typeof override !== "string") {
-        refs.input.value = "";
-        refs.input.style.height = "auto";
+    // --------------------------------------------------------------- composer
+
+    // The composer is contenteditable rather than a textarea because a mention
+    // has to sit in the text as one atomic token (SPEC 8.3). Everything else
+    // about it behaves like the textarea it replaced.
+    let editableMode = "true";
+
+    function initComposer() {
+      refs.input.setAttribute("contenteditable", "plaintext-only");
+      if (!refs.input.isContentEditable)
+        refs.input.setAttribute("contenteditable", "true");
+      editableMode = refs.input.getAttribute("contenteditable");
+    }
+
+    function setComposerEditable(enabled) {
+      refs.input.setAttribute(
+        "contenteditable",
+        enabled ? editableMode : "false",
+      );
+      refs.input.setAttribute("aria-disabled", String(!enabled));
+      if (!enabled) closeMentionMenu();
+    }
+
+    function composerEditable() {
+      return refs.input.getAttribute("contenteditable") !== "false";
+    }
+
+    /**
+     * Read the composer as section 5.3 content parts. Text between two chips
+     * keeps its spacing, so only the outer edges are trimmed.
+     */
+    function composerParts() {
+      const parts = [];
+      let buffer = "";
+      const flush = () => {
+        if (buffer) parts.push({ type: "text", text: buffer });
+        buffer = "";
+      };
+      const walk = (node) => {
+        for (const child of node.childNodes) {
+          if (child.nodeType === 3) buffer += child.nodeValue ?? "";
+          else if (child.nodeType !== 1) continue;
+          else if (child.dataset?.mentionId) {
+            flush();
+            if (
+              parts.filter((part) => part.type === "mention").length <
+              LIMITS.mentions
+            )
+              parts.push({
+                type: "mention",
+                id: child.dataset.mentionId,
+                label: child.dataset.mentionLabel ?? "",
+              });
+          } else if (child.tagName === "BR") buffer += "\n";
+          else {
+            if (
+              /^(DIV|P)$/.test(child.tagName) &&
+              buffer &&
+              !buffer.endsWith("\n")
+            )
+              buffer += "\n";
+            walk(child);
+          }
+        }
+      };
+      walk(refs.input);
+      flush();
+      if (parts[0]?.type === "text")
+        parts[0].text = parts[0].text.replace(/^\s+/, "");
+      const last = parts[parts.length - 1];
+      if (last?.type === "text") last.text = last.text.replace(/\s+$/, "");
+      let budget = LIMITS.composerChars;
+      const bounded = [];
+      for (const part of parts) {
+        if (part.type !== "text") {
+          bounded.push(part);
+          continue;
+        }
+        const text = part.text.replace(/\u00a0/g, " ").slice(0, budget);
+        budget -= text.length;
+        if (text) bounded.push({ type: "text", text });
       }
-      const content = attachments.length
-        ? [...(value ? [{ type: "text", text: value }] : []), ...attachments]
-        : value;
+      return bounded;
+    }
+
+    function composerEmpty() {
+      return (
+        !refs.input.textContent.trim() &&
+        !refs.input.querySelector("[data-mention-id]")
+      );
+    }
+
+    function clearComposer() {
+      refs.input.replaceChildren();
+      closeMentionMenu();
+    }
+
+    function setComposerText(value) {
+      refs.input.replaceChildren(doc.createTextNode(String(value)));
+      closeMentionMenu();
+      caretToEnd(refs.input);
+    }
+
+    function caretToEnd(node) {
+      const frame = doc.defaultView;
+      const selection =
+        node.getRootNode().getSelection?.() ?? frame?.getSelection?.();
+      if (!selection) return;
+      const range = doc.createRange();
+      range.selectNodeContents(node);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+
+    function composerRange() {
+      const frame = doc.defaultView;
+      const selection =
+        refs.input.getRootNode().getSelection?.() ?? frame?.getSelection?.();
+      if (!selection || !selection.rangeCount) return null;
+      const range = selection.getRangeAt(0);
+      return refs.input.contains(
+        range.startContainer.nodeType === 1
+          ? range.startContainer
+          : range.startContainer.parentNode,
+      )
+        ? { selection, range }
+        : null;
+    }
+
+    async function submit(override) {
+      if (busy) return;
+      closeMentionMenu();
+      const typed =
+        typeof override === "string"
+          ? [{ type: "text", text: override.trim() }]
+          : composerParts();
+      const mentions = typed.filter((part) => part.type === "mention");
+      const text = typed
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join("");
+      if (!text.trim() && !mentions.length && !attachments.length) return;
+      if (typeof override !== "string") clearComposer();
+      const content =
+        mentions.length || attachments.length
+          ? [
+              ...typed.filter((part) => part.type !== "text" || part.text),
+              ...attachments,
+            ]
+          : text.trim();
       attachments = [];
       renderAttachments();
       // A thread has to exist before the first message can be saved into it.
@@ -1603,6 +1867,487 @@ var ArjunahRenderer = (function () {
       } finally {
         await appendToThread(produced.filter(Boolean));
       }
+    }
+
+    // --------------------------------------------------------------- mentions
+
+    function entitiesEnabled() {
+      return typeof host.searchEntities === "function";
+    }
+
+    function mentionCount() {
+      return refs.input.querySelectorAll("[data-mention-id]").length;
+    }
+
+    /** One bounded entity, trusted for nothing beyond its text. */
+    function normalizeEntity(raw) {
+      const id = String(raw?.id ?? "");
+      const title = String(raw?.title ?? "").slice(0, LIMITS.entityTitle);
+      if (!MENTION_ID.test(id) || !title) return null;
+      return {
+        id,
+        title,
+        group: raw?.group ? String(raw.group).slice(0, LIMITS.entityGroup) : "",
+        description: raw?.description
+          ? String(raw.description).slice(0, LIMITS.entityDescription)
+          : "",
+      };
+    }
+
+    function mentionChip(entity, { clickable = false } = {}) {
+      const node = doc.createElement(clickable ? "button" : "span");
+      node.className = "mention";
+      if (clickable) node.type = "button";
+      node.dataset.mentionId = entity.id;
+      node.dataset.mentionLabel = entity.title;
+      node.setAttribute("contenteditable", "false");
+      node.textContent = `@${entity.title}`;
+      if (clickable)
+        node.addEventListener("click", (event) => {
+          event.preventDefault();
+          host.activateEntity?.({ id: entity.id, title: entity.title });
+        });
+      return node;
+    }
+
+    /** The `@` run immediately before the caret, if the caret sits in one. */
+    function mentionSpot() {
+      if (!entitiesEnabled() || !composerEditable()) return null;
+      const here = composerRange();
+      if (!here || !here.range.collapsed) return null;
+      const node = here.range.startContainer;
+      if (node.nodeType !== 3) return null;
+      const before = node.nodeValue.slice(0, here.range.startOffset);
+      const match = /(^|\s)@([^\s@]*)$/.exec(before);
+      if (!match) return null;
+      const query = match[2];
+      if ([...query].length > LIMITS.entityQuery) return null;
+      return {
+        node,
+        start: before.length - query.length - 1,
+        end: here.range.startOffset,
+        query,
+      };
+    }
+
+    function closeMentionMenu() {
+      mentionQuery = null;
+      mentionResults = [];
+      mentionIndex = 0;
+      refs.mentionMenu.hidden = true;
+      refs.mentionMenu.replaceChildren();
+    }
+
+    async function refreshMentionMenu() {
+      const spot = mentionSpot();
+      if (!spot) return closeMentionMenu();
+      mentionQuery = spot;
+      if (mentionCount() >= LIMITS.mentions) return closeMentionMenu();
+      const token = ++mentionSearch;
+      let found = [];
+      try {
+        const answer = await host.searchEntities(spot.query);
+        found = Array.isArray(answer) ? answer : [];
+      } catch {
+        found = [];
+      }
+      if (token !== mentionSearch) return;
+      // The caret may have moved on while the host was searching.
+      const current = mentionSpot();
+      if (!current || current.query !== spot.query) return;
+      mentionQuery = current;
+      mentionResults = found
+        .slice(0, LIMITS.entityResults)
+        .map(normalizeEntity)
+        .filter(Boolean);
+      mentionIndex = 0;
+      renderMentionMenu();
+    }
+
+    function renderMentionMenu() {
+      refs.mentionMenu.replaceChildren();
+      if (!mentionQuery) return closeMentionMenu();
+      if (!mentionResults.length) {
+        const empty = doc.createElement("div");
+        empty.className = "entity-empty";
+        empty.textContent = "No matches";
+        refs.mentionMenu.append(empty);
+        refs.mentionMenu.hidden = false;
+        return;
+      }
+      let group = null;
+      mentionResults.forEach((entity, index) => {
+        if (entity.group && entity.group !== group) {
+          group = entity.group;
+          const heading = doc.createElement("div");
+          heading.className = "menu-group";
+          heading.textContent = group;
+          refs.mentionMenu.append(heading);
+        }
+        const option = doc.createElement("button");
+        option.type = "button";
+        option.className = "entity-option";
+        option.setAttribute("role", "option");
+        option.setAttribute("aria-selected", String(index === mentionIndex));
+        const title = doc.createElement("strong");
+        title.textContent = entity.title;
+        option.append(title);
+        if (entity.description) {
+          const description = doc.createElement("small");
+          description.textContent = entity.description;
+          option.append(description);
+        }
+        // Keep the caret where it is; the click handler does the insertion.
+        option.addEventListener("mousedown", (event) => event.preventDefault());
+        option.addEventListener("click", () => insertMention(entity));
+        refs.mentionMenu.append(option);
+      });
+      refs.mentionMenu.hidden = false;
+    }
+
+    function moveMentionSelection(step) {
+      if (!mentionResults.length) return;
+      mentionIndex =
+        (mentionIndex + step + mentionResults.length) % mentionResults.length;
+      const options = refs.mentionMenu.querySelectorAll(".entity-option");
+      options.forEach((option, index) =>
+        option.setAttribute("aria-selected", String(index === mentionIndex)),
+      );
+      options[mentionIndex]?.scrollIntoView({ block: "nearest" });
+    }
+
+    /** Replace the `@query` run with a chip and a following space. */
+    function insertMention(entity) {
+      const spot = mentionQuery;
+      if (!spot || mentionCount() >= LIMITS.mentions) return closeMentionMenu();
+      const range = doc.createRange();
+      try {
+        range.setStart(spot.node, spot.start);
+        range.setEnd(spot.node, Math.min(spot.end, spot.node.nodeValue.length));
+      } catch {
+        return closeMentionMenu();
+      }
+      range.deleteContents();
+      const space = doc.createTextNode(" ");
+      range.insertNode(space);
+      range.insertNode(mentionChip(entity));
+      closeMentionMenu();
+      const frame = doc.defaultView;
+      const selection =
+        refs.input.getRootNode().getSelection?.() ?? frame?.getSelection?.();
+      if (selection) {
+        const after = doc.createRange();
+        after.setStart(space, 1);
+        after.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(after);
+      }
+      refs.input.focus();
+    }
+
+    /** Backspace next to a chip deletes the whole chip, never half of it. */
+    function deleteChipBeforeCaret() {
+      const here = composerRange();
+      if (!here || !here.range.collapsed) return false;
+      const { range } = here;
+      let target = null;
+      if (range.startContainer.nodeType === 3 && range.startOffset === 0)
+        target = range.startContainer.previousSibling;
+      else if (range.startContainer.nodeType === 1)
+        target = range.startContainer.childNodes[range.startOffset - 1] ?? null;
+      else if (
+        range.startContainer.nodeType === 3 &&
+        range.startOffset === 1 &&
+        range.startContainer.nodeValue === " "
+      )
+        target = range.startContainer.previousSibling;
+      if (!target?.dataset?.mentionId) return false;
+      target.remove();
+      return true;
+    }
+
+    // ----------------------------------------------------------- model picker
+
+    function normalizeModel(raw) {
+      const id = String(raw?.id ?? "");
+      if (!id) return null;
+      return {
+        id,
+        provider: String(raw?.providerName ?? raw?.provider ?? "").slice(0, 60),
+        displayName: String(raw?.displayName ?? id).slice(0, 80),
+        contextWindow: Number.isFinite(raw?.contextWindow)
+          ? Number(raw.contextWindow)
+          : null,
+        reasoningLevels: Array.isArray(raw?.reasoningLevels)
+          ? raw.reasoningLevels.map(String).slice(0, 6)
+          : [],
+        defaultReasoning: raw?.defaultReasoning
+          ? String(raw.defaultReasoning).slice(0, 20)
+          : null,
+        default: raw?.default === true,
+      };
+    }
+
+    function levelsFor(id) {
+      return models.find((model) => model.id === id)?.reasoningLevels ?? [];
+    }
+
+    function setModels(list, selected) {
+      models = (Array.isArray(list) ? list : [])
+        .map(normalizeModel)
+        .filter(Boolean);
+      const ids = new Set(models.map((model) => model.id));
+      selectedModel = ids.has(selected)
+        ? selected
+        : ids.has(selectedModel)
+          ? selectedModel
+          : ((models.find((model) => model.default) ?? models[0])?.id ?? null);
+      if (!levelsFor(selectedModel).includes(reasoningEffort))
+        reasoningEffort = "";
+      renderModelPicker();
+      return selectedModel;
+    }
+
+    function renderModelPicker() {
+      refs.modelPicker.hidden = models.length === 0;
+      refs.modelMenu.hidden = true;
+      refs.modelButton.setAttribute("aria-expanded", "false");
+      if (!models.length) {
+        refs.thinkSelect.hidden = true;
+        return;
+      }
+      refs.modelMenu.replaceChildren();
+      const heading = doc.createElement("div");
+      heading.className = "menu-title";
+      heading.textContent = "Select model";
+      refs.modelMenu.append(heading);
+      let group = null;
+      for (const model of models) {
+        if (model.provider && model.provider !== group) {
+          group = model.provider;
+          const label = doc.createElement("div");
+          label.className = "menu-group";
+          label.textContent = group;
+          refs.modelMenu.append(label);
+        }
+        const current = model.id === selectedModel;
+        const option = doc.createElement("button");
+        option.type = "button";
+        option.className = `model-option${current ? " selected" : ""}`;
+        option.setAttribute("role", "option");
+        option.setAttribute("aria-selected", String(current));
+        const name = doc.createElement("span");
+        name.textContent = model.displayName;
+        const size = doc.createElement("small");
+        size.textContent = model.contextWindow
+          ? compactNumber(model.contextWindow)
+          : "";
+        const check = doc.createElement("span");
+        check.className = "model-check";
+        check.textContent = current ? "✓" : "";
+        option.append(name, size, check);
+        option.addEventListener("click", () => {
+          refs.modelMenu.hidden = true;
+          refs.modelButton.setAttribute("aria-expanded", "false");
+          void chooseModel(model.id, reasoningEffort);
+        });
+        refs.modelMenu.append(option);
+      }
+      refs.modelLabel.textContent =
+        models.find((model) => model.id === selectedModel)?.displayName ??
+        "Select model";
+      const levels = levelsFor(selectedModel);
+      refs.thinkSelect.hidden = !levels.length;
+      if (!levels.length) return;
+      refs.thinkSelect.replaceChildren();
+      const auto = doc.createElement("option");
+      auto.value = "";
+      const fallback = models.find(
+        (model) => model.id === selectedModel,
+      )?.defaultReasoning;
+      auto.textContent = fallback
+        ? `Thinking: default (${fallback})`
+        : "Thinking: default";
+      refs.thinkSelect.append(auto);
+      for (const level of levels) {
+        const option = doc.createElement("option");
+        option.value = level;
+        option.textContent = `Thinking: ${level}`;
+        refs.thinkSelect.append(option);
+      }
+      refs.thinkSelect.value = reasoningEffort;
+    }
+
+    /** Apply the choice, and put it back if the host will not have it. */
+    async function chooseModel(model, reasoning) {
+      const previous = { model: selectedModel, reasoning: reasoningEffort };
+      if (model === previous.model && reasoning === previous.reasoning) return;
+      selectedModel = model;
+      reasoningEffort = levelsFor(model).includes(reasoning) ? reasoning : "";
+      renderModelPicker();
+      try {
+        const answer = await host.modelChanged?.({
+          model: selectedModel,
+          reasoning: reasoningEffort || null,
+        });
+        if (answer === false) throw new Error("The host refused the switch.");
+      } catch {
+        selectedModel = previous.model;
+        reasoningEffort = previous.reasoning;
+        renderModelPicker();
+      }
+    }
+
+    // ------------------------------------------------- collected tool inputs
+
+    /**
+     * Ask for one declared value (SPEC 7.3) in renderer-owned UI. The value
+     * resolves to the caller and goes nowhere else: not into the transcript,
+     * the stored thread, or anything the model sees.
+     */
+    function requestUserInput(request) {
+      const definition = request?.definition;
+      const schema = definition?.schema;
+      if (!definition?.id || !definition?.label || !schema?.type)
+        return Promise.reject(new Error("This input was not declared."));
+      if (pendingInputPrompt)
+        return Promise.reject(
+          new Error("Another input prompt is already open."),
+        );
+      return new Promise((resolve, reject) => {
+        const overlay = doc.createElement("div");
+        overlay.className = "overlay";
+        const card = doc.createElement("section");
+        card.className = "consent";
+        card.setAttribute("role", "dialog");
+        card.setAttribute("aria-modal", "true");
+
+        const head = doc.createElement("header");
+        head.className = "consent-head";
+        const title = doc.createElement("h2");
+        title.textContent = "Provide input to this tool";
+        const origin = doc.createElement("div");
+        origin.className = "origin";
+        origin.textContent = request.origin ?? "";
+        head.append(title, origin);
+
+        const body = doc.createElement("div");
+        body.className = "consent-body";
+        const scope = doc.createElement("div");
+        scope.className = "scope";
+        scope.textContent = `${request.toolName ?? "A tool"} is asking for ${definition.label}.`;
+        body.append(scope);
+
+        const field = doc.createElement("label");
+        field.className = "field";
+        field.append(definition.label);
+        let control;
+        if (schema.enum) {
+          control = doc.createElement("select");
+          for (const value of schema.enum) {
+            const option = doc.createElement("option");
+            option.value = JSON.stringify(value);
+            option.textContent = String(value);
+            control.append(option);
+          }
+        } else if (schema.type === "boolean") {
+          control = doc.createElement("input");
+          control.type = "checkbox";
+        } else {
+          control = doc.createElement("input");
+          control.type = definition.secret
+            ? "password"
+            : ["number", "integer"].includes(schema.type)
+              ? "number"
+              : "text";
+          control.autocomplete = "off";
+          control.spellcheck = false;
+          if (schema.minLength != null) control.minLength = schema.minLength;
+          if (schema.maxLength != null) control.maxLength = schema.maxLength;
+          if (schema.minimum != null) control.min = String(schema.minimum);
+          if (schema.maximum != null) control.max = String(schema.maximum);
+          if (schema.type === "integer") control.step = "1";
+        }
+        field.append(control);
+        if (definition.description) {
+          const note = doc.createElement("span");
+          note.className = "notice";
+          note.textContent = definition.description;
+          field.append(note);
+        }
+        body.append(field);
+        const validation = doc.createElement("div");
+        validation.className = "validation";
+        body.append(validation);
+
+        const foot = doc.createElement("footer");
+        foot.className = "consent-foot";
+        const hint = doc.createElement("span");
+        hint.className = "consent-hint";
+        hint.textContent =
+          request.hint ??
+          (definition.secret
+            ? "Masked. It is not stored and not sent to the model."
+            : "It is not stored and not sent to the model.");
+        const actions = doc.createElement("div");
+        actions.className = "actions";
+        const cancel = doc.createElement("button");
+        cancel.type = "button";
+        cancel.textContent = "Cancel";
+        const provide = doc.createElement("button");
+        provide.type = "button";
+        provide.className = "allow";
+        provide.textContent = "Provide";
+
+        let timer = null;
+        const finish = (ok, value) => {
+          if (!pendingInputPrompt) return;
+          pendingInputPrompt = null;
+          if (timer) clearTimeout(timer);
+          overlay.remove();
+          ok ? resolve(value) : reject(new Error(value));
+        };
+        pendingInputPrompt = (message = "The user cancelled.") =>
+          finish(false, message);
+        timer = setTimeout(
+          () => pendingInputPrompt?.("The prompt timed out."),
+          120000,
+        );
+        cancel.addEventListener("click", () =>
+          finish(false, "The user cancelled."),
+        );
+        provide.addEventListener("click", () => {
+          let value;
+          if (schema.enum) value = JSON.parse(control.value);
+          else if (schema.type === "boolean") value = control.checked;
+          else if (["number", "integer"].includes(schema.type))
+            value = control.value === "" ? NaN : Number(control.value);
+          else value = control.value;
+          if (!userInputMatches(value, schema)) {
+            validation.textContent =
+              "Enter a value that matches the disclosed requirements.";
+            control.focus();
+            return;
+          }
+          finish(true, value);
+        });
+        control.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            provide.click();
+          }
+        });
+        actions.append(cancel, provide);
+        foot.append(hint, actions);
+        card.append(head, body, foot);
+        overlay.append(card);
+        (panel.parentNode ?? panel).append(overlay);
+        queueMicrotask(() => control.focus());
+      });
+    }
+
+    function cancelUserInput(message) {
+      pendingInputPrompt?.(message ?? "The request was cancelled.");
     }
 
     // ---------------------------------------------------------------- wiring
@@ -1636,14 +2381,46 @@ var ArjunahRenderer = (function () {
     });
     refs.threadNew.addEventListener("click", () => void newThread());
     refs.input.addEventListener("keydown", (event) => {
+      if (!refs.mentionMenu.hidden) {
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          return moveMentionSelection(event.key === "ArrowDown" ? 1 : -1);
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          return closeMentionMenu();
+        }
+        if (
+          (event.key === "Enter" || event.key === "Tab") &&
+          mentionResults[mentionIndex]
+        ) {
+          event.preventDefault();
+          return insertMention(mentionResults[mentionIndex]);
+        }
+      }
+      if (event.key === "Backspace" && deleteChipBeforeCaret()) {
+        event.preventDefault();
+        void refreshMentionMenu();
+        return;
+      }
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
         void submit();
       }
     });
     refs.input.addEventListener("input", () => {
-      refs.input.style.height = "auto";
-      refs.input.style.height = `${Math.min(refs.input.scrollHeight, 140)}px`;
+      if (entitiesEnabled()) void refreshMentionMenu();
+    });
+    refs.input.addEventListener("blur", () => {
+      // Let a click on an option land before the menu goes away.
+      setTimeout(() => {
+        if (
+          !refs.mentionMenu.contains(
+            refs.mentionMenu.getRootNode().activeElement,
+          )
+        )
+          closeMentionMenu();
+      }, 120);
     });
     refs.attachButton.addEventListener("click", () => refs.fileInput.click());
     refs.fileInput.addEventListener("change", async () => {
@@ -1657,9 +2434,40 @@ var ArjunahRenderer = (function () {
       if (files.length && !refs.attachButton.hidden) {
         event.preventDefault();
         for (const file of files) await addAttachment(file);
+        return;
+      }
+      // The composer is contenteditable, so pasted markup would otherwise land
+      // in it verbatim. Only text ever enters the composer.
+      const text = event.clipboardData?.getData("text/plain");
+      if (text == null) return;
+      event.preventDefault();
+      const here = composerRange();
+      if (!here) return;
+      here.range.deleteContents();
+      const node = doc.createTextNode(text.slice(0, LIMITS.composerChars));
+      here.range.insertNode(node);
+      here.range.setStart(node, node.nodeValue.length);
+      here.range.collapse(true);
+      here.selection.removeAllRanges();
+      here.selection.addRange(here.range);
+      if (entitiesEnabled()) void refreshMentionMenu();
+    });
+    refs.modelButton.addEventListener("click", () => {
+      const open = refs.modelMenu.hidden;
+      refs.modelMenu.hidden = !open;
+      refs.modelButton.setAttribute("aria-expanded", String(open));
+    });
+    refs.thinkSelect.addEventListener("change", () =>
+      chooseModel(selectedModel, refs.thinkSelect.value),
+    );
+    panel.addEventListener("click", (event) => {
+      if (!event.target.closest?.(".model-picker")) {
+        refs.modelMenu.hidden = true;
+        refs.modelButton.setAttribute("aria-expanded", "false");
       }
     });
     enableDrag(refs.head, panel);
+    initComposer();
 
     function setOptions(next) {
       options = { ...options, ...next };
@@ -1667,7 +2475,8 @@ var ArjunahRenderer = (function () {
       panel.dataset.mode = options.theme?.mode ?? "light";
       panel.dataset.toolView = options.toolCallView ?? "compact";
       if (!composerBlocked)
-        refs.input.placeholder = options.placeholder || "Ask about this site…";
+        refs.input.dataset.placeholder =
+          options.placeholder || "Ask about this site…";
       controlValues = defaultControls(options.controls, controlValues);
       renderControls();
       renderSuggestions();
@@ -1723,6 +2532,9 @@ var ArjunahRenderer = (function () {
       activeThread: () => activeThreadId,
       // composer
       submit,
+      composerParts,
+      composerEmpty,
+      setComposerText,
       setBusy,
       isBusy: () => busy,
       setComposerBlocked,
@@ -1734,6 +2546,16 @@ var ArjunahRenderer = (function () {
         }
       },
       attachments: () => attachments.slice(),
+      // model picker (SPEC 8.2)
+      setModels,
+      models: () => models.slice(),
+      selection: () => ({
+        model: selectedModel,
+        reasoning: reasoningEffort || null,
+      }),
+      // collected tool inputs (SPEC 7.3)
+      requestUserInput,
+      cancelUserInput,
       // options and controls
       setOptions,
       controls: () => ({ ...controlValues }),
@@ -1791,5 +2613,8 @@ var ArjunahRenderer = (function () {
     createChatView,
     enableDrag,
     pretty,
+    compactNumber,
+    userInputMatches,
+    flattenMentions,
   };
 })();

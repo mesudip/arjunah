@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "अर्जुनः (Arjunah)",
-  "version": "1.2.0",
+  "version": "1.0.0",
   "description": "Bring your own AI provider to websites through a user-controlled, origin-scoped window.ai.arjunah extension.",
   "permissions": ["storage", "tabs"],
   "host_permissions": ["http://*/*", "https://*/*"],

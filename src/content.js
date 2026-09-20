@@ -14,14 +14,10 @@
     panel,
     launcher,
     contextToggle,
-    modelSelect,
-    modelMenu,
     statusLine,
-    contextGlance,
-    thinkSelect;
+    contextGlance;
   let accessQueue = Promise.resolve();
   let pendingConsent = null;
-  let pendingInputPrompt = null;
   let panelEpoch = 0;
   let alive = true;
   let settings = null; // hosted.settings result: site model, switchable models, usage
@@ -30,7 +26,6 @@
   let session = { promptTokens: 0, completionTokens: 0, turns: 0 };
   let lastTurn = null;
   let conversationId = crypto.randomUUID(); // one agent thread per panel conversation
-  let reasoningEffort = ""; // "" = provider default
   let statePort = null;
   let stateRefreshTimer = null;
   let settingsRequest = 0;
@@ -268,8 +263,6 @@
         return fail("This input was not declared for the active tool.");
       if (++pending.inputRequests > 4)
         return fail("This tool requested too many user inputs.");
-      if (pendingInputPrompt)
-        return fail("Another extension input prompt is already open.");
       try {
         const value = await showToolInput(pending.name, definition);
         toPage({
@@ -398,7 +391,7 @@
   function cancelSession() {
     panelEpoch++;
     pendingConsent?.(false);
-    pendingInputPrompt?.("The page or assistant changed.");
+    view?.cancelUserInput("The page or assistant changed.");
     for (const pending of toolPending.values()) {
       clearTimeout(pending.timer);
       pending.reject(aiError("TOOL_ERROR", "The page or assistant changed."));
@@ -504,12 +497,7 @@
     return grant;
   }
 
-  const WALLET_CHROME = `<label class="context-toggle compose-control" title="Share page context"><input type="checkbox" aria-label="Share page context"><span>@</span></label>
-<div class="model-picker">
-  <button class="model-button compose-control" title="Select model" aria-label="Select model" aria-haspopup="listbox" aria-expanded="false"><span class="model-label">Select model</span><span class="chevron">⌄</span></button>
-  <div class="model-menu" role="listbox" hidden></div>
-</div>
-<select class="think" title="Thinking effort" aria-label="Thinking effort" hidden></select>`;
+  const WALLET_CHROME = `<label class="context-toggle compose-control" title="Share page context"><input type="checkbox" aria-label="Share page context"><span>@</span></label>`;
 
   function ensureUi() {
     if (host) return;
@@ -553,29 +541,12 @@
     panel = view.panel;
     launcher = root.querySelector(".launcher");
     contextToggle = panel.querySelector(".context-toggle input");
-    modelSelect = panel.querySelector(".model-button");
-    modelMenu = panel.querySelector(".model-menu");
-    thinkSelect = panel.querySelector(".think");
     statusLine = panel.querySelector(".status");
     contextGlance = panel.querySelector(".context-glance");
     launcher.addEventListener("click", openPanel);
-    modelSelect.addEventListener("click", () => {
-      if (modelSelect.disabled) return;
-      modelMenu.hidden = !modelMenu.hidden;
-      modelSelect.setAttribute("aria-expanded", String(!modelMenu.hidden));
-    });
     contextGlance.addEventListener("click", () => {
       const details = panel.querySelector(".telemetry");
       details.open = !details.open;
-    });
-    root.addEventListener("click", (event) => {
-      if (!event.target.closest(".model-picker")) {
-        modelMenu.hidden = true;
-        modelSelect.setAttribute("aria-expanded", "false");
-      }
-    });
-    thinkSelect.addEventListener("change", () => {
-      reasoningEffort = thinkSelect.value;
     });
     document.documentElement.appendChild(host);
   }
@@ -611,9 +582,12 @@
       },
       modelLabel: (id) =>
         settings?.models?.find((model) => model.id === id)?.displayName ?? id,
-      busyChanged(value) {
-        if (modelSelect)
-          modelSelect.disabled = value || !settings?.models?.length;
+      // The renderer drew the choice already; the wallet decides whether it
+      // stands, and a false answer puts the previous model back (SPEC 8.2).
+      modelChanged({ model }) {
+        return switchModel(model);
+      },
+      busyChanged() {
         renderSetup();
       },
       async cardAction(detail) {
@@ -904,82 +878,12 @@
     view.refs.setupWrap.append(card);
   }
   function renderModelSelect() {
-    if (!modelSelect) return;
-    const current = pendingModel ?? settings?.model?.id ?? "";
-    const groups = new Map();
-    for (const model of settings?.models ?? []) {
-      if (!groups.has(model.providerName)) groups.set(model.providerName, []);
-      groups.get(model.providerName).push(model);
-    }
-    modelMenu.textContent = "";
-    const title = document.createElement("div");
-    title.className = "menu-title";
-    title.textContent = "Select model";
-    modelMenu.append(title);
-    if (!groups.size) {
-      panel.querySelector(".model-label").textContent = "No model";
-      modelSelect.disabled = true;
-    } else {
-      modelSelect.disabled = false;
-      for (const [provider, list] of groups) {
-        const group = document.createElement("div");
-        group.className = "menu-group";
-        group.textContent = provider;
-        modelMenu.append(group);
-        for (const model of list) {
-          const option = document.createElement("button");
-          option.type = "button";
-          option.className = `model-option${model.id === current ? " selected" : ""}`;
-          option.setAttribute("role", "option");
-          option.setAttribute("aria-selected", String(model.id === current));
-          const label = document.createElement("span");
-          label.textContent = model.displayName;
-          const windowLabel = document.createElement("small");
-          windowLabel.textContent = model.contextWindow
-            ? compactNumber(model.contextWindow)
-            : "";
-          const check = document.createElement("span");
-          check.className = "model-check";
-          check.textContent = model.id === current ? "✓" : "";
-          option.append(label, windowLabel, check);
-          option.addEventListener("click", () => {
-            modelMenu.hidden = true;
-            modelSelect.setAttribute("aria-expanded", "false");
-            void switchModel(model.id);
-          });
-          modelMenu.append(option);
-        }
-      }
-      const selected = (settings?.models ?? []).find(
-        (model) => model.id === current,
-      );
-      panel.querySelector(".model-label").textContent =
-        selected?.displayName ?? settings?.model?.displayName ?? "Select model";
-    }
+    if (!view) return;
+    const current = pendingModel ?? settings?.model?.id ?? null;
+    // The catalog is the wallet's; the picker that draws it is the renderer's
+    // (SPEC 8.2), so this hands over data and nothing else.
+    view.setModels(settings?.models ?? [], current);
     const active = settings?.model;
-    const levels =
-      (settings?.models ?? []).find((model) => model.id === current)
-        ?.reasoningLevels ??
-      active?.reasoningLevels ??
-      [];
-    thinkSelect.hidden = !levels.length;
-    if (levels.length) {
-      thinkSelect.textContent = "";
-      const auto = document.createElement("option");
-      auto.value = "";
-      auto.textContent = active?.defaultReasoning
-        ? `Thinking: default (${active.defaultReasoning})`
-        : "Thinking: default";
-      thinkSelect.append(auto);
-      for (const level of levels) {
-        const option = document.createElement("option");
-        option.value = level;
-        option.textContent = `Thinking: ${level}`;
-        thinkSelect.append(option);
-      }
-      if (!levels.includes(reasoningEffort)) reasoningEffort = "";
-      thinkSelect.value = reasoningEffort;
-    } else reasoningEffort = "";
     view.refs.sub.textContent = active
       ? `${active.providerName} · ${active.displayName}${active.fallback ? " (default)" : ""}`
       : settings?.desktop?.paired && !settings.desktop.running
@@ -993,25 +897,28 @@
     );
     view.setAttachmentsEnabled(vision);
   }
+
   async function switchModel(id) {
-    if (!id) return;
+    if (!id) return false;
     if (!settings?.grant) {
       // No grant yet: remember the choice for the consent dialog.
       pendingModel = id;
       renderModelSelect();
-      return;
+      return true;
     }
     try {
       settings = await runtime("hosted.model", { model: id });
       pendingModel = null;
       renderModelSelect();
       renderStatus();
+      return true;
     } catch (error) {
       view.addBubble("assistant", `Could not switch model: ${error.message}`, {
         error: true,
         persist: false,
       });
       renderModelSelect();
+      return false;
     }
   }
 
@@ -1188,14 +1095,8 @@
     );
   }
 
-  function compactNumber(value) {
-    const number = Number(value || 0);
-    if (number >= 1_000_000)
-      return `${(number / 1_000_000).toFixed(number >= 10_000_000 ? 0 : 1)}M`;
-    if (number >= 1000)
-      return `${(number / 1000).toFixed(number >= 100_000 ? 0 : 1)}k`;
-    return number.toLocaleString();
-  }
+  const compactNumber = R.compactNumber;
+
   function usageSection(label, value) {
     const section = document.createElement("section");
     section.className = "usage-section";
@@ -1322,7 +1223,9 @@
         controls: { ...controls },
         turnId,
         conversationId: turnConversationId,
-        ...(reasoningEffort ? { reasoning: reasoningEffort } : {}),
+        ...(view.selection().reasoning
+          ? { reasoning: view.selection().reasoning }
+          : {}),
       });
       if (registration === contract && epoch === panelEpoch) {
         const turn = view.currentTurn();
@@ -1634,149 +1537,21 @@
     });
   }
 
-  function userInputMatches(value, schema) {
-    if (schema.type === "string") {
-      if (typeof value !== "string") return false;
-      const length = [...value].length;
-      if (length < (schema.minLength ?? 0)) return false;
-      if (length > (schema.maxLength ?? 4096)) return false;
-    } else if (schema.type === "boolean") {
-      if (typeof value !== "boolean") return false;
-    } else {
-      if (typeof value !== "number" || !Number.isFinite(value)) return false;
-      if (schema.type === "integer" && !Number.isInteger(value)) return false;
-      if (value < (schema.minimum ?? -Infinity)) return false;
-      if (value > (schema.maximum ?? Infinity)) return false;
-    }
-    if (schema.enum && !schema.enum.some((item) => item === value))
-      return false;
-    if (Object.hasOwn(schema, "const") && schema.const !== value) return false;
-    return true;
-  }
-
   /** Collect a declared value in broker-owned UI without adding it to history. */
   function showToolInput(toolName, definition) {
     ensureUi();
-    return new Promise((resolve, reject) => {
-      const overlay = document.createElement("div");
-      overlay.className = "overlay";
-      const card = document.createElement("section");
-      card.className = "consent";
-      card.setAttribute("role", "dialog");
-      card.setAttribute("aria-modal", "true");
-      const head = document.createElement("header");
-      head.className = "consent-head";
-      const title = document.createElement("h2");
-      title.textContent = "Provide input to this site tool";
-      const origin = document.createElement("div");
-      origin.className = "origin";
-      origin.textContent = location.origin;
-      head.append(title, origin);
-      const body = document.createElement("div");
-      body.className = "consent-body";
-      const scope = document.createElement("div");
-      scope.className = "scope";
-      scope.textContent = `Tool: ${toolName}\nअर्जुनः will deliver the value only to this page's tool handler and will not add it to model messages or chat history. The site receives the value and is responsible for how it uses it.`;
-      body.append(scope);
-      const field = document.createElement("label");
-      field.className = "field";
-      field.append(definition.label);
-      let control;
-      if (definition.schema.enum) {
-        control = document.createElement("select");
-        for (const value of definition.schema.enum) {
-          const option = document.createElement("option");
-          option.value = JSON.stringify(value);
-          option.textContent = String(value);
-          control.append(option);
-        }
-      } else if (definition.schema.type === "boolean") {
-        control = document.createElement("input");
-        control.type = "checkbox";
-      } else {
-        control = document.createElement("input");
-        control.type = definition.secret
-          ? "password"
-          : ["number", "integer"].includes(definition.schema.type)
-            ? "number"
-            : "text";
-        control.autocomplete = "off";
-        control.spellcheck = false;
-        if (definition.schema.minLength != null)
-          control.minLength = definition.schema.minLength;
-        if (definition.schema.maxLength != null)
-          control.maxLength = definition.schema.maxLength;
-        if (definition.schema.minimum != null)
-          control.min = String(definition.schema.minimum);
-        if (definition.schema.maximum != null)
-          control.max = String(definition.schema.maximum);
-        if (definition.schema.type === "integer") control.step = "1";
-      }
-      field.append(control);
-      if (definition.description) {
-        const description = document.createElement("span");
-        description.className = "notice";
-        description.textContent = definition.description;
-        field.append(description);
-      }
-      body.append(field);
-      const validation = document.createElement("div");
-      validation.className = "validation";
-      body.append(validation);
-      const foot = document.createElement("footer");
-      foot.className = "consent-foot";
-      const note = document.createElement("span");
-      note.className = "consent-hint";
-      note.textContent = definition.secret
+    // The prompt is the renderer's (SPEC 7.3), so wallet and standalone mode
+    // validate and mask the same way; only the wording below is wallet-specific.
+    return view.requestUserInput({
+      toolName,
+      origin: location.origin,
+      definition,
+      hint: definition.secret
         ? "Masked. अर्जुनः does not persist or forward it to the model."
-        : "अर्जुनः does not persist or forward it to the model.";
-      const actions = document.createElement("div");
-      actions.className = "actions";
-      const cancel = document.createElement("button");
-      cancel.textContent = "Cancel";
-      const provide = document.createElement("button");
-      provide.className = "allow";
-      provide.textContent = "Provide";
-      const finish = (ok, value) => {
-        if (!pendingInputPrompt) return;
-        pendingInputPrompt = null;
-        overlay.remove();
-        ok ? resolve(value) : reject(new Error(value));
-      };
-      pendingInputPrompt = (message = "The user cancelled.") =>
-        finish(false, message);
-      cancel.addEventListener("click", () =>
-        finish(false, "The user cancelled."),
-      );
-      provide.addEventListener("click", () => {
-        let value;
-        if (definition.schema.enum) value = JSON.parse(control.value);
-        else if (definition.schema.type === "boolean") value = control.checked;
-        else if (["number", "integer"].includes(definition.schema.type))
-          value = control.value === "" ? NaN : Number(control.value);
-        else value = control.value;
-        if (!userInputMatches(value, definition.schema)) {
-          validation.textContent =
-            "Enter a value that matches the disclosed requirements.";
-          control.focus();
-          return;
-        }
-        finish(true, value);
-      });
-      control.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          provide.click();
-        }
-      });
-      actions.append(cancel, provide);
-      foot.append(note, actions);
-      card.append(head, body, foot);
-      overlay.append(card);
-      root.append(overlay);
-      queueMicrotask(() => control.focus());
+        : "अर्जुनः does not persist or forward it to the model.",
     });
   }
+
   function levelOf(capabilities) {
     if (capabilities.includes("models.catalog")) return "catalog";
     if (capabilities.includes("models.generate")) return "completion";
@@ -1873,7 +1648,7 @@
       new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           toolPending.delete(id);
-          pendingInputPrompt?.("The site tool timed out.");
+          view?.cancelUserInput("The site tool timed out.");
           reject(aiError("TIMEOUT", "The site tool timed out."));
         }, 120000);
         toolPending.set(id, {

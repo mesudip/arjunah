@@ -9,6 +9,9 @@
     <script type="module">
       import { mountAssistant } from "/widget/index.js";
       window.clientToolCalls = 0;
+      window.events = [];
+      window.activated = [];
+      window.collected = null;
       window.assistant = mountAssistant({
         mount: document.querySelector("#assistant"),
         backend: { baseUrl: "/api/" },
@@ -16,6 +19,27 @@
           name: "Trip desk",
           greeting: "Ask about a trip.",
           suggestions: ["Plan a weekend"],
+          // The picker is the renderer's; these entries are the site's.
+          models: [
+            {
+              id: "desk/fast",
+              providerName: "Trip desk",
+              displayName: "Fast",
+              contextWindow: 128000,
+            },
+            {
+              id: "desk/deep",
+              providerName: "Trip desk",
+              displayName: "Deep",
+              contextWindow: 272000,
+              reasoningLevels: ["low", "high"],
+            },
+          ],
+          defaultModel: "desk/fast",
+        },
+        // No `search`, so the widget uses the backend route (SPEC 14.4).
+        entities: {
+          onActivate: (entity) => window.activated.push(entity),
         },
         tools: [
           {
@@ -27,7 +51,33 @@
               return { title: document.title };
             },
           },
+          {
+            name: "unlock",
+            inputSchema: { type: "object", additionalProperties: false },
+            userInputs: [
+              {
+                id: "passphrase",
+                label: "Passphrase",
+                schema: { type: "string", minLength: 3 },
+                secret: true,
+              },
+            ],
+            async handler(_args, invocation) {
+              const value = await invocation.requestInput("passphrase");
+              window.collected = value;
+              // The value itself never goes back to the model.
+              return { unlocked: value.length > 0 };
+            },
+          },
         ],
+        onModelChange: (selection) =>
+          window.events.push({ type: "model", ...selection }),
+        onThreadChange: (event) =>
+          window.events.push({ type: "thread", ...event }),
+        onTurnStart: () => window.events.push({ type: "turn.start" }),
+        onTurnEnd: (event) =>
+          window.events.push({ type: "turn.end", usage: event.usage }),
+        onError: (error) => window.events.push({ type: "error", ...error }),
       });
     </script>
   </body>

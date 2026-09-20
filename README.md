@@ -14,7 +14,7 @@
 
 Download the latest build from [GitHub releases](../../releases): `arjunah-chrome-<version>.zip` for Chrome, Brave, and Edge, or `arjunah-firefox-<version>.xpi` for Firefox. Unzip the Chrome build, open `chrome://extensions`, turn on Developer mode, choose **Load unpacked**, and select the folder. Then open the extension's settings and enter an OpenAI API key, or pair the desktop app below.
 
-Step-by-step instructions, Firefox notes, and updating are in [docs/INSTALL.md](docs/INSTALL.md). This is a 1.2.0 alpha: store listings and signed builds come with the first stable release.
+Step-by-step instructions, Firefox notes, and updating are in [docs/INSTALL.md](docs/INSTALL.md). This is a 1.0.0 alpha: store listings and signed builds come with the first stable release.
 
 ## Install the desktop app (optional)
 
@@ -88,6 +88,6 @@ The repository is an npm workspace: the extension in `src/`, the shared chat ren
 
 ## Status
 
-1.2.0-alpha. Chrome Manifest V3 and Firefox Manifest V3 are tested targets; the desktop app has been exercised on macOS with OpenCode, Codex, and Claude Code and on the fake-agent end-to-end suite. Linux and Windows autostart are implemented and unit-tested but not yet exercised on real machines. This is not an independent security certification; see [docs/REMEDIATION.md](docs/REMEDIATION.md) for the audit findings and their regression tests.
+1.0.0-alpha.2. Chrome Manifest V3 and Firefox Manifest V3 are tested targets; the desktop app has been exercised on macOS with OpenCode, Codex, and Claude Code and on the fake-agent end-to-end suite. Linux and Windows autostart are implemented and unit-tested but not yet exercised on real machines. This is not an independent security certification; see [docs/REMEDIATION.md](docs/REMEDIATION.md) for the audit findings and their regression tests.
 
 License: MIT.

@@ -4,7 +4,7 @@
  */
 
 export interface Arjunah {
-  readonly version: "1.2.0";
+  readonly version: "1.0.0";
   /** True when this origin holds a grant at level 1 or 2. */
   isEnabled(): Promise<boolean>;
   /**

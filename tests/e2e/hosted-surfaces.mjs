@@ -1,5 +1,5 @@
 /**
- * Wallet-mode end-to-end for the 1.2 additions: a transcript card returned by a
+ * Wallet-mode end-to-end for the hosted surfaces: a transcript card returned by a
  * site tool (SPEC 7.4), `reportProgress` from that tool (7.5), and site-owned
  * threads driven through the page bridge (7.6). Everything here runs in a real
  * browser with the real extension and a mock provider.
@@ -298,7 +298,7 @@ try {
 
   assert.deepEqual(errors, []);
   console.log(
-    `Hosted 1.2 E2E passed with ${modelRequests.length} provider requests and thread calls ${calls.join(", ")}.`,
+    `Hosted surfaces E2E passed with ${modelRequests.length} provider requests and thread calls ${calls.join(", ")}.`,
   );
 } finally {
   await browser.close();

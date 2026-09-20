@@ -1384,7 +1384,7 @@ test("a companion that forgot this browser's pairing is reported as unpaired, no
     if (target.pathname === "/api/status")
       return Response.json({
         app: "arjunah-desktop",
-        version: "1.2.0",
+        version: "1.0.0",
         paired: false,
         sync: { revision: 0 },
       });

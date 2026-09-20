@@ -11,12 +11,12 @@ Names: everything a person sees says अर्जुनः; code, packages, and 
 - [SDK entry point](packages/sdk/src/index.ts): the helpers the arjunah package exports.
 - [Paint playground](demo/paint/index.html): the primary level-0 example, including structured text/image tool results.
 - [Trip planner](demo/trip-planner/index.html): the original level 0, 1, and 2 integration.
-- [Standalone widget](packages/widget/README.md): mounting the chat against your own backend, the SSE event stream, thread routes, and card actions.
+- [Standalone widget](packages/widget/README.md): mounting the chat against your own backend, the SSE event stream, thread routes, card actions, the built-in model picker, `@` entity mentions, and tool inputs the model never sees.
 - [Test fixture](tests/fixtures/site.html): minimal registrations used by the browser suites.
 
 ## Protocol
 
-- [Specification](SPEC.md): normative. Sections 3 (discovery), 4 (levels and consent), 5.3 (generation), 7 (site contracts, schema subset, widget, collected inputs, transcript cards, tool progress, site-owned threads, declared remote tools), 9 (errors), 14 (standalone renderer).
+- [Specification](SPEC.md): normative. Sections 3 (discovery), 4 (levels and consent), 5.3 (generation and content parts), 7 (site contracts, schema subset, widget, collected inputs, transcript cards, tool progress, site-owned threads, declared remote tools), 8.2 and 8.3 (the renderer's model picker and entity mentions), 9 (errors), 14 (standalone renderer).
 - [Security model](SECURITY.md): what stays in the extension, what the page can never see.
 
 ## Install and run

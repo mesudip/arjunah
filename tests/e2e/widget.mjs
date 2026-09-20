@@ -69,7 +69,21 @@ const transcripts = new Map([
     ],
   ],
 ]);
-const state = { pendingTool: null, turns: 0, actions: [], userTurns: [] };
+const state = {
+  pendingTool: null,
+  turns: 0,
+  actions: [],
+  userTurns: [],
+  toolResults: [],
+  entityQueries: [],
+};
+
+// The entity source the renderer's `@` picker draws from (SPEC 8.3).
+const ENTITIES = [
+  { id: "city:lis", title: "Lisbon", group: "Cities", description: "Portugal" },
+  { id: "city:lyo", title: "Lyon", group: "Cities", description: "France" },
+  { id: "hotel:9", title: "Hotel Baixa", group: "Hotels" },
+];
 
 function sse(response, type, data) {
   response.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -101,6 +115,13 @@ const server = createServer(async (request, response) => {
       "Content-Type": TYPES[extname(file)] ?? "application/octet-stream",
     });
     return response.end(content);
+  }
+  if (path === "/api/entities" && request.method === "GET") {
+    const query = (url.searchParams.get("q") ?? "").toLowerCase();
+    state.entityQueries.push(query);
+    return json(
+      ENTITIES.filter((item) => item.title.toLowerCase().includes(query)),
+    );
   }
   if (path === "/api/threads" && request.method === "GET")
     return json([...threads.values()]);
@@ -135,23 +156,27 @@ const server = createServer(async (request, response) => {
     const pending = state.pendingTool;
     state.pendingTool = null;
     if (pending) {
-      sse(pending, "tool.end", {
+      state.toolResults.push(payload);
+      sse(pending.response, "tool.end", {
         id: payload.id,
-        name: "page_info",
+        name: pending.name,
         ok: true,
         result: JSON.stringify(payload.result),
       });
-      sse(pending, "message", {
+      sse(pending.response, "message", {
         entry: {
           type: "message",
-          id: "a1",
+          id: `a-${pending.name}`,
           role: "assistant",
-          content: "Lisbon is 420 USD for the weekend.",
+          content: pending.answer,
           createdAt: new Date().toISOString(),
         },
       });
-      sse(pending, "turn.end", { turnId: "turn-1" });
-      pending.end();
+      sse(pending.response, "turn.end", {
+        turnId: "turn-1",
+        usage: { promptTokens: 12, completionTokens: 8 },
+      });
+      pending.response.end();
     }
     return json(null, 204);
   }
@@ -184,7 +209,25 @@ const server = createServer(async (request, response) => {
         name: "page_info",
         arguments: "{}",
       });
-      state.pendingTool = response;
+      state.pendingTool = {
+        response,
+        name: "page_info",
+        answer: "Lisbon is 420 USD for the weekend.",
+      };
+      return;
+    }
+    // The fourth turn asks the page for a declared input (SPEC 7.3).
+    if (state.turns === 4) {
+      sse(response, "tool.client", {
+        id: "c2",
+        name: "unlock",
+        arguments: "{}",
+      });
+      state.pendingTool = {
+        response,
+        name: "unlock",
+        answer: "The booking is unlocked.",
+      };
       return;
     }
     sse(response, "message", {
@@ -192,11 +235,14 @@ const server = createServer(async (request, response) => {
         type: "message",
         id: `a${state.turns}`,
         role: "assistant",
-        content: "Booked.",
+        content: state.turns === 2 ? "Booked." : "Noted.",
         createdAt: new Date().toISOString(),
       },
     });
-    sse(response, "turn.end", { turnId: "turn-1" });
+    sse(response, "turn.end", {
+      turnId: "turn-1",
+      usage: { promptTokens: 4, completionTokens: 2 },
+    });
     return response.end();
   }
   return json(null, 404);
@@ -221,6 +267,10 @@ const shadow = async (script, ...args) =>
     script,
     ...args,
   );
+const type = async (text) => {
+  await shadow(`root.querySelector(".input").focus();`);
+  await page.keyboard.type(text, { delay: 8 });
+};
 const waitFor = async (source, label) => {
   const deadline = Date.now() + 15000;
   for (;;) {
@@ -242,6 +292,14 @@ try {
     await shadow(`return root.querySelector(".welcome").textContent;`),
     /Trip desk|Ask about a trip/,
   );
+  // A starter prompt fills the composer rather than sending anything.
+  await shadow(`root.querySelector(".suggestions button").click();`);
+  assert.equal(
+    await shadow(`return root.querySelector(".input").textContent;`),
+    "Plan a weekend",
+  );
+  await page.evaluate(() => window.assistant.view.setComposerText(""));
+
   await shadow(`root.querySelector(".thread-toggle").click();`);
   await waitFor(`root.querySelector(".thread-open")`, "the thread list");
   assert.equal(
@@ -257,12 +315,8 @@ try {
   );
 
   // One turn: backend tool, progress, card, then a client tool round.
-  await page.evaluate(() => {
-    const root = document.querySelector("#assistant").shadowRoot;
-    const input = root.querySelector("textarea");
-    input.value = "How much for Lisbon?";
-    root.querySelector(".send:not(.stop)").click();
-  });
+  await type("How much for Lisbon?");
+  await shadow(`root.querySelector(".send:not(.stop)").click();`);
   await waitFor(`root.querySelector(".card")`, "the card");
   assert.equal(
     await shadow(
@@ -309,14 +363,161 @@ try {
     values: null,
   });
 
+  // The model picker is the renderer's, drawn from the site's own catalog.
+  assert.equal(
+    await shadow(`return root.querySelector(".model-picker").hidden;`),
+    false,
+  );
+  assert.equal(
+    await shadow(`return root.querySelector(".model-label").textContent;`),
+    "Fast",
+  );
+  assert.equal(
+    await shadow(`return root.querySelector(".think").hidden;`),
+    true,
+  );
+  await shadow(`root.querySelector(".model-button").click();`);
+  await shadow(
+    `[...root.querySelectorAll(".model-option")].find((o) => o.textContent.includes("Deep")).click();`,
+  );
+  await waitFor(
+    `root.querySelector(".model-label").textContent === "Deep"`,
+    "the switched model",
+  );
+  // Deep declares reasoning levels, so the effort control appears with it.
+  assert.equal(
+    await shadow(`return root.querySelector(".think").hidden;`),
+    false,
+  );
+  await shadow(
+    `const think = root.querySelector(".think"); think.value = "high"; think.dispatchEvent(new Event("change"));`,
+  );
+  assert.deepEqual(
+    await page.evaluate(() =>
+      window.events.filter((event) => event.type === "model"),
+    ),
+    [
+      { type: "model", model: "desk/deep", reasoning: null },
+      { type: "model", model: "desk/deep", reasoning: "high" },
+    ],
+  );
+
+  // `@` searches the backend and inserts one atomic chip (SPEC 8.3).
+  await type("Compare @Lis");
+  await waitFor(`!root.querySelector(".mention-menu").hidden`, "the @ menu");
+  assert.deepEqual(state.entityQueries.at(-1), "lis");
+  await shadow(`root.querySelector(".entity-option").click();`);
+  await waitFor(
+    `root.querySelector(".input [data-mention-id]")`,
+    "the composer chip",
+  );
+  await type("and Lyon");
+  await shadow(`root.querySelector(".send:not(.stop)").click();`);
+  await waitFor(
+    `[...root.querySelectorAll(".msg.assistant")].some((m) => m.textContent.includes("Noted."))`,
+    "the mention answer",
+  );
+  const mentionTurn = state.userTurns.at(-1);
+  assert.deepEqual(mentionTurn.content, [
+    { type: "text", text: "Compare " },
+    { type: "mention", id: "city:lis", label: "Lisbon" },
+    { type: "text", text: " and Lyon" },
+  ]);
+  // The picker's choice rides with the turn (SPEC 14.4).
+  assert.equal(mentionTurn.model, "desk/deep");
+  assert.equal(mentionTurn.reasoning, "high");
+  // The chip survives into the transcript and reaches the host when clicked.
+  await shadow(
+    `[...root.querySelectorAll(".msg.user button.mention")].at(-1).click();`,
+  );
+  assert.deepEqual(await page.evaluate(() => window.activated), [
+    { id: "city:lis", title: "Lisbon" },
+  ]);
+
+  // A client tool collects a declared value in renderer-owned UI (SPEC 7.3).
+  await type("Unlock it");
+  await shadow(`root.querySelector(".send:not(.stop)").click();`);
+  await waitFor(`root.querySelector(".overlay .consent")`, "the input prompt");
+  assert.equal(
+    await shadow(
+      `return root.querySelector(".overlay input").getAttribute("type");`,
+    ),
+    "password",
+  );
+  // Too short for the declared schema: the prompt stays open and says so.
+  await shadow(
+    `root.querySelector(".overlay input").value = "no";
+     root.querySelector(".overlay .allow").click();`,
+  );
+  assert.match(
+    await shadow(
+      `return root.querySelector(".overlay .validation").textContent;`,
+    ),
+    /disclosed requirements/,
+  );
+  await shadow(
+    `root.querySelector(".overlay input").value = "open-sesame";
+     root.querySelector(".overlay .allow").click();`,
+  );
+  await waitFor(
+    `[...root.querySelectorAll(".msg.assistant")].some((m) => m.textContent.includes("unlocked"))`,
+    "the unlocked answer",
+  );
+  assert.equal(await page.evaluate(() => window.collected), "open-sesame");
+  assert.equal(
+    await shadow(`return root.querySelector(".overlay") === null;`),
+    true,
+  );
+  // The collected value is nowhere in the transcript or the tool result.
+  assert.equal(
+    await shadow(`return root.querySelector(".messages").textContent;`).then(
+      (text) => text.includes("open-sesame"),
+    ),
+    false,
+  );
+  assert.deepEqual(state.toolResults.at(-1).result, { unlocked: true });
+
   // A fresh thread starts empty and is created on the backend.
   await shadow(`root.querySelector(".thread-new").click();`);
   await waitFor(`root.querySelector(".welcome")`, "the empty new thread");
   assert.equal(threads.size, 2);
 
+  // Host callbacks reported every turn and every thread change.
+  const kinds = await page.evaluate(() =>
+    window.events.map((event) => event.type),
+  );
+  assert.equal(kinds.filter((kind) => kind === "turn.start").length, 4);
+  assert.equal(kinds.filter((kind) => kind === "turn.end").length, 4);
+  assert.ok(kinds.includes("thread"));
+  assert.deepEqual(
+    await page.evaluate(
+      () => window.events.findLast((event) => event.type === "turn.end").usage,
+    ),
+    { promptTokens: 12, completionTokens: 8 },
+  );
+
+  // The mounted controller drives threads, controls and the catalog.
+  assert.equal(
+    await page.evaluate(() => {
+      window.assistant.setModels(
+        [{ id: "desk/only", displayName: "Only" }],
+        "desk/only",
+      );
+      return document
+        .querySelector("#assistant")
+        .shadowRoot.querySelector(".model-label").textContent;
+    }),
+    "Only",
+  );
+  await page.evaluate(() => window.assistant.openThread("t1"));
+  await waitFor(
+    `[...root.querySelectorAll(".msg.user")].some((m) => m.textContent.includes("an earlier question"))`,
+    "the reopened thread",
+  );
+
   assert.deepEqual(errors, []);
   console.log(
-    `Standalone widget E2E passed with ${state.userTurns.length} turns and ${state.actions.length} card action.`,
+    `Standalone widget E2E passed with ${state.userTurns.length} turns, ${state.actions.length} card action, a mention, a model switch and a collected input.`,
   );
 } finally {
   await browser.close();

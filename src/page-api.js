@@ -389,7 +389,7 @@
   }
 
   const api = {
-    version: "1.2.0",
+    version: "1.0.0",
     isEnabled: async () => {
       const grant = await request("permissions.query");
       return grant != null && grant.level !== "assistant";

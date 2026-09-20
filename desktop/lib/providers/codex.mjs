@@ -247,7 +247,7 @@ async function probeCodex(binary) {
           clientInfo: {
             name: "arjunah-desktop",
             title: "अर्जुनः Desktop",
-            version: "1.2.0",
+            version: "1.0.0",
           },
           capabilities: { experimentalApi: true },
         },

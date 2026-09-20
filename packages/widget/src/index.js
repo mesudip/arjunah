@@ -15,12 +15,20 @@ import { validateSchema, validateArguments } from "./schema.js";
 const STREAM_BYTES = 2_000_000;
 const JSON_BYTES = 1_000_000;
 const THREAD_ID = /^[A-Za-z0-9_-]{1,100}$/;
+const MENTION_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
 const LIMITS = {
   threads: 100,
   entries: 200,
   title: 120,
   preview: 2000,
   progress: 200,
+  parts: 8,
+  mentions: 16,
+  entityQuery: 64,
+  entityResults: 20,
+  entityTitle: 80,
+  entityGroup: 40,
+  entityDescription: 120,
 };
 
 class WidgetError extends Error {
@@ -105,15 +113,7 @@ function transcriptEntry(value) {
       typeof value.content === "string"
         ? value.content.slice(0, 12000)
         : Array.isArray(value.content)
-          ? value.content
-              .slice(0, 8)
-              .filter(
-                (part) =>
-                  (part?.type === "text" && typeof part.text === "string") ||
-                  (part?.type === "image" &&
-                    ArjunahRenderer.IMAGE_TYPES.includes(part.mediaType) &&
-                    typeof part.data === "string"),
-              )
+          ? contentParts(value.content)
           : null;
     if (content == null || (Array.isArray(content) && !content.length))
       return null;
@@ -162,6 +162,54 @@ function transcriptEntry(value) {
   return null;
 }
 
+/**
+ * Section 5.3 parts of a stored user message. Mention parts are kept so a
+ * replayed thread still shows the chips the visitor picked (SPEC 14.2).
+ */
+function contentParts(raw) {
+  const parts = [];
+  let plain = 0;
+  let mentions = 0;
+  for (const part of raw) {
+    if (part?.type === "text" && typeof part.text === "string") {
+      if (plain++ >= LIMITS.parts) continue;
+      parts.push({ type: "text", text: part.text.slice(0, 12000) });
+    } else if (
+      part?.type === "image" &&
+      ArjunahRenderer.IMAGE_TYPES.includes(part.mediaType) &&
+      typeof part.data === "string"
+    ) {
+      if (plain++ >= LIMITS.parts) continue;
+      parts.push(part);
+    } else if (
+      part?.type === "mention" &&
+      MENTION_ID.test(String(part.id ?? "")) &&
+      mentions++ < LIMITS.mentions
+    ) {
+      parts.push({
+        type: "mention",
+        id: part.id,
+        label: boundedText(part.label, LIMITS.entityTitle),
+      });
+    }
+  }
+  return parts;
+}
+
+/** One entity from the backend route, bounded before the renderer sees it. */
+function entity(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  if (!MENTION_ID.test(String(raw.id ?? ""))) return null;
+  const title = boundedText(raw.title, LIMITS.entityTitle);
+  if (!title) return null;
+  return {
+    id: raw.id,
+    title,
+    group: boundedText(raw.group, LIMITS.entityGroup),
+    description: boundedText(raw.description, LIMITS.entityDescription),
+  };
+}
+
 function randomId() {
   return crypto.randomUUID().replace(/-/g, "").slice(0, 24);
 }
@@ -186,6 +234,7 @@ export function mountAssistant(config = {}) {
     if (/^(cookie|set-cookie)$/i.test(key)) delete headers[key];
   const credentials = backend.credentials ?? "same-origin";
   const widget = config.widget ?? {};
+  const entities = config.entities ?? null;
 
   const tools = new Map();
   for (const tool of config.tools ?? []) {
@@ -310,6 +359,23 @@ export function mountAssistant(config = {}) {
       controlChange(id, value, values) {
         config.onControlChange?.(id, value, values);
       },
+      threadChanged(threadId) {
+        config.onThreadChange?.({ threadId });
+      },
+      // The site owns inference here, so a switch always holds; the callback
+      // is a report, not a veto (SPEC 8.2).
+      modelChanged(selection) {
+        config.onModelChange?.(selection);
+        return true;
+      },
+      ...(entities
+        ? {
+            searchEntities: (query) => searchEntities(query),
+            ...(entities.onActivate
+              ? { activateEntity: (picked) => entities.onActivate(picked) }
+              : {}),
+          }
+        : {}),
       async cardAction(detail) {
         const threadId = view.activeThread();
         if (!threadId) return null;
@@ -326,6 +392,7 @@ export function mountAssistant(config = {}) {
       },
     },
   });
+  view.setModels(widget.models ?? [], widget.defaultModel);
   view.setOptions({
     name: widget.name ?? "Assistant",
     greeting: widget.greeting ?? "",
@@ -345,6 +412,38 @@ export function mountAssistant(config = {}) {
   view.panel.hidden = false;
   void view.refreshThreads();
 
+  function selectionFields() {
+    const { model, reasoning } = view.selection();
+    return { ...(model ? { model } : {}), ...(reasoning ? { reasoning } : {}) };
+  }
+
+  /**
+   * Entity matches come from the site's own function when it supplies one and
+   * from the backend route otherwise (SPEC 14.4). Either way a failure means
+   * no matches, never an error in the transcript.
+   */
+  async function searchEntities(query) {
+    const bounded = String(query ?? "").slice(0, LIMITS.entityQuery);
+    let rows;
+    if (typeof entities.search === "function")
+      rows = await entities.search(bounded);
+    else
+      rows = await json(`entities?q=${encodeURIComponent(bounded)}`).catch(
+        () => null,
+      );
+    return Array.isArray(rows)
+      ? rows.slice(0, LIMITS.entityResults).map(entity).filter(Boolean)
+      : [];
+  }
+
+  function report(callback, detail) {
+    try {
+      callback?.(detail);
+    } catch {
+      // A host callback is a report; a throwing one must not end the turn.
+    }
+  }
+
   /** One turn: POST it, then drive the renderer from the event stream. */
   async function runTurn(content, context) {
     const threadId = context?.threadId ?? view.activeThread();
@@ -362,6 +461,7 @@ export function mountAssistant(config = {}) {
           body: JSON.stringify({
             content,
             controls: view.controls(),
+            ...selectionFields(),
           }),
           signal: controller.signal,
         },
@@ -436,6 +536,7 @@ export function mountAssistant(config = {}) {
   async function handleEvent({ type, data }, threadId, context) {
     if (type === "turn.start") {
       currentBackendTurn = boundedText(data.turnId, 100) || null;
+      report(config.onTurnStart, { threadId, turnId: currentBackendTurn });
       return false;
     }
     if (type === "error") {
@@ -445,11 +546,20 @@ export function mountAssistant(config = {}) {
         `The assistant reported an error: ${boundedText(data.message, 300)}`,
         { error: true, persist: false },
       );
+      report(config.onError, {
+        code: boundedText(data.code, 40) || "PROVIDER_ERROR",
+        message: boundedText(data.message, 300),
+      });
       return true;
     }
     if (type === "turn.end") {
       const finished = view.finishActivity(true);
       if (finished?.entry) context?.record(finished.entry);
+      report(config.onTurnEnd, {
+        threadId,
+        turnId: currentBackendTurn,
+        usage: data.usage ?? null,
+      });
       return true;
     }
     if (type === "message") {
@@ -537,10 +647,31 @@ export function mountAssistant(config = {}) {
         throw new Error("Invalid tool arguments.");
       }
       validateArguments(args, tool.inputSchema);
+      let collected = 0;
       result = await tool.handler(args, {
         id,
         name: tool.name,
         controls: view.controls(),
+        async requestInput(inputId) {
+          const definition = (tool.userInputs ?? []).find(
+            (item) => item.id === inputId,
+          );
+          if (!definition)
+            throw new WidgetError(
+              "INVALID_REQUEST",
+              "This input was not declared for this tool.",
+            );
+          if (++collected > 4)
+            throw new WidgetError(
+              "INVALID_REQUEST",
+              "This tool requested too many user inputs.",
+            );
+          return view.requestUserInput({
+            toolName: tool.name,
+            origin: location.origin,
+            definition,
+          });
+        },
         reportProgress(text) {
           view.applyEvent({
             type: "progress",
@@ -573,14 +704,30 @@ export function mountAssistant(config = {}) {
     close() {
       view.panel.hidden = true;
     },
+    openThread(id) {
+      return view.selectThread(String(id));
+    },
+    newThread() {
+      return view.newThread();
+    },
+    getControls() {
+      return view.controls();
+    },
+    setControls(values) {
+      return view.setControls(values ?? {});
+    },
+    setModels(models, selected) {
+      return view.setModels(models ?? [], selected);
+    },
     destroy() {
       if (destroyed) return;
       destroyed = true;
       controller?.abort();
+      view.cancelUserInput("The assistant was closed.");
       shadow.replaceChildren();
     },
   };
 }
 
 export { ArjunahRenderer, validateCard };
-export const PROTOCOL_VERSION = "1.2.0";
+export const PROTOCOL_VERSION = "1.0.0";
