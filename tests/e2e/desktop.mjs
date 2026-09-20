@@ -330,6 +330,36 @@ try {
     );
   }
 
+  // Settings show both diagnostic logs, so a slow run can be explained.
+  step("logs");
+  await settings.bringToFront();
+  await settings.evaluate(() => document.querySelector("#log-refresh").click());
+  await settings.waitForFunction(() =>
+    /turn:/.test(document.querySelector("#log-view").textContent),
+  );
+  assert.match(
+    await settings.$eval("#log-view", (el) => el.textContent),
+    new RegExp(`round 0 → ${liveId}/`),
+    "the extension log names the provider each round used",
+  );
+  await settings.evaluate(() =>
+    document.querySelector("#log-tab-desktop").click(),
+  );
+  await settings.waitForFunction(() =>
+    /Checking /.test(document.querySelector("#log-view").textContent),
+  );
+  const desktopLog = await settings.$eval("#log-view", (el) => el.textContent);
+  assert.match(
+    desktopLog,
+    /detection finished in \d+ms/,
+    "the desktop log explains the wait before the agent starts",
+  );
+  assert.ok(
+    !desktopLog.includes("Reply with the single word PONG"),
+    "prompts never reach the diagnostic log",
+  );
+  await shot(settings, "options-logs");
+
   // The popup shows the active provider (it hosts no chat of its own).
   step("popup");
   const popup = await browser.newPage();

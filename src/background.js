@@ -18,6 +18,8 @@ import {
   DESKTOP_UNPAIRED,
 } from "./lib/catalog.js";
 import {
+  desktopLogs,
+  desktopClearLogs,
   DESKTOP_DEFAULT_URL,
   desktopOrigin,
   desktopStatus,
@@ -45,6 +47,7 @@ import {
   providerOrigin,
 } from "./lib/validation.js";
 import { validateCard } from "./lib/cards.js";
+import { logEvent, logEntries, clearLog } from "./lib/logs.js";
 import { OPENAI_BASE_URL } from "./lib/openai.js";
 
 const STORAGE = {
@@ -86,7 +89,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.kind !== "arjunah") return false;
   handle(message.method, message.params ?? {}, sender)
     .then((result) => sendResponse({ ok: true, result }))
-    .catch((error) => sendResponse({ ok: false, error: publicError(error) }));
+    .catch((error) => {
+      const shown = publicError(error);
+      // Only the code and the public message; never the caller's parameters.
+      if (!String(message.method).startsWith("logs."))
+        logEvent(
+          "warn",
+          "broker",
+          `${message.method} failed (${shown.code}): ${shown.message}`,
+        );
+      sendResponse({ ok: false, error: shown });
+    });
   return true;
 });
 chrome.runtime.onConnect?.addListener((port) => {
@@ -229,13 +242,34 @@ async function handle(method, params, sender) {
   )
     throw new BrokerError("INVALID_REQUEST", "Invalid broker request.");
   if (
-    ["provider.", "grants.", "desktop.", "catalog.", "usage."].some((prefix) =>
-      method.startsWith(prefix),
+    ["provider.", "grants.", "desktop.", "catalog.", "usage.", "logs."].some(
+      (prefix) => method.startsWith(prefix),
     ) ||
     method === "site.get" ||
     method === "site.update"
   ) {
     assertExtensionPage(sender);
+    // Diagnostics for the settings page: this extension's own log and, when a
+    // companion is paired, the log of the desktop process it drives.
+    if (method === "logs.get")
+      return {
+        entries: await logEntries(),
+        desktop: await desktopLogSnapshot(),
+      };
+    if (method === "logs.clear") {
+      const target = params.target === "desktop" ? "desktop" : "extension";
+      if (target === "desktop") {
+        const link = await getDesktop();
+        if (link?.token) await desktopClearLogs(link).catch(() => {});
+      } else {
+        await clearLog();
+        logEvent("info", "settings", "diagnostic log cleared");
+      }
+      return {
+        entries: await logEntries(),
+        desktop: await desktopLogSnapshot(),
+      };
+    }
     if (method === "provider.get") {
       const config = await getOpenAI();
       return config
@@ -820,6 +854,14 @@ async function desktopReachable(link, { force = false } = {}) {
   )
     return reachability;
   const status = await desktopStatus(link);
+  if (reachability.running !== status.running)
+    logEvent(
+      status.running ? "info" : "warn",
+      "desktop",
+      status.running
+        ? `companion reachable at ${link.baseUrl} (version ${status.version || "unknown"})`
+        : `companion is not answering at ${link.baseUrl}`,
+    );
   reachability = {
     at: Date.now(),
     baseUrl: link.baseUrl,
@@ -1260,6 +1302,29 @@ async function desktopSummary(refresh) {
     ...(await activeSummary()),
   };
 }
+/** The companion's log, or why it could not be read. Never throws. */
+async function desktopLogSnapshot() {
+  const link = await getDesktop();
+  if (!link?.token)
+    return {
+      available: false,
+      reason: "No desktop app is paired with this browser.",
+      entries: [],
+    };
+  try {
+    const snapshot = await desktopLogs(link);
+    return { available: true, reason: null, ...snapshot };
+  } catch (error) {
+    return {
+      available: false,
+      reason:
+        error?.message ??
+        "अर्जुनः Desktop did not answer. Start it and refresh.",
+      entries: [],
+    };
+  }
+}
+
 async function pairDesktop(params) {
   const baseUrl = desktopOrigin(params.baseUrl ?? DESKTOP_DEFAULT_URL);
   const code = String(params.code ?? "").replace(/\D/g, "");
@@ -1288,6 +1353,7 @@ async function pairDesktop(params) {
     providers: [],
   };
   await chrome.storage.local.set({ [STORAGE.desktop]: link });
+  logEvent("info", "desktop", `paired with the companion at ${baseUrl}`);
   // A freshly paired browser adopts desktop configuration when it has none; otherwise its own settings sync up.
   const remote = await desktopSyncGet(link).catch(() => null);
   if (remote?.config && !(await getOpenAI()) && !(await getActive()).type)
@@ -1727,6 +1793,12 @@ async function hostedChat(
         round,
         model: `${config.providerId}/${config.model}`,
       });
+      const roundStartedAt = Date.now();
+      logEvent(
+        "info",
+        "turn",
+        `${turn.binding.origin}: round ${round} → ${config.providerId}/${config.model}${tools.length ? ` with ${tools.length} tool(s)` : ""}`,
+      );
       let liveSteps = 0;
       const result = await generate(
         config,
@@ -1745,6 +1817,12 @@ async function hostedChat(
                 onItem: (step) => {
                   if (step.type === "command" && step.phase === "end")
                     liveSteps++;
+                  if (step.type === "phase")
+                    logEvent(
+                      "debug",
+                      config.providerId ?? "desktop",
+                      step.text,
+                    );
                   emit(turn, {
                     ...step,
                     type:
@@ -1756,7 +1834,9 @@ async function hostedChat(
                             ? "agent.reasoning"
                             : step.type === "thinking"
                               ? "agent.thinking"
-                              : "agent.step",
+                              : step.type === "phase"
+                                ? "agent.phase"
+                                : "agent.step",
                     round,
                     provider: config.providerName,
                   });
@@ -1775,6 +1855,11 @@ async function hostedChat(
         usage: result.usage,
         toolCalls: result.message.toolCalls.length,
       });
+      logEvent(
+        "info",
+        "turn",
+        `${turn.binding.origin}: round ${round} answered in ${Date.now() - roundStartedAt}ms (${result.usage?.totalTokens ?? 0} tokens, ${result.message.toolCalls.length} tool call(s))`,
+      );
       // Anything the live poll missed is still shown once the round completes.
       for (const step of (result.agentSteps ?? []).slice(liveSteps))
         emit(turn, {

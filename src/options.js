@@ -687,3 +687,101 @@ $("#unpair").addEventListener("click", async () => {
   }
 });
 $("#refresh-desktop").addEventListener("click", () => refreshDesktop(true));
+
+// Diagnostics: this extension's log and, when one is paired, the desktop app's.
+// Both are read-only views of bounded, metadata-only buffers.
+let logTab = "extension";
+let logTimer = null;
+let logSnapshot = { entries: [], desktop: { available: false, entries: [] } };
+function logLines(source) {
+  const entries =
+    source === "desktop" ? logSnapshot.desktop?.entries : logSnapshot.entries;
+  return (entries ?? []).map((entry) => {
+    const at = new Date(entry.at).toLocaleTimeString();
+    return {
+      level: entry.level,
+      text: `${at}  ${entry.level.padEnd(5)} ${entry.source}: ${entry.message}`,
+    };
+  });
+}
+function renderLog() {
+  const view = $("#log-view");
+  const lines = logLines(logTab);
+  const atBottom = view.scrollTop + view.clientHeight >= view.scrollHeight - 24;
+  view.replaceChildren(
+    ...lines.map((line) => {
+      const node = element("div", line.text, line.level);
+      return node;
+    }),
+  );
+  if (atBottom) view.scrollTop = view.scrollHeight;
+  for (const [id, name] of [
+    ["#log-tab-extension", "extension"],
+    ["#log-tab-desktop", "desktop"],
+  ]) {
+    const active = logTab === name;
+    $(id).className = `btn ${active ? "btn-secondary" : "btn-ghost"}`;
+    $(id).setAttribute("aria-selected", String(active));
+  }
+  if (logTab === "desktop" && !logSnapshot.desktop?.available)
+    status(
+      "#log-status",
+      logSnapshot.desktop?.reason ?? "The desktop app log is unavailable.",
+      true,
+    );
+  else
+    status(
+      "#log-status",
+      lines.length
+        ? `${lines.length} entr${lines.length === 1 ? "y" : "ies"}${logTab === "desktop" && logSnapshot.desktop?.version ? ` · अर्जुनः Desktop ${logSnapshot.desktop.version}` : ""}`
+        : "Nothing logged yet.",
+    );
+}
+async function refreshLog() {
+  try {
+    logSnapshot = await runtime("logs.get");
+    renderLog();
+  } catch (error) {
+    status("#log-status", error.message, true);
+  }
+}
+function setLogLive(on) {
+  clearInterval(logTimer);
+  logTimer = on ? setInterval(refreshLog, 2000) : null;
+}
+$("#log-tab-extension").addEventListener("click", () => {
+  logTab = "extension";
+  renderLog();
+});
+$("#log-tab-desktop").addEventListener("click", () => {
+  logTab = "desktop";
+  renderLog();
+  void refreshLog();
+});
+$("#log-refresh").addEventListener("click", () => refreshLog());
+$("#log-live").addEventListener("change", (event) => {
+  setLogLive(event.target.checked);
+  if (event.target.checked) void refreshLog();
+});
+$("#log-copy").addEventListener("click", async () => {
+  const text = logLines(logTab)
+    .map((line) => line.text)
+    .join("\n");
+  try {
+    await navigator.clipboard.writeText(text);
+    status("#log-status", "Copied to the clipboard.");
+  } catch {
+    status("#log-status", "The browser refused clipboard access.", true);
+  }
+});
+$("#log-clear").addEventListener("click", async () => {
+  try {
+    logSnapshot = await runtime("logs.clear", {
+      target: logTab,
+    });
+    renderLog();
+  } catch (error) {
+    status("#log-status", error.message, true);
+  }
+});
+void refreshLog();

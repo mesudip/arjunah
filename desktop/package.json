@@ -1,6 +1,6 @@
 {
   "name": "arjunah-desktop",
-  "version": "1.0.0-alpha.2",
+  "version": "1.0.0-alpha.3",
   "description": "अर्जुनः Desktop: pairs with the अर्जुनः browser extension and lends websites your Claude Code, Codex, or OpenCode subscription over loopback.",
   "repository": {
     "type": "git",

@@ -266,6 +266,19 @@ function render() {
     );
   if (!state.activity.length)
     log.append(text("div", "No activity yet.", "empty"));
+  const diagnostics = $("#logs");
+  diagnostics.replaceChildren();
+  for (const entry of state.logs ?? [])
+    diagnostics.append(
+      text(
+        "div",
+        `${new Date(entry.at).toLocaleTimeString()}  ${entry.level.padEnd(5)} ${entry.source}: ${entry.message}`,
+        `entry ${entry.level}`,
+      ),
+    );
+  if (!state.logs?.length)
+    diagnostics.append(text("div", "Nothing logged yet.", "empty"));
+  diagnostics.scrollTop = diagnostics.scrollHeight;
   $("#data-path").textContent = `Data file: ${state.dataPath}`;
 }
 

@@ -230,6 +230,10 @@ const server = createServer(async (request, response) => {
       };
       return;
     }
+    // A backend that knows what its agent is doing says so; the renderer shows
+    // it as the live turn label instead of a bare spinner (SPEC 14.3).
+    sse(response, "agent.phase", { text: "Reserving the room…" });
+    if (state.turns === 2) await new Promise((wait) => setTimeout(wait, 400));
     sse(response, "message", {
       entry: {
         type: "message",
@@ -333,6 +337,10 @@ try {
   // A form's message action shows the user the exact text it sends.
   const turnsBefore = state.userTurns.length;
   await shadow(`root.querySelector(".card-form button[type=submit]").click();`);
+  await waitFor(
+    `root.querySelector(".activity.live .workflow-title")?.textContent.startsWith("Reserving the room…")`,
+    "the agent phase as the live label",
+  );
   await waitFor(
     `[...root.querySelectorAll(".msg.user")].some((m) => m.textContent.includes("Book the Lisbon trip"))`,
     "the visible message action",

@@ -20,7 +20,8 @@ import {
   windowKind,
   isoFromEpochSeconds,
 } from "./common.mjs";
-import { readdirSync, statSync } from "node:fs";
+import { readdirSync, statSync, writeFileSync } from "node:fs";
+import { IMAGE_LIMITS, IMAGE_MEDIA_TYPES } from "../transcript.mjs";
 
 export const id = "codex";
 export const name = "Codex";
@@ -28,6 +29,8 @@ export const vendor = "OpenAI";
 export const supportsTools = true;
 export const supportsThreads = true;
 export const supportsReasoning = true;
+// `codex exec -i <FILE>` attaches images to the prompt (see `start`).
+export const supportsVision = true;
 const CODEX_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const LINKS = [
   { label: "Codex CLI docs", url: "https://developers.openai.com/codex/cli" },
@@ -74,7 +77,13 @@ function readModels(codexHome) {
         defaultReasoning: CODEX_EFFORTS.includes(model.default_reasoning_level)
           ? model.default_reasoning_level
           : null,
-        capabilities: { tools: true, vision: false, reasoning: true },
+        capabilities: {
+          tools: true,
+          vision:
+            Array.isArray(model.input_modalities) &&
+            model.input_modalities.includes("image"),
+          reasoning: true,
+        },
       }));
   } catch {
     /* no catalog yet */
@@ -84,7 +93,8 @@ function readModels(codexHome) {
     contextWindow: null,
     reasoningLevels: CODEX_EFFORTS,
     defaultReasoning: null,
-    capabilities: { tools: true, vision: false, reasoning: true },
+    // Every model in the fallback list is one of the image-capable GPT-5.x/6 slugs.
+    capabilities: { tools: true, vision: true, reasoning: true },
   }));
   return [
     {
@@ -93,7 +103,12 @@ function readModels(codexHome) {
       contextWindow: listed[0]?.contextWindow ?? null,
       reasoningLevels: CODEX_EFFORTS,
       defaultReasoning: null,
-      capabilities: { tools: true, vision: false, reasoning: true },
+      // The account default resolves to a catalog model; follow what that catalog says.
+      capabilities: {
+        tools: true,
+        vision: listed[0]?.capabilities?.vision ?? true,
+        reasoning: true,
+      },
     },
     ...(listed.length ? listed : fallback),
   ];
@@ -441,10 +456,28 @@ export function parseCodexOutput(stdout, stderr, code, model) {
   };
 }
 
+// What each stage of a `codex exec` run means in plain words. Codex can spend
+// half a minute between launch and its first reasoning item, so every lifecycle
+// event it emits becomes a line the browser can show instead of a bare spinner.
+const PHASES = {
+  "thread.started": "Codex session started; sending the prompt…",
+  "turn.started": "Codex is working on the answer…",
+  "turn.completed": "Codex finished; collecting the answer…",
+};
+const STARTED_PHASES = {
+  reasoning: "Codex is reasoning…",
+  agent_message: "Codex is writing the answer…",
+  mcp_tool_call: "Codex is calling a browser tool…",
+  web_search: "Codex is searching the web…",
+};
+
 /** Maps one `codex exec --json` event to a progress item, or null. */
 export function progressItem(event) {
+  if (PHASES[event?.type]) return { type: "phase", text: PHASES[event.type] };
   const item = event?.item;
   if (!item || typeof item !== "object") return null;
+  if (event.type === "item.started" && STARTED_PHASES[item.type])
+    return { type: "phase", text: STARTED_PHASES[item.type] };
   if (item.type === "command_execution") {
     if (event.type === "item.started")
       return {
@@ -480,14 +513,16 @@ export function progressItem(event) {
 function mergeCodexModels(cached, live) {
   if (!live.length) return cached;
   const byId = new Map(cached.map((model) => [model.id, model]));
-  const merged = live.map(
-    ({ acceptsImages: _images, isDefault: _d, ...model }) => ({
-      ...(byId.get(model.id) ?? {}),
-      ...model,
-      contextWindow: byId.get(model.id)?.contextWindow ?? null,
-      capabilities: { tools: true, vision: false, reasoning: true },
-    }),
-  );
+  const merged = live.map(({ acceptsImages, isDefault: _d, ...model }) => ({
+    ...(byId.get(model.id) ?? {}),
+    ...model,
+    contextWindow: byId.get(model.id)?.contextWindow ?? null,
+    capabilities: {
+      tools: true,
+      vision: acceptsImages ?? byId.get(model.id)?.capabilities?.vision ?? true,
+      reasoning: true,
+    },
+  }));
   const seen = new Set(merged.map((model) => model.id));
   return [
     ...cached.filter((model) => model.id === "default"),
@@ -496,19 +531,44 @@ function mergeCodexModels(cached, live) {
   ];
 }
 
+/**
+ * `codex exec` reads its prompt from stdin but takes images as files, so each
+ * attachment is written into the run's scratch directory (which the outer
+ * sandbox allows) and passed with `-i`. Returns the argument fragment.
+ */
+export function imageArguments(images, directory) {
+  const args = [];
+  images.forEach((image, index) => {
+    const suffix = IMAGE_MEDIA_TYPES.includes(image.mediaType)
+      ? image.mediaType.slice("image/".length)
+      : "png";
+    const file = join(directory, `arjunah-image-${index}.${suffix}`);
+    writeFileSync(file, Buffer.from(image.data, "base64"), { mode: 0o600 });
+    args.push("-i", file);
+  });
+  return args;
+}
+
 export function start({
   binary,
   model,
   systemPrompt,
   prompt,
+  images = [],
   mcp,
   tools = [],
   onProgress,
+  onLog,
   thread = null,
   onThread,
   reasoning = null,
   scratch: sharedScratch = null,
 }) {
+  const say = (text) => {
+    onLog?.("debug", text);
+    onProgress?.({ type: "phase", text });
+  };
+  say("Preparing a sandboxed workspace for Codex…");
   // A thread keeps its scratch directory alive across turns; Codex filters
   // resumable sessions by working directory.
   const scratch = sharedScratch ?? scratchDirectory("codex");
@@ -555,8 +615,14 @@ export function start({
       .join(",");
     if (approvals) args.push("-c", `mcp_servers.arjunah.tools={${approvals}}`);
   }
+  const imageArgs = imageArguments(
+    images.slice(0, IMAGE_LIMITS.perPrompt),
+    scratch.directory,
+  );
   // Resuming continues the saved thread; the prompt then travels on stdin.
-  if (thread?.handle) args.push("resume", thread.handle, "-");
+  // `-i` belongs to whichever subcommand parses it, so it follows `resume`.
+  if (thread?.handle) args.push("resume", ...imageArgs, thread.handle, "-");
+  else args.push(...imageArgs);
   const codexHome =
     process.env.CODEX_HOME || join(process.env.HOME ?? "", ".codex");
   const sandbox = outerSandbox({
@@ -574,9 +640,23 @@ export function start({
   const fullPrompt = instructions
     ? `<system_instructions>\n${instructions}\n</system_instructions>\n\n${prompt}`
     : prompt;
+  if (mcp)
+    say(
+      `Handing Codex ${tools.length} approved browser tool${tools.length === 1 ? "" : "s"}…`,
+    );
+  say(
+    thread?.handle
+      ? "Resuming the saved Codex session…"
+      : "Launching the Codex CLI…",
+  );
+  onLog?.(
+    "info",
+    `codex exec: model ${model ?? "default"}${effort ? `, effort ${effort}` : ""}${sandbox ? `, outer sandbox denying ${sandbox.denied} home entries` : ""}${thread?.handle ? ", resumed thread" : ""}`,
+  );
   return spawnAgent({
     binary: sandbox?.binary ?? binary,
     args: sandbox?.args ?? args,
+    onLog,
     stdin: fullPrompt,
     cwd: scratch.directory,
     env,

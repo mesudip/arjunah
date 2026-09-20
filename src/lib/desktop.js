@@ -284,6 +284,38 @@ export async function desktopEndThread(link, threadId) {
   }
 }
 
+/** The companion's own diagnostic log, for the extension's settings page. */
+export async function desktopLogs(link, after = 0, limit = 200) {
+  const body = await desktopFetch(
+    link,
+    `/api/logs?after=${Math.max(0, Number(after) || 0)}&limit=${Math.max(1, Math.min(500, Number(limit) || 200))}`,
+    { timeoutMs: 5000 },
+  );
+  return {
+    version: String(body.version ?? "").slice(0, 40),
+    device: String(body.device ?? "").slice(0, 120),
+    latest: Number(body.latest) || 0,
+    entries: (Array.isArray(body.entries) ? body.entries : [])
+      .slice(-500)
+      .map((entry) => ({
+        seq: Number(entry?.seq) || 0,
+        at: String(entry?.at ?? "").slice(0, 40),
+        level: ["debug", "info", "warn", "error"].includes(entry?.level)
+          ? entry.level
+          : "info",
+        source: String(entry?.source ?? "app").slice(0, 40),
+        message: String(entry?.message ?? "").slice(0, 500),
+      })),
+  };
+}
+
+export function desktopClearLogs(link) {
+  return desktopFetch(link, "/api/logs", {
+    method: "DELETE",
+    timeoutMs: 5000,
+  });
+}
+
 export function desktopSyncGet(link) {
   return desktopFetch(link, "/api/sync", { timeoutMs: 5000 });
 }
@@ -320,6 +352,9 @@ async function pollProgress(config, progress, signal, stopped) {
   await step();
 }
 function sanitizeProgress(item) {
+  // What the companion is doing right now, in one short sentence.
+  if (item?.type === "phase")
+    return { type: "phase", text: String(item.text ?? "").slice(0, 200) };
   if (item?.type === "output_delta")
     return {
       type: "output_delta",
@@ -348,6 +383,17 @@ function sanitizeProgress(item) {
   };
 }
 
+/** One message with its parts flattened, keeping images when the provider sees them. */
+function desktopMessage(message, vision) {
+  const flattened = { ...message, content: contentText(message.content) };
+  if (!vision) return flattened;
+  const images = message.content
+    .filter((part) => part.type === "image")
+    .slice(0, LIMITS.imagesPerMessage)
+    .map((part) => ({ mediaType: part.mediaType, data: part.data }));
+  return images.length ? { ...flattened, images } : flattened;
+}
+
 /** Runs one generation through the desktop app using an already validated request. */
 export async function desktopGenerate(config, valid, signal, options = {}) {
   const progress = options.progress ?? null;
@@ -368,11 +414,13 @@ export async function desktopGenerate(config, valid, signal, options = {}) {
         threadId:
           config.supportsThreads && options.thread ? options.thread : undefined,
         reasoning: valid.reasoning ?? undefined,
-        // Desktop agents take text prompts; image parts were rejected earlier
-        // unless the provider advertised vision, which none does yet.
+        // Desktop agents take one text prompt, so parts are flattened here and
+        // images travel beside the text for the companion to attach. A provider
+        // without vision never reaches this point with an image: `generate`
+        // rejects the request first.
         messages: valid.messages.map((message) =>
           Array.isArray(message.content)
-            ? { ...message, content: contentText(message.content) }
+            ? desktopMessage(message, config.capabilities?.vision === true)
             : message,
         ),
         tools: valid.tools,

@@ -8,6 +8,7 @@ import { createDesktopApp } from "../desktop/lib/server.mjs";
 import { Store } from "../desktop/lib/store.mjs";
 import {
   buildPrompt,
+  collectImages,
   trailingToolResults,
 } from "../desktop/lib/transcript.mjs";
 import {
@@ -18,13 +19,14 @@ import {
 
 const EXTENSION = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
 
-function fakeAdapter(behavior) {
+function fakeAdapter(behavior, { supportsVision = false } = {}) {
   return {
     id: "fake",
     name: "Fake",
     vendor: "Test",
     supportsTools: true,
     supportsThreads: true,
+    supportsVision,
     async detect() {
       return {
         installed: true,
@@ -40,7 +42,7 @@ function fakeAdapter(behavior) {
   };
 }
 
-async function app(t, behavior) {
+async function app(t, behavior, options = {}) {
   const directory = mkdtempSync(join(tmpdir(), "arjunah-desktop-test-"));
   const store = new Store(directory);
   const adapter = fakeAdapter(
@@ -53,12 +55,19 @@ async function app(t, behavior) {
           model: "default",
         }),
       })),
+    options,
   );
   const instance = createDesktopApp({
     store,
     adapters: (id) => (id === "fake" ? adapter : null),
     detect: async () => [
-      { id: "fake", name: "Fake", vendor: "Test", ...(await adapter.detect()) },
+      {
+        id: "fake",
+        name: "Fake",
+        vendor: "Test",
+        supportsVision: adapter.supportsVision,
+        ...(await adapter.detect()),
+      },
     ],
   });
   const address = await instance.listen(0);
@@ -389,6 +398,141 @@ test("agent failures surface as provider errors without internals", async (t) =>
   assert.match(result.body.error.message, /Not logged in/);
 });
 
+const PIXEL =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+test("a vision provider receives image attachments and a text-only one does not", async (t) => {
+  let seen;
+  const behavior = (options) => {
+    seen = options;
+    return {
+      child: null,
+      output: Promise.resolve({
+        content: "red",
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        model: "default",
+      }),
+    };
+  };
+  const vision = await app(t, behavior, { supportsVision: true });
+  const visionHeaders = await vision.pair();
+  const body = {
+    providerId: "fake",
+    model: "default",
+    messages: [
+      {
+        role: "user",
+        content: "What colour is this?\n[image]",
+        images: [{ mediaType: "image/png", data: PIXEL }],
+      },
+    ],
+  };
+  const answered = await vision.call("/api/generate", {
+    method: "POST",
+    headers: visionHeaders,
+    body,
+  });
+  assert.equal(answered.status, 200);
+  assert.deepEqual(seen.images, [{ mediaType: "image/png", data: PIXEL }]);
+  assert.match(seen.prompt, /What colour is this\?/);
+
+  seen = undefined;
+  const textOnly = await app(t, behavior);
+  const textHeaders = await textOnly.pair();
+  const dropped = await textOnly.call("/api/generate", {
+    method: "POST",
+    headers: textHeaders,
+    body,
+  });
+  assert.equal(dropped.status, 200);
+  assert.deepEqual(
+    seen.images,
+    [],
+    "a provider without vision never sees the bytes",
+  );
+});
+
+test("image attachments are bounded and refused on non-user messages", async (t) => {
+  const { call, pair } = await app(t, undefined, { supportsVision: true });
+  const headers = await pair();
+  const send = (message) =>
+    call("/api/generate", {
+      method: "POST",
+      headers,
+      body: { providerId: "fake", model: "default", messages: [message] },
+    });
+  const wrongRole = await send({
+    role: "assistant",
+    content: "x",
+    images: [{ mediaType: "image/png", data: PIXEL }],
+  });
+  assert.equal(wrongRole.status, 400);
+  const badType = await send({
+    role: "user",
+    content: "x",
+    images: [{ mediaType: "image/svg+xml", data: PIXEL }],
+  });
+  assert.equal(badType.status, 400);
+  const badData = await send({
+    role: "user",
+    content: "x",
+    images: [{ mediaType: "image/png", data: "not base64!" }],
+  });
+  assert.equal(badData.status, 400);
+});
+
+test("prompt images come from the messages that prompt carries, newest kept", () => {
+  const image = (tag) => ({ mediaType: "image/png", data: tag });
+  const messages = [
+    { role: "user", content: "a", images: [image("one")] },
+    { role: "assistant", content: "ok" },
+    { role: "user", content: "b", images: [image("two"), image("three")] },
+  ];
+  assert.deepEqual(
+    collectImages(messages).map((item) => item.data),
+    ["one", "two", "three"],
+  );
+  assert.deepEqual(
+    collectImages(messages, 2).map((item) => item.data),
+    ["two", "three"],
+  );
+  assert.deepEqual(collectImages([{ role: "user", content: "a" }]), []);
+});
+
+test("Claude Code sends images as a stream-json user message and Codex as files", async () => {
+  const { streamJsonUserMessage } = await import(
+    "../desktop/lib/providers/claude-code.mjs"
+  );
+  const line = streamJsonUserMessage("Describe it.", [
+    { mediaType: "image/png", data: PIXEL },
+  ]);
+  assert.equal(line.endsWith("\n"), true);
+  const parsed = JSON.parse(line);
+  assert.equal(parsed.type, "user");
+  assert.deepEqual(parsed.message.content, [
+    { type: "text", text: "Describe it." },
+    {
+      type: "image",
+      source: { type: "base64", media_type: "image/png", data: PIXEL },
+    },
+  ]);
+
+  const { imageArguments } = await import("../desktop/lib/providers/codex.mjs");
+  const directory = mkdtempSync(join(tmpdir(), "arjunah-image-test-"));
+  const args = imageArguments(
+    [
+      { mediaType: "image/png", data: PIXEL },
+      { mediaType: "image/webp", data: PIXEL },
+    ],
+    directory,
+  );
+  assert.deepEqual(args.filter((item) => item === "-i").length, 2);
+  assert.match(args[1], /arjunah-image-0\.png$/);
+  assert.match(args[3], /arjunah-image-1\.webp$/);
+  assert.equal(statSync(args[1]).size > 0, true);
+  rmSync(directory, { recursive: true, force: true });
+});
+
 test("transcript builder flattens history and detects trailing tool results", () => {
   const single = buildPrompt([
     { role: "system", content: "S" },
@@ -546,6 +690,21 @@ test("Codex output parsing keeps the commands the agent ran and the outer sandbo
       text: "I could not list that folder.",
     },
   );
+  // Codex can spend half a minute between launch and its first item, so every
+  // lifecycle event becomes a line the browser can show.
+  assert.deepEqual(progressItem({ type: "thread.started" }), {
+    type: "phase",
+    text: "Codex session started; sending the prompt…",
+  });
+  assert.deepEqual(progressItem({ type: "turn.started" }), {
+    type: "phase",
+    text: "Codex is working on the answer…",
+  });
+  assert.deepEqual(
+    progressItem({ type: "item.started", item: { type: "reasoning" } }),
+    { type: "phase", text: "Codex is reasoning…" },
+  );
+  assert.equal(progressItem({ type: "item.started", item: null }), null);
   assert.deepEqual(parsed.steps, [
     {
       type: "command",
@@ -637,9 +796,19 @@ test("live agent progress is recorded per turn and served to the paired browser"
   assert.equal(generated.status, 200);
   assert.equal(generated.body.reasoning, "I tried to list the folder.");
   assert.equal(generated.body.steps[0].exitCode, 71);
-  const progress = await call("/api/progress/turn-1?after=1", { headers });
-  assert.equal(progress.body.total, 3);
-  assert.equal(progress.body.done, true);
+  const all = await call("/api/progress/turn-1", { headers });
+  assert.equal(all.body.done, true);
+  // The run opens with phases, so a browser can say what the wait is for long
+  // before the agent produces anything (SPEC 12.3.1).
+  assert.deepEqual(
+    all.body.items.filter((item) => item.type === "phase"),
+    [
+      { type: "phase", text: "Checking Fake on this computer…" },
+      { type: "phase", text: "Starting Fake…" },
+    ],
+  );
+  const progress = await call("/api/progress/turn-1?after=3", { headers });
+  assert.equal(progress.body.total, 5);
   assert.equal(progress.body.items[0].phase, "end");
   assert.deepEqual(progress.body.items[1], {
     type: "output_delta",
@@ -647,6 +816,73 @@ test("live agent progress is recorded per turn and served to the paired browser"
   });
   const anonymous = await call("/api/progress/turn-1");
   assert.equal(anonymous.status, 401);
+});
+
+test("text a browser already collected is never merged into, and the log explains the run", async (t) => {
+  let emit = null;
+  const { call, pair } = await app(t, ({ onProgress }) => {
+    emit = onProgress;
+    onProgress?.({ type: "output_delta", text: "one" });
+    return {
+      child: null,
+      output: new Promise((resolve) =>
+        setTimeout(
+          () =>
+            resolve({
+              content: "one two",
+              usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+              model: "default",
+            }),
+          60,
+        ),
+      ),
+    };
+  });
+  const headers = await pair();
+  const generated = call("/api/generate", {
+    method: "POST",
+    headers,
+    body: {
+      providerId: "fake",
+      model: "default",
+      messages: [{ role: "user", content: "hi" }],
+      progressId: "turn-2",
+    },
+  });
+  // Poll the way the browser does, then let the agent append more text.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const first = await call("/api/progress/turn-2", { headers });
+  assert.deepEqual(first.body.items.at(-1), {
+    type: "output_delta",
+    text: "one",
+  });
+  emit({ type: "output_delta", text: " two" });
+  const second = await call(
+    `/api/progress/turn-2?after=${first.body.items.length}`,
+    { headers },
+  );
+  assert.deepEqual(second.body.items, [{ type: "output_delta", text: " two" }]);
+  await generated;
+  const logs = await call("/api/logs", { headers });
+  assert.equal(logs.status, 200);
+  assert.ok(logs.body.latest > 0);
+  const messages = logs.body.entries.map((entry) => entry.message);
+  assert.ok(messages.some((message) => message.startsWith("Checking Fake")));
+  assert.ok(messages.some((message) => message.includes("detection finished")));
+  assert.ok(
+    logs.body.entries.every(
+      (entry) =>
+        typeof entry.seq === "number" &&
+        typeof entry.at === "string" &&
+        ["debug", "info", "warn", "error"].includes(entry.level),
+    ),
+  );
+  const anonymous = await call("/api/logs");
+  assert.equal(anonymous.status, 401);
+  const cleared = await call("/api/logs", { method: "DELETE", headers });
+  assert.equal(cleared.status, 200);
+  const after = await call("/api/logs", { headers });
+  assert.ok(after.body.entries.length <= 1);
 });
 
 test("a browser conversation reuses one agent thread and sends only the new messages", async (t) => {
@@ -825,7 +1061,43 @@ test("Claude Code stream output yields text, thinking tokens, context window, an
     }),
     { type: "output_delta", text: "partial" },
   );
+  assert.deepEqual(progressItem({ type: "system", subtype: "init" }), {
+    type: "phase",
+    text: "Claude Code session ready; sending the prompt…",
+  });
   assert.equal(parseClaudeOutput("", "boom", 1, "default").isError, true);
+});
+
+test("a logged command line keeps flags and drops long values", async () => {
+  const { describeCommand } = await import(
+    "../desktop/lib/providers/common.mjs"
+  );
+  const line = describeCommand("/bin/claude", [
+    "-p",
+    "--system-prompt",
+    "You are a site assistant. ".repeat(20),
+  ]);
+  assert.ok(line.includes("-p --system-prompt"));
+  assert.ok(!line.includes("site assistant"));
+});
+
+test("the log buffer is bounded, ordered, and readable by sequence", async () => {
+  const { LogBuffer } = await import("../desktop/lib/logs.mjs");
+  const seen = [];
+  const logs = new LogBuffer({ limit: 3, sink: (entry) => seen.push(entry) });
+  for (const index of [1, 2, 3, 4]) logs.add("info", "codex", `line ${index}`);
+  assert.deepEqual(
+    logs.entries.map((entry) => entry.message),
+    ["line 2", "line 3", "line 4"],
+  );
+  assert.equal(seen.length, 4);
+  assert.deepEqual(
+    logs.since(3).map((entry) => entry.message),
+    ["line 4"],
+  );
+  assert.equal(logs.add("nonsense", "x", "y").level, "info");
+  logs.clear();
+  assert.deepEqual(logs.entries, []);
 });
 
 test("OpenCode verbose model listing yields limits and capabilities", async () => {
@@ -841,6 +1113,12 @@ test("OpenCode verbose model listing yields limits and capabilities", async () =
     vision: false,
     reasoning: true,
   });
+  // `opencode run` has no image input, so an image-capable upstream model is
+  // still advertised as text only rather than accepting bytes it would drop.
+  const imageCapable = parseModelList(
+    `x/sees\n{ "id": "sees", "capabilities": { "input": { "text": true, "image": true } } }\n`,
+  );
+  assert.equal(imageCapable[0].capabilities.vision, false);
   assert.equal(models[0].displayName, "Big Pickle (opencode/big-pickle)");
   assert.equal(models[1].contextWindow, null);
   assert.equal(models[1].capabilities.reasoning, false);

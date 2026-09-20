@@ -93,6 +93,7 @@ export async function detectProviders(settings = {}, { force = false } = {}) {
         supportsTools: adapter.supportsTools,
         supportsThreads: adapter.supportsThreads === true,
         supportsReasoning: adapter.supportsReasoning === true,
+        supportsVision: adapter.supportsVision === true,
         ...gate(adapter, info, settings),
         detectedAt: new Date().toISOString(),
       };

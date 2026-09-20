@@ -287,3 +287,56 @@ form {
   grid-column: 2;
   grid-row: 1 / span 2;
 }
+
+/* Diagnostics */
+.log-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.log-tabs {
+  display: flex;
+  gap: 6px;
+}
+.log-live {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.log-controls .actions {
+  margin-left: auto;
+}
+.log-view {
+  margin: 0;
+  padding: 12px 14px;
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  font:
+    12px/1.55 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+}
+.log-view:empty::before {
+  content: "Nothing logged yet.";
+  color: var(--faint);
+}
+.log-view .warn {
+  color: var(--warn);
+}
+.log-view .error {
+  color: var(--danger);
+}
+.log-view .debug {
+  color: var(--muted);
+}

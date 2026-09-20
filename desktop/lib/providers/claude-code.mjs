@@ -14,6 +14,7 @@ import {
   quotaFromWindows,
   isoFromString,
 } from "./common.mjs";
+import { IMAGE_LIMITS } from "../transcript.mjs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { readdirSync, rmdirSync, writeFileSync } from "node:fs";
@@ -24,6 +25,8 @@ export const vendor = "Anthropic";
 export const supportsTools = true;
 export const supportsThreads = true;
 export const supportsReasoning = true;
+// Claude Code takes images through its stream-json input format (see `start`).
+export const supportsVision = true;
 const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const LINKS = [
   {
@@ -45,7 +48,7 @@ const MODELS = [
   contextWindow: null,
   reasoningLevels: CLAUDE_EFFORTS,
   defaultReasoning: null,
-  capabilities: { tools: true, vision: false, reasoning: true },
+  capabilities: { tools: true, vision: true, reasoning: true },
 }));
 
 function parseAuth(stdout) {
@@ -147,7 +150,7 @@ export function parseClaudeProbe(messages) {
         defaultReasoning: null,
         capabilities: {
           tools: true,
-          vision: false,
+          vision: true,
           reasoning: model.supportsEffort !== false && levels.length > 0,
         },
       };
@@ -372,6 +375,19 @@ export function progressItem(event) {
     Number.isInteger(event.estimated_tokens)
   )
     return { type: "thinking", tokens: event.estimated_tokens };
+  // Lifecycle, so the browser can say what the wait is for (SPEC 12.3.1).
+  if (event.type === "system" && event.subtype === "init")
+    return {
+      type: "phase",
+      text: "Claude Code session ready; sending the prompt…",
+    };
+  if (event.type === "user")
+    return { type: "phase", text: "Claude Code is reading a tool result…" };
+  if (event.type === "result")
+    return {
+      type: "phase",
+      text: "Claude Code finished; collecting the answer…",
+    };
   return null;
 }
 
@@ -449,23 +465,57 @@ export function parseClaudeOutput(stdout, stderr, code, model) {
   };
 }
 
+/**
+ * One stream-json user message carrying the prompt and its image attachments.
+ * Claude Code's text input format has no room for an image, so a run with
+ * attachments switches to `--input-format stream-json` and sends this line
+ * instead of the bare prompt. Text-only runs keep the plain-text path.
+ */
+export function streamJsonUserMessage(prompt, images) {
+  return `${JSON.stringify({
+    type: "user",
+    message: {
+      role: "user",
+      content: [
+        { type: "text", text: prompt },
+        ...images.map((image) => ({
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: image.mediaType,
+            data: image.data,
+          },
+        })),
+      ],
+    },
+  })}\n`;
+}
+
 export function start({
   binary,
   model,
   systemPrompt,
   prompt,
+  images = [],
   mcp,
   onProgress,
+  onLog,
   thread = null,
   onThread,
   reasoning = null,
   scratch: sharedScratch = null,
 }) {
+  const say = (text) => {
+    onLog?.("debug", text);
+    onProgress?.({ type: "phase", text });
+  };
   // Claude Code keys saved sessions by working directory, so a thread keeps
   // its scratch directory for its whole life.
   const scratch = sharedScratch ?? scratchDirectory("claude");
+  const attachments = images.slice(0, IMAGE_LIMITS.perPrompt);
   const args = [
     "-p",
+    ...(attachments.length ? ["--input-format", "stream-json"] : []),
     "--output-format",
     "stream-json",
     "--include-partial-messages",
@@ -516,11 +566,23 @@ export function start({
     // Without an explicit empty server list Claude Code would load the user's own MCP servers.
     args.push("--mcp-config", JSON.stringify({ mcpServers: {} }));
   if (handle) onThread?.(handle);
+  say(
+    thread?.handle
+      ? "Resuming the saved Claude Code session…"
+      : "Launching the Claude Code CLI…",
+  );
+  onLog?.(
+    "info",
+    `claude -p: model ${model ?? "default"}${effort ? `, effort ${effort}` : ""}${mcp ? ", browser tools bridged over MCP" : ""}${thread?.handle ? ", resumed session" : ""}`,
+  );
   let streamedReasoning = false;
   return spawnAgent({
     binary,
     args,
-    stdin: prompt,
+    onLog,
+    stdin: attachments.length
+      ? streamJsonUserMessage(prompt, attachments)
+      : prompt,
     cwd: scratch.directory,
     env: {
       MCP_TOOL_TIMEOUT: "600000",

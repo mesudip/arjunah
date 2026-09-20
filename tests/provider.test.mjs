@@ -397,6 +397,67 @@ test("compatibility setting leaves plain chat and other model families unchanged
   }
 });
 
+test("a vision desktop provider forwards image parts beside the flattened text", async () => {
+  const originalFetch = globalThis.fetch;
+  const pixel =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  let seen;
+  globalThis.fetch = async (url, init) => {
+    seen = JSON.parse(init.body);
+    return Response.json({
+      id: "desk-1",
+      model: "claude-code/opus",
+      message: { role: "assistant", content: "red", toolCalls: [] },
+      finishReason: "stop",
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+    });
+  };
+  const config = {
+    kind: "desktop",
+    baseUrl: "http://127.0.0.1:48123",
+    token: "desktop-token-abcdefghijklmnop",
+    providerId: "claude-code",
+    providerName: "Claude Code",
+    model: "opus",
+    capabilities: { tools: true, vision: true },
+  };
+  const request = {
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "What colour?" },
+          { type: "image", mediaType: "image/png", data: pixel },
+        ],
+      },
+    ],
+  };
+  try {
+    await generate(config, request);
+    assert.equal(seen.messages[0].content, "What colour?\n[image]");
+    assert.deepEqual(seen.messages[0].images, [
+      { mediaType: "image/png", data: pixel },
+    ]);
+    // The same provider without vision refuses the request outright rather than
+    // sending a prompt whose picture has silently become the text "[image]".
+    await assert.rejects(
+      generate(
+        { ...config, capabilities: { tools: true, vision: false } },
+        request,
+      ),
+      (error) => error.code === "NOT_SUPPORTED",
+    );
+    seen = undefined;
+    await generate(
+      { ...config, capabilities: { tools: true, vision: false } },
+      { messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] },
+    );
+    assert.equal(seen.messages[0].images, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("desktop provider configurations dispatch to the paired desktop app with the bearer token", async () => {
   const originalFetch = globalThis.fetch;
   let seen;

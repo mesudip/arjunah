@@ -566,6 +566,21 @@ function desktopMock(b, options = {}) {
         total: 0,
         done: true,
       });
+    if (target.pathname === "/api/logs")
+      return Response.json({
+        version: "0.2.0",
+        device: "Mac",
+        latest: 2,
+        entries: [
+          {
+            seq: 2,
+            at: "2026-01-01T00:00:00.000Z",
+            level: "debug",
+            source: "claude-code",
+            message: "Starting Claude Code…",
+          },
+        ],
+      });
     if (target.pathname === "/api/generate")
       return state.generate
         ? state.generate(payload)
@@ -1411,4 +1426,72 @@ test("a companion that forgot this browser's pairing is reported as unpaired, no
   const settings = await b.ok("hosted.settings");
   assert.equal(settings.model, null);
   assert.equal(settings.desktop.accepted, false);
+});
+
+test("a desktop phase reaches the widget as a live label and both logs stay metadata-only", async (t) => {
+  const b = await broker(t);
+  const mock = desktopMock(b);
+  mock.progress = [
+    { type: "phase", text: "Checking Claude Code on this computer…" },
+    { type: "output_delta", text: "moon-garden-answer" },
+  ];
+  await b.ok("desktop.pair", { code: "123456" }, b.extension);
+  await b.ok(
+    "provider.select",
+    { type: "desktop", providerId: "claude-code", model: "sonnet" },
+    b.extension,
+  );
+  const params = await b.prepare(manifest);
+  await b.ok("chat.complete", { ...params, turnId: "turn-9" });
+  const phases = b.events.filter((event) => event.type === "agent.phase");
+  assert.deepEqual(
+    phases.map((event) => event.text),
+    ["Checking Claude Code on this computer…"],
+  );
+  assert.equal(phases[0].provider, "Claude Code");
+
+  // Settings read both logs; neither carries the conversation.
+  const logs = await b.ok("logs.get", {}, b.extension);
+  const lines = logs.entries.map((entry) => entry.message);
+  assert.ok(
+    lines.some((line) => line.includes("round 0 → claude-code/sonnet")),
+  );
+  assert.ok(lines.some((line) => /answered in \d+ms/.test(line)));
+  assert.ok(
+    !JSON.stringify(logs).includes("moon-garden-answer"),
+    "model output never reaches the diagnostic log",
+  );
+  assert.equal(logs.desktop.available, true);
+  assert.deepEqual(
+    logs.desktop.entries.map((entry) => entry.message),
+    ["Starting Claude Code…"],
+  );
+  assert.equal(
+    (await b.call("logs.get", {}, b.sender())).error.code,
+    "PERMISSION_REQUIRED",
+    "only extension pages may read the log",
+  );
+  const desktopCleared = await b.ok(
+    "logs.clear",
+    { target: "desktop" },
+    b.extension,
+  );
+  assert.deepEqual(
+    desktopCleared.entries.map((entry) => entry.message),
+    lines,
+    "clearing the selected desktop log leaves the extension log intact",
+  );
+  assert.ok(
+    b.requests.some(
+      (request) =>
+        new URL(request.url).pathname === "/api/logs" &&
+        request.init.method === "DELETE",
+    ),
+  );
+  const cleared = await b.ok(
+    "logs.clear",
+    { target: "extension" },
+    b.extension,
+  );
+  assert.ok(cleared.entries.length <= 1);
 });

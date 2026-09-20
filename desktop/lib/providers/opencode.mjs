@@ -17,6 +17,9 @@ export const id = "opencode";
 export const name = "OpenCode";
 export const vendor = "OpenCode";
 export const supportsTools = true;
+// `opencode run` takes its prompt on stdin and offers no image input, so no
+// OpenCode model advertises vision even when the upstream model accepts images.
+export const supportsVision = false;
 export const supportsThreads = true;
 export const supportsReasoning = true;
 const LINKS = [
@@ -76,7 +79,8 @@ export function parseModelList(stdout) {
       defaultReasoning: null,
       capabilities: {
         tools: meta?.capabilities?.toolcall !== false,
-        vision: meta?.capabilities?.input?.image === true,
+        // The upstream model may accept images; this run path cannot deliver one.
+        vision: false,
         reasoning: meta?.capabilities?.reasoning === true,
       },
     });
@@ -255,11 +259,17 @@ export function start({
   prompt,
   mcp,
   onProgress,
+  onLog,
   thread = null,
   onThread,
   reasoning = null,
   scratch: sharedScratch = null,
 }) {
+  const say = (text) => {
+    onLog?.("debug", text);
+    onProgress?.({ type: "phase", text });
+  };
+  say("Preparing a sandboxed workspace for OpenCode…");
   const scratch = sharedScratch ?? scratchDirectory("opencode");
   const deny = Object.fromEntries(BUILTIN_TOOLS.map((tool) => [tool, "deny"]));
   const tools = Object.fromEntries(BUILTIN_TOOLS.map((tool) => [tool, false]));
@@ -311,10 +321,21 @@ export function start({
   if (thread?.handle) args.push("--session", thread.handle);
   const effort = effortOf(reasoning, ["low", "medium", "high", "max"]);
   if (effort) args.push("--variant", effort);
+  say(
+    thread?.handle
+      ? "Resuming the saved OpenCode session…"
+      : "Launching the OpenCode CLI…",
+  );
+  onLog?.(
+    "info",
+    `opencode run: model ${model ?? "default"}${effort ? `, variant ${effort}` : ""}${mcp ? ", browser tools bridged over MCP" : ""}${thread?.handle ? ", resumed session" : ""}`,
+  );
   let announced = false;
+  let working = false;
   return spawnAgent({
     binary,
     args,
+    onLog,
     stdin: prompt,
     cwd: scratch.directory,
     env: { OPENCODE_CONFIG: configPath, OPENCODE_DISABLE_AUTOUPDATE: "1" },
@@ -323,6 +344,13 @@ export function start({
       if (!announced && typeof event?.sessionID === "string") {
         announced = true;
         onThread?.(event.sessionID.slice(0, 80));
+      }
+      if (onProgress && !working && event?.type) {
+        working = true;
+        onProgress({
+          type: "phase",
+          text: "OpenCode is working on the answer…",
+        });
       }
       if (
         onProgress &&

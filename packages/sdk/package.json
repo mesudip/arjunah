@@ -1,6 +1,6 @@
 {
   "name": "arjunah",
-  "version": "1.0.0-alpha.2",
+  "version": "1.0.0-alpha.3",
   "description": "TypeScript SDK and types for अर्जुनः (Arjunah): let your website use the AI your visitor already has, through window.ai.arjunah.",
   "repository": {
     "type": "git",

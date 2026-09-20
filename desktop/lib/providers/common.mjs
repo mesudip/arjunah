@@ -103,8 +103,22 @@ export function scratchDirectory(prefix) {
 }
 
 /**
+ * A command line safe to log: flags stay, long values (a system prompt, a file
+ * path) become a placeholder, so the diagnostic log never carries page content.
+ */
+export function describeCommand(binary, args) {
+  const shown = args.map((arg) => {
+    const text = String(arg);
+    return text.length > 60 ? `<${text.length} chars>` : text;
+  });
+  return `${binary} ${shown.join(" ")}`.slice(0, 480);
+}
+
+/**
  * Spawns a CLI agent and resolves with its parsed output. `parse(stdout, stderr, code)`
- * returns { content, usage, model, isError, errorMessage }.
+ * returns { content, usage, model, isError, errorMessage }. `onLog(level, message)`
+ * receives the process lifecycle and whatever the CLI writes to stderr, which is
+ * how a stuck run becomes explainable.
  */
 export function spawnAgent({
   binary,
@@ -115,7 +129,17 @@ export function spawnAgent({
   parse,
   onExit,
   onLine,
+  onLog,
 }) {
+  const startedAt = Date.now();
+  const say = (level, message) => {
+    try {
+      onLog?.(level, message);
+    } catch {
+      /* diagnostics never break a run */
+    }
+  };
+  say("debug", `spawning ${describeCommand(binary, args)}`);
   const child = spawn(binary, args, {
     env: cleanEnv(env),
     cwd,
@@ -144,14 +168,29 @@ export function spawnAgent({
       }
     }
   });
+  let loggedErrorLines = 0;
   child.stderr.on("data", (chunk) => {
     if (stderr.length < 200_000) stderr += chunk;
+    if (!onLog) return;
+    for (const line of String(chunk).split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || loggedErrorLines >= 40) continue;
+      loggedErrorLines++;
+      // stderr is where these CLIs put ordinary chatter as well as failures,
+      // so it is not a warning by itself; a bad exit status is logged as one.
+      say("info", `stderr: ${trimmed.slice(0, 300)}`);
+    }
   });
   const output = new Promise((resolve, reject) => {
-    child.on("error", (error) =>
-      reject(new Error(`Could not start the agent CLI: ${error.message}`)),
-    );
+    child.on("error", (error) => {
+      say("error", `could not start ${binary}: ${error.message}`);
+      reject(new Error(`Could not start the agent CLI: ${error.message}`));
+    });
     child.on("close", (code) => {
+      say(
+        code === 0 ? "debug" : "warn",
+        `exited with status ${code} after ${Date.now() - startedAt}ms`,
+      );
       onExit?.();
       try {
         resolve(parse(stdout, stderr, code));

@@ -3,6 +3,34 @@
 
 const PROMPT_LIMIT = 200_000;
 
+// Image attachments travel beside the flattened text, because a CLI agent takes
+// one prompt on stdin and cannot be handed a content-part array. Each adapter
+// decides how to deliver them (a base64 block for Claude Code, a scratch file
+// for Codex); the bounds here match the browser-side ones in src/lib/constants.js.
+export const IMAGE_MEDIA_TYPES = Object.freeze([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+]);
+export const IMAGE_LIMITS = Object.freeze({
+  perMessage: 4,
+  perPrompt: 8,
+  dataChars: 2_000_000,
+});
+
+/**
+ * The images carried by the messages that make up one prompt, in order. A
+ * replayed conversation can hold more than one turn's worth, so the most recent
+ * survive: they are the ones the final user message is asking about.
+ */
+export function collectImages(messages, limit = IMAGE_LIMITS.perPrompt) {
+  const images = [];
+  for (const message of messages)
+    for (const image of message.images ?? []) images.push(image);
+  return images.slice(-limit);
+}
+
 function toolCallText(call) {
   return `[assistant requested tool "${call.function.name}" (id ${call.id}) with arguments ${call.function.arguments}]`;
 }

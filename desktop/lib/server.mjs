@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Store } from "./store.mjs";
 import { Pairing } from "./pairing.mjs";
 import { SessionRegistry } from "./sessions.mjs";
+import { LogBuffer } from "./logs.mjs";
 import {
   detectProviders,
   adapterFor,
@@ -14,8 +15,11 @@ import {
 import {
   buildPrompt,
   buildContinuation,
+  collectImages,
   splitMessages,
   trailingToolResults,
+  IMAGE_LIMITS,
+  IMAGE_MEDIA_TYPES,
 } from "./transcript.mjs";
 import { EFFORTS, scratchDirectory } from "./providers/common.mjs";
 import {
@@ -29,7 +33,9 @@ import { enrichProviders, mapT3Providers } from "./t3/catalog.mjs";
 export const APP_NAME = "arjunah-desktop";
 export const APP_VERSION = "1.0.0";
 export const PROTOCOL_VERSION = "1.0.0";
-const BODY_LIMIT = 5_000_000;
+// Matches the extension's own request ceiling (LIMITS.requestBytes), so a turn
+// carrying the maximum image payload is not cut off at this hop.
+const BODY_LIMIT = 12_000_000;
 const EXTENSION_ORIGIN = /^(chrome|moz|safari-web)-extension:\/\/[a-z0-9-]+$/i;
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const WS_PROTOCOL = "arjunah.v1";
@@ -107,6 +113,18 @@ export function createDesktopApp({
   const sessions = new SessionRegistry();
   const dashboardToken = randomBytes(24).toString("base64url");
   const activity = [];
+  // Diagnostics, separate from `activity`: activity is the short list of things
+  // that happened to the user's account, the log is the running commentary a
+  // paired browser or the dashboard shows when a run seems stuck.
+  const logs = new LogBuffer({
+    sink: (entry) =>
+      log(
+        `${entry.level === "info" ? "" : `${entry.level} `}${entry.source}: ${entry.message}`,
+      ),
+  });
+  function note(level, source, message) {
+    return logs.add(level, source, message);
+  }
   // Live agent activity per browser turn, polled by the extension while a
   // generate call is in flight. Keyed by the browser-supplied progress id.
   const progress = new Map();
@@ -122,22 +140,45 @@ export function createDesktopApp({
     if (!progress.has(id)) {
       if (progress.size >= PROGRESS_LIMIT)
         progress.delete(progress.keys().next().value);
-      progress.set(id, { items: [], updatedAt: Date.now(), done: false });
+      progress.set(id, {
+        items: [],
+        updatedAt: Date.now(),
+        done: false,
+        // How many items the browser has already collected. Text is only ever
+        // merged into an item it has not seen, so nothing appended after a poll
+        // is silently lost.
+        sent: 0,
+      });
     }
     return progress.get(id);
   }
   function pushProgress(live, item) {
     if (!live || !item || typeof item !== "object") return;
     const last = live.items.at(-1);
+    const unsent = live.items.length > live.sent;
     if (
+      unsent &&
       ["output_delta", "reasoning_delta"].includes(item.type) &&
       last?.type === item.type &&
       typeof last.text === "string" &&
       last.text.length + String(item.text ?? "").length <= 4000
     )
       last.text += String(item.text ?? "");
+    // A phase is the one-line answer to "what is it doing now"; repeating the
+    // same line adds nothing.
+    else if (
+      item.type === "phase" &&
+      last?.type === "phase" &&
+      last.text === item.text
+    )
+      return;
     else if (live.items.length < 200) live.items.push(item);
     live.updatedAt = Date.now();
+  }
+  /** Says what the run is waiting on, both to the browser and to the log. */
+  function phase(live, source, text) {
+    note("debug", source, text);
+    pushProgress(live, { type: "phase", text: String(text).slice(0, 200) });
   }
   const resolveAdapter = adapters ?? adapterFor;
   let server = null;
@@ -333,10 +374,15 @@ export function createDesktopApp({
     };
   }
 
+  const WARNING_KINDS = new Set(["pair-failed", "t3-error"]);
   function record(kind, detail) {
     activity.push({ at: new Date().toISOString(), kind, detail });
     if (activity.length > 100) activity.shift();
-    log(`${kind}: ${detail}`);
+    note(
+      kind === "error" ? "error" : WARNING_KINDS.has(kind) ? "warn" : "info",
+      kind,
+      detail,
+    );
     publish("activity");
   }
 
@@ -558,6 +604,32 @@ export function createDesktopApp({
       };
       if (message.tool_call_id != null)
         item.tool_call_id = String(message.tool_call_id).slice(0, 128);
+      if (Array.isArray(message.images) && message.images.length) {
+        if (message.role !== "user")
+          throw new HttpError(
+            400,
+            "INVALID_REQUEST",
+            "Only user messages can carry images.",
+          );
+        item.images = message.images
+          .slice(0, IMAGE_LIMITS.perMessage)
+          .map((image) => {
+            const mediaType = String(image?.mediaType ?? "");
+            const data = String(image?.data ?? "");
+            if (
+              !IMAGE_MEDIA_TYPES.includes(mediaType) ||
+              !data ||
+              data.length > IMAGE_LIMITS.dataChars ||
+              !/^[A-Za-z0-9+/]+={0,2}$/.test(data)
+            )
+              throw new HttpError(
+                400,
+                "INVALID_REQUEST",
+                "An image attachment is invalid.",
+              );
+            return { mediaType, data };
+          });
+      }
       if (Array.isArray(message.tool_calls))
         item.tool_calls = message.tool_calls.slice(0, 32).map((call) => ({
           id: String(call?.id ?? "").slice(0, 128),
@@ -637,9 +709,23 @@ export function createDesktopApp({
         "tool-results",
         `${client.name}: ${results.length} result(s) returned to ${adapter.name}`,
       );
+      phase(
+        live,
+        providerId,
+        `Handing the tool result back to ${adapter.name}…`,
+      );
       session.resume(results);
     } else {
+      // Detection can be slow the first time (a version check, a login check,
+      // and an account probe), and until now the browser saw only a spinner.
+      phase(live, providerId, `Checking ${adapter.name} on this computer…`);
+      const startedAt = Date.now();
       const info = await providerInfo(providerId);
+      note(
+        "debug",
+        providerId,
+        `detection finished in ${Date.now() - startedAt}ms (installed: ${Boolean(info?.installed)}, available: ${Boolean(info?.available)})`,
+      );
       if (!info?.installed)
         throw new HttpError(
           400,
@@ -663,6 +749,9 @@ export function createDesktopApp({
         .digest("hex");
       let thread = null;
       let prompt = fullPrompt;
+      // Images belong to the messages this prompt actually carries, so a resumed
+      // thread attaches only what arrived since the agent last saw the chat.
+      let promptImages = collectImages(conversation);
       let resumeHandle = null;
       if (threadId && adapter.supportsThreads) {
         const existing = threads.get(threadId);
@@ -679,6 +768,7 @@ export function createDesktopApp({
         if (thread) {
           resumeHandle = thread.handle;
           prompt = buildContinuation(conversation.slice(thread.seen));
+          promptImages = collectImages(conversation.slice(thread.seen));
         } else {
           thread = {
             providerId,
@@ -705,7 +795,14 @@ export function createDesktopApp({
         : null;
       record(
         "generate",
-        `${client.name} → ${adapter.name} (${selectedModel})${tools.length ? `, ${tools.length} tool(s)` : ""}${resumeHandle ? ", resumed thread" : thread ? ", new thread" : ""}${reasoning ? `, reasoning ${reasoning}` : ""}`,
+        `${client.name} → ${adapter.name} (${selectedModel})${tools.length ? `, ${tools.length} tool(s)` : ""}${info.supportsVision && promptImages.length ? `, ${promptImages.length} image(s)` : ""}${resumeHandle ? ", resumed thread" : thread ? ", new thread" : ""}${reasoning ? `, reasoning ${reasoning}` : ""}`,
+      );
+      phase(
+        live,
+        providerId,
+        resumeHandle
+          ? `Resuming the ${adapter.name} session…`
+          : `Starting ${adapter.name}…`,
       );
       try {
         session.attach(
@@ -714,6 +811,9 @@ export function createDesktopApp({
             model: selectedModel,
             systemPrompt,
             prompt,
+            // The browser already refuses images for a provider without vision;
+            // dropping them here too keeps the adapters free of that check.
+            images: info.supportsVision ? promptImages : [],
             mcp,
             tools,
             reasoning,
@@ -723,6 +823,7 @@ export function createDesktopApp({
               if (thread && typeof handle === "string") thread.handle = handle;
             },
             onProgress: live ? (item) => pushProgress(live, item) : undefined,
+            onLog: (level, message) => note(level, providerId, message),
           }),
         );
       } catch (error) {
@@ -737,6 +838,7 @@ export function createDesktopApp({
     }
     const event = await session.nextEvent();
     if (live && event.type !== "tool_calls") live.done = true;
+    else if (live) phase(live, providerId, "Running the tools it asked for…");
     if (session.thread && (event.type === "error" || event.type === "timeout"))
       for (const [id, item] of threads)
         if (item === session.thread) endThread(id);
@@ -956,11 +1058,40 @@ export function createDesktopApp({
       const id = path.slice("/api/progress/".length);
       const entry = /^[A-Za-z0-9_-]{1,100}$/.test(id) ? progress.get(id) : null;
       const after = Math.max(0, Number(url.searchParams.get("after")) || 0);
+      const items = entry ? entry.items.slice(after, after + 50) : [];
+      if (entry) entry.sent = Math.max(entry.sent ?? 0, after + items.length);
       return send(response, 200, {
-        items: entry ? entry.items.slice(after, after + 50) : [],
+        items,
         total: entry ? entry.items.length : 0,
         done: entry ? entry.done : false,
       });
+    }
+    if (path === "/api/logs") {
+      // Readable by a paired browser or by the dashboard: both are the person
+      // sitting at this computer, and the buffer holds no prompts or secrets.
+      if (request.headers["x-dashboard-token"] != null)
+        requireDashboard(request);
+      else requireClient(request);
+      if (request.method === "GET") {
+        const after = Math.max(0, Number(url.searchParams.get("after")) || 0);
+        const limit = Math.max(
+          1,
+          Math.min(500, Number(url.searchParams.get("limit")) || 200),
+        );
+        const entries = logs.since(after, limit);
+        return send(response, 200, {
+          entries,
+          latest: logs.seq,
+          version: APP_VERSION,
+          device: store.data.deviceName,
+        });
+      }
+      if (request.method === "DELETE") {
+        logs.clear();
+        note("info", "logs", "log cleared from the browser");
+        return send(response, 200, { ok: true });
+      }
+      return send(response, 405, "Method not allowed.");
     }
     if (path === "/api/generate" && request.method === "POST") {
       const client = requireClient(request);
@@ -1015,6 +1146,7 @@ export function createDesktopApp({
           settings: maskedSettings(),
           t3: t3Status(),
           activity: [...activity].reverse(),
+          logs: logs.since(0, 200),
           dataPath: store.path,
         });
       }
@@ -1157,6 +1289,7 @@ export function createDesktopApp({
     pairing,
     sessions,
     activity,
+    logs,
     dashboardToken,
     providers(options) {
       return refreshProviderView(options);

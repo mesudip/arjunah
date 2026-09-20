@@ -1,5 +1,34 @@
 # Project progress
 
+## 2026-09-20 — 1.0.0-alpha.3
+
+- Prepared the next alpha release with desktop image input for Claude Code and Codex, visible run phases, local diagnostics in extension settings and the desktop dashboard, and the diagnostic follow-up fixes below.
+- Package versions and the Chrome display version moved to `1.0.0-alpha.3`; the protocol and runtime version remain `1.0.0` and the specification remains on the `1.0.0-alpha` channel.
+
+## 2026-09-20 — diagnostic follow-up review
+
+- Fixed a service-worker wake race in the extension diagnostic buffer: restoration now begins when the module loads, pending entries are sequenced after the restored range, persistence waits for restoration, and clearing cannot be undone by a late restore.
+- The Diagnostics card's **Clear** action now clears only the selected Extension or Desktop app log. Previously clearing the desktop tab also erased the extension log.
+- These were manual-review fixes. The already-green automated suites were not rerun.
+
+## 2026-09-20 — run phases in the widget, diagnostic logs in settings and the dashboard
+
+- **The symptom.** A Codex turn showed “Asking GPT-5.6-Sol… 26.2s” and nothing else. The wait is real work — a version check, a login check, an account probe, a sandbox profile, the CLI launch, and an MCP startup — but none of it was reported, so a slow start was indistinguishable from a hang.
+- **Phases (SPEC 12.3.1, 14.3).** Progress items gained `{ type: "phase", text }`, which the renderer shows as the live turn label. The companion emits one before provider detection (with how long detection took in the log), before launch, and on resume; each adapter emits one when it prepares its workspace, bridges tools, and launches; and the CLI's own lifecycle events become phases: Codex `thread.started`, `turn.started`, `item.started` (reasoning, message, tool call, web search) and `turn.completed`, Claude Code's `system/init`, `user` and `result`, and OpenCode's first streamed event.
+- **A delta bug the phases exposed.** `pushProgress` merged adjacent text into the last item even after the browser had polled it, so anything appended after a poll was never delivered. Items are now merged only while still uncollected; the route records how far the browser has read.
+- **Diagnostics (SPEC 12.3.2).** The companion keeps a bounded log (`desktop/lib/logs.mjs`) served at `GET /api/logs`, and the extension keeps its own (`src/lib/logs.js`, mirrored to session storage so a service-worker restart does not lose it). Extension settings gained a Diagnostics card with both, a live refresh, copy, and clear; the desktop dashboard shows its own beside the activity list. Adapters now report the CLI's stderr and exit status into the log, which is where a `codex login` problem or a failed MCP startup will surface.
+- **What is not logged.** Prompts, model output, tool arguments and results, page context, keys, and pairing tokens. A logged command line keeps its flags and elides any value over 60 characters, which is what keeps `--system-prompt` out of it. Neither log leaves the machine and neither is part of sync.
+- **Verification.** `npm run check` (142 unit tests, static checks, formatting). Widget E2E asserts a backend `agent.phase` becomes the live label; desktop E2E reads both logs through the real settings page in Chrome and asserts the prompt is absent from the companion's.
+
+## 2026-09-20 — image input for Claude Code and Codex
+
+- **The flag was honest, the plumbing was the limit.** Desktop providers reported `supportsVision: false` because the companion hands a CLI one text prompt on stdin, and `src/lib/desktop.js` flattened every image part to the string `[image]`. Both CLIs accept pictures; only this run path did not.
+- **Claude Code.** A run with attachments switches to `--input-format stream-json` and writes one user message carrying the prompt plus base64 image blocks. Text-only runs keep the plain-text stdin path, so the well-tested route is unchanged. Verified live against `claude` 2.1.269: a 64×64 red PNG came back "Red", and the `result` event shape `parseClaudeOutput` reads is identical.
+- **Codex.** `codex exec` takes images as files, so each attachment is written into the run's scratch directory and passed with `-i`. `-i` follows `resume` on a resumed thread because the subcommand parses it. Verified live against `codex-cli` 0.155.0-alpha.2.6. Per-model vision now comes from the catalog's `input_modalities` and from `model/list`'s image flag, both of which the adapter previously read and threw away.
+- **OpenCode stays text only.** It was the one provider that leaked an unusable capability: `parseModelList` copied the upstream model's image flag, per-model capabilities win over the provider flag in `src/lib/catalog.js`, so an OpenCode vision model showed the attach button and the picture then became the literal text `[image]`. It is now pinned to `vision: false` with the reason in a comment, since `opencode run` has no image input to deliver one.
+- **Wire.** A user message may carry `images: [{ mediaType, data }]`, at most four per message and eight per prompt, bounded in the browser and again in the companion, refused on non-user roles, and dropped for a provider without vision. The companion's body limit rose from 5 MB to 12 MB to match the extension's own `requestBytes`. SPEC 12.2 and 12.3 describe it; SECURITY.md carries the bounds as a property and OpenCode as the remaining limitation.
+- **Verification.** `npm run check`: static checks, formatting, and 138 unit tests pass, including new coverage for the vision and no-vision companion paths, the attachment bounds, the newest-first prompt image collector, both adapters' delivery shapes, the OpenCode pin, and the extension forwarding images beside the flattened text.
+
 ## 2026-09-20 — renderer-owned model picker, `@` entity mentions, standalone collected inputs, host callbacks; protocol renumbered to v1
 
 - **Version numbering corrected.** The only published packages are `arjunah@1.0.0-alpha.1` and `arjunah-desktop@1.0.0-alpha.1`; the repository had run ahead to 1.2.0-alpha.1 without a release. Everything is now 1.0.0 with packages at `1.0.0-alpha.2`, and SPEC.md describes a single v1 rather than 1.1/1.2/1.3 eras. The conformance list, `docs/CONFORMANCE.md`, and the two `hosted-1.2` test files (now `hosted-surfaces`) lost their era labels with it. Entries below this one keep the version numbers they were written under.

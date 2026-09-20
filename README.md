@@ -88,6 +88,6 @@ The repository is an npm workspace: the extension in `src/`, the shared chat ren
 
 ## Status
 
-1.0.0-alpha.2. Chrome Manifest V3 and Firefox Manifest V3 are tested targets; the desktop app has been exercised on macOS with OpenCode, Codex, and Claude Code and on the fake-agent end-to-end suite. Linux and Windows autostart are implemented and unit-tested but not yet exercised on real machines. This is not an independent security certification; see [docs/REMEDIATION.md](docs/REMEDIATION.md) for the audit findings and their regression tests.
+1.0.0-alpha.3. Chrome Manifest V3 and Firefox Manifest V3 are tested targets; the desktop app has been exercised on macOS with OpenCode, Codex, and Claude Code and on the fake-agent end-to-end suite. Linux and Windows autostart are implemented and unit-tested but not yet exercised on real machines. This is not an independent security certification; see [docs/REMEDIATION.md](docs/REMEDIATION.md) for the audit findings and their regression tests.
 
 License: MIT.

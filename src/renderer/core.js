@@ -1260,6 +1260,11 @@ var ArjunahRenderer = (function () {
           if (!step.card.querySelector("pre"))
             step.card.append(preBlock("Output", step.record.result));
         }
+      } else if (type === "agent.phase") {
+        // A host that knows what its agent is doing says so here; without it a
+        // long first round would show only a spinner and a rising clock.
+        const text = String(event.text ?? "").slice(0, LIMITS.progressChars);
+        if (text) turn.label = text;
       } else if (type === "agent.thinking") {
         turn.label = `${event.provider ?? "The model"} is thinking (~${Number(event.tokens).toLocaleString()} tokens)…`;
       } else if (

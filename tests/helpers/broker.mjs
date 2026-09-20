@@ -15,6 +15,8 @@ export async function broker(t) {
     sessions: new Map(),
     requests: [],
     invocations: [],
+    // Live turn events the background sends to the content script (SPEC 10).
+    events: [],
     hooks: {},
     removed: null,
   };
@@ -55,6 +57,11 @@ export async function broker(t) {
       },
       async sendMessage(tabId, message, options) {
         const active = state.sessions.get(tabId);
+        // Live turn events carry only the session, as the content script expects.
+        if (message.kind === "arjunah-progress") {
+          if (active?.session === message.session) state.events.push(message);
+          return { ok: true };
+        }
         const matches =
           active &&
           options.frameId === 0 &&

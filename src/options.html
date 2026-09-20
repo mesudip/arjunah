@@ -163,6 +163,58 @@
         <p id="grant-status" class="status" role="status"></p>
       </section>
 
+      <section class="card" id="logs-section">
+        <div class="section-head">
+          <h2>Diagnostics</h2>
+          <span class="eyebrow">Logs</span>
+        </div>
+        <p class="help">
+          What the extension and the desktop app are doing, newest last. Useful
+          when a reply takes a long time: the desktop log names the stage a
+          local agent is in. Entries hold names, models, counts, and timings
+          only — never prompts, replies, keys, or page content. They stay in
+          this browser and on this computer.
+        </p>
+        <div class="log-controls">
+          <div class="log-tabs" role="tablist">
+            <button
+              type="button"
+              id="log-tab-extension"
+              class="btn btn-secondary"
+              role="tab"
+              aria-selected="true"
+            >
+              Extension
+            </button>
+            <button
+              type="button"
+              id="log-tab-desktop"
+              class="btn btn-ghost"
+              role="tab"
+              aria-selected="false"
+            >
+              Desktop app
+            </button>
+          </div>
+          <label class="log-live"
+            ><input id="log-live" type="checkbox" /> Keep refreshing</label
+          >
+          <div class="actions">
+            <button type="button" id="log-clear" class="btn btn-danger">
+              Clear
+            </button>
+            <button type="button" id="log-copy" class="btn btn-secondary">
+              Copy
+            </button>
+            <button type="button" id="log-refresh" class="btn btn-primary">
+              Refresh
+            </button>
+          </div>
+        </div>
+        <pre id="log-view" class="log-view" tabindex="0"></pre>
+        <p id="log-status" class="status" role="status"></p>
+      </section>
+
       <section class="card">
         <div class="section-head">
           <h2>Protocol</h2>
