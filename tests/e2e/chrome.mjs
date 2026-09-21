@@ -763,13 +763,13 @@ try {
   // (see providerHeaders in lib/provider.js).
   for (const [model, path, answer, credential] of [
     [
-      "opencode/gpt-5.6-luna",
+      "opencode-api/gpt-5.6-luna",
       "/responses",
       "Zen Responses answer.",
       { authorization: "Bearer zen-e2e-secret", apiKey: undefined },
     ],
     [
-      "opencode/claude-sonnet-4-6",
+      "opencode-api/claude-sonnet-4-6",
       "/messages",
       "Zen Anthropic answer.",
       { authorization: undefined, apiKey: "zen-e2e-secret" },

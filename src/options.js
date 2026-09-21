@@ -632,7 +632,7 @@ function renderProviders() {
   openaiCard.append(openaiControls);
   cards.push(openaiCard);
   const openCodeProvider = catalog?.providers.find(
-    (provider) => provider.id === "opencode",
+    (provider) => provider.id === "opencode-api",
   );
   const openCodeCard = element("div", null, "provider");
   openCodeCard.classList.toggle("available", Boolean(opencodeExisting));
@@ -661,7 +661,7 @@ function renderProviders() {
       "meta",
     ),
   );
-  if (opencodeExisting) openCodeCard.append(renderStats("opencode"));
+  if (opencodeExisting) openCodeCard.append(renderStats("opencode-api"));
   const openCodeControls = element("div", null, "controls");
   const openCodeSelect = modelCombo({
     label: "OpenCode model",

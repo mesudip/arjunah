@@ -255,12 +255,13 @@ var ArjunahRenderer = (function () {
     .compose-control{height:32px;border:0;border-radius:10px;background:transparent;color:var(--ink);cursor:pointer;display:inline-flex;align-items:center;gap:6px;padding:0 8px;white-space:nowrap;font-size:12.5px}
     .compose-control:hover,.compose-control[aria-expanded=true]{background:var(--surface)}.compose-control:disabled{opacity:.45;cursor:default}
     .attach.compose-control{width:32px;padding:0;justify-content:center;font-size:19px}.context-toggle{padding:0;width:32px;justify-content:center;font-size:16px}.context-toggle input{position:absolute;opacity:0;pointer-events:none}.context-toggle:has(input:checked){background:var(--surface-strong);color:var(--accent)}
-    .model-picker{position:relative;min-width:0}.model-button{max-width:190px}.model-label{overflow:hidden;text-overflow:ellipsis}.chevron{font-size:13px;color:var(--muted)}
+    .model-picker{position:relative;min-width:0}.model-button{max-width:210px}.model-label{overflow:hidden;text-overflow:ellipsis}.chevron{font-size:13px;color:var(--muted)}
     .model-menu{position:absolute;left:0;bottom:calc(100% + 10px);z-index:8;width:min(330px,calc(100vw - 70px));max-height:360px;display:flex;flex-direction:column;padding:8px;border:1px solid var(--line);border-radius:17px;background:var(--bg);box-shadow:0 20px 50px #0f172a2b,0 2px 8px #0f172a12;animation:popover-in .15s ease both}
     .model-search{flex:none;width:100%;box-sizing:border-box;margin-bottom:6px;height:32px;padding:0 10px;border:1px solid var(--line);border-radius:11px;background:var(--surface);color:var(--ink);font:inherit;font-size:13px;outline:0}.model-search:focus{border-color:var(--accent)}
     .model-list{flex:1 1 auto;min-height:0;overflow:auto}
     .menu-title{padding:7px 10px 8px;color:var(--muted);font-size:12px}.menu-group{padding:7px 10px 3px;color:var(--muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em}
-    .model-option{width:100%;display:flex;align-items:center;gap:9px;border:0;border-radius:11px;background:transparent;color:var(--ink);padding:9px 10px;cursor:pointer;text-align:left}.model-option:hover,.model-option.selected,.model-option.active{background:var(--surface)}.model-option.active{outline:2px solid var(--accent);outline-offset:-2px}.model-option span:first-child{flex:1}.model-option small{color:var(--muted)}.model-check{width:14px;font-weight:700}
+    .model-option{width:100%;display:flex;align-items:center;gap:9px;border:0;border-radius:11px;background:transparent;color:var(--ink);padding:8px 10px;cursor:pointer;text-align:left}.model-option:hover,.model-option.selected,.model-option.active{background:var(--surface)}.model-option.active{outline:2px solid var(--accent);outline-offset:-2px}.model-option-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.model-option small{color:var(--muted)}.model-check{width:14px;font-weight:700}
+    .provider-mark{position:relative;display:grid;place-items:center;width:26px;height:26px;flex:none;border:1px solid color-mix(in srgb,var(--line) 75%,transparent);border-radius:8px;background:#fff;box-sizing:border-box}.provider-mark img{display:block;width:20px;height:20px;object-fit:contain}.provider-mark-badge{position:absolute;top:-5px;right:-9px;padding:1px 2px;border:1px solid var(--bg);border-radius:4px;background:var(--accent);color:var(--accent-ink);font-size:7px;font-weight:800;line-height:1.1;letter-spacing:.01em}.model-button .provider-mark{width:21px;height:21px;border-radius:6px}.model-button .provider-mark img{width:17px;height:17px}.model-button .provider-mark-badge{top:-4px;right:-9px;font-size:6px}
     .think{height:32px;max-width:130px;border:0;border-radius:10px;background:transparent;color:var(--muted);padding:0 5px;font-size:12px;outline:0;cursor:pointer}.think:hover{background:var(--surface);color:var(--ink)}
     .send{width:36px;height:36px;border-radius:50%;background:var(--ink);color:var(--bg);font-size:17px}.stop{background:var(--surface-strong);color:var(--ink);font-size:12px}
     .telemetry{position:relative;margin:0;color:var(--muted);font-size:12px}.telemetry>summary{display:grid;place-items:center;width:32px;height:32px;padding:0;border-radius:10px;cursor:pointer;list-style:none}.telemetry>summary::after,.telemetry[open]>summary::after{content:none}.telemetry>summary::-webkit-details-marker{display:none}.telemetry>summary:hover,.telemetry[open]>summary{background:var(--surface)}
@@ -314,7 +315,7 @@ var ArjunahRenderer = (function () {
           <button class="attach compose-control" title="Attach image" aria-label="Attach image" hidden>＋</button>
           <span class="compose-left-slot"></span>
           <div class="model-picker" hidden>
-            <button class="model-button compose-control" type="button" title="Select model" aria-label="Select model" aria-haspopup="listbox" aria-expanded="false"><span class="model-label">Select model</span><span class="chevron">⌄</span></button>
+            <button class="model-button compose-control" type="button" title="Select model" aria-label="Select model" aria-haspopup="listbox" aria-expanded="false"><span class="model-selected-icon"></span><span class="model-label">Select model</span><span class="chevron">⌄</span></button>
             <div class="model-menu" hidden><input class="model-search" type="text" spellcheck="false" autocomplete="off" placeholder="Search models" aria-label="Search models" aria-autocomplete="list" /><div class="model-list" role="listbox"></div></div>
           </div>
           <select class="think" title="Thinking effort" aria-label="Thinking effort" hidden></select>
@@ -767,6 +768,7 @@ var ArjunahRenderer = (function () {
       mentionMenu: q(".mention-menu"),
       modelPicker: q(".model-picker"),
       modelButton: q(".model-button"),
+      modelSelectedIcon: q(".model-selected-icon"),
       modelLabel: q(".model-label"),
       modelMenu: q(".model-menu"),
       grip: q(".grip"),
@@ -2096,6 +2098,7 @@ var ArjunahRenderer = (function () {
       if (!id) return null;
       return {
         id,
+        providerId: String(raw?.providerId ?? raw?.provider ?? "").slice(0, 64),
         provider: String(raw?.providerName ?? raw?.provider ?? "").slice(0, 60),
         displayName: String(raw?.displayName ?? id).slice(0, 80),
         contextWindow: Number.isFinite(raw?.contextWindow)
@@ -2276,7 +2279,9 @@ var ArjunahRenderer = (function () {
         option.className = `model-option${current ? " selected" : ""}${active ? " active" : ""}`;
         option.setAttribute("role", "option");
         option.setAttribute("aria-selected", String(current));
+        const mark = renderModelIcon(model);
         const name = doc.createElement("span");
+        name.className = "model-option-name";
         name.textContent = model.displayName;
         const size = doc.createElement("small");
         size.textContent = model.contextWindow
@@ -2285,7 +2290,7 @@ var ArjunahRenderer = (function () {
         const check = doc.createElement("span");
         check.className = "model-check";
         check.textContent = current ? "✓" : "";
-        option.append(name, size, check);
+        option.append(...(mark ? [mark] : []), name, size, check);
         option.addEventListener("click", () => {
           closeModelMenu();
           void chooseModel(model.id, reasoningEffort);
@@ -2312,9 +2317,11 @@ var ArjunahRenderer = (function () {
       refs.modelMenu.hidden = !wasOpen;
       refs.modelButton.setAttribute("aria-expanded", String(wasOpen));
       if (wasOpen) refs.modelList.scrollTop = scrollTop;
-      refs.modelLabel.textContent =
-        models.find((model) => model.id === selectedModel)?.displayName ??
-        "Select model";
+      const selected = models.find((model) => model.id === selectedModel);
+      refs.modelLabel.textContent = selected?.displayName ?? "Select model";
+      refs.modelSelectedIcon.replaceChildren();
+      const selectedMark = selected ? renderModelIcon(selected) : null;
+      if (selectedMark) refs.modelSelectedIcon.append(selectedMark);
       const levels = levelsFor(selectedModel);
       refs.thinkSelect.hidden = !levels.length;
       if (!levels.length) return;
@@ -2335,6 +2342,31 @@ var ArjunahRenderer = (function () {
         refs.thinkSelect.append(option);
       }
       refs.thinkSelect.value = reasoningEffort;
+    }
+
+    /** Provider artwork belongs to the host; the renderer owns its safe layout. */
+    function renderModelIcon(model) {
+      const icon = host.modelIcon?.({
+        id: model.id,
+        providerId: model.providerId,
+        provider: model.provider,
+        displayName: model.displayName,
+      });
+      if (!icon || typeof icon.src !== "string" || !icon.src) return null;
+      const mark = doc.createElement("span");
+      mark.className = "provider-mark";
+      mark.setAttribute("aria-hidden", "true");
+      const image = doc.createElement("img");
+      image.src = icon.src;
+      image.alt = "";
+      mark.append(image);
+      if (typeof icon.badge === "string" && icon.badge) {
+        const badge = doc.createElement("span");
+        badge.className = "provider-mark-badge";
+        badge.textContent = icon.badge.slice(0, 5);
+        mark.append(badge);
+      }
+      return mark;
     }
 
     /** Apply the choice, and put it back if the host will not have it. */

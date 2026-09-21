@@ -10,6 +10,7 @@ import {
 } from "./opencode.js";
 
 export const OPENAI_PROVIDER_ID = "openai";
+export const OPENCODE_CLI_PROVIDER_ID = "opencode-cli";
 export { OPENCODE_PROVIDER_ID };
 export const DESKTOP_DOWN =
   "अर्जुनः Desktop is not running. Start it (npm run desktop) and try again.";
@@ -42,7 +43,12 @@ export function modelIdFor(providerId, model) {
 /** The global default selection (`active` storage) expressed as a model id. */
 export function activeModelId(active, openai, opencode) {
   if (active?.type === "desktop" && active.providerId && active.model)
-    return modelIdFor(active.providerId, active.model);
+    return modelIdFor(
+      active.providerId === "opencode"
+        ? OPENCODE_CLI_PROVIDER_ID
+        : active.providerId,
+      active.model,
+    );
   if (active?.type === "openai" && openai?.model)
     return modelIdFor(OPENAI_PROVIDER_ID, openai.model);
   if (active?.type === "opencode" && opencode?.model)
@@ -135,7 +141,7 @@ export function buildCatalog({
     supportsVision: true,
     supportsReasoning: true,
     supportsThreads: false,
-    usage: usage[OPENCODE_PROVIDER_ID] ?? null,
+    usage: usage[OPENCODE_PROVIDER_ID] ?? usage.opencode ?? null,
     defaultModel: opencode?.model
       ? modelIdFor(OPENCODE_PROVIDER_ID, opencode.model)
       : null,
@@ -160,12 +166,14 @@ export function buildCatalog({
   });
   for (const provider of desktop?.providers ?? []) {
     if (!PROVIDER_ID.test(provider.id)) continue;
+    const publicId =
+      provider.id === "opencode" ? OPENCODE_CLI_PROVIDER_ID : provider.id;
     const models = (
       provider.models?.length
         ? provider.models
         : [{ id: "default", displayName: "Default model" }]
     ).map((model) => ({
-      id: modelIdFor(provider.id, model.id),
+      id: modelIdFor(publicId, model.id),
       model: model.id,
       displayName: model.displayName || model.id,
       capabilities: {
@@ -179,7 +187,8 @@ export function buildCatalog({
       defaultReasoning: model.defaultReasoning ?? null,
     }));
     providers.push({
-      id: provider.id,
+      id: publicId,
+      runtimeId: provider.id,
       name: provider.name,
       vendor: provider.vendor,
       kind: "subscription",
@@ -212,9 +221,9 @@ export function buildCatalog({
       supportsReasoning: provider.supportsReasoning === true,
       supportsThreads: provider.supportsThreads === true,
       sandboxed: provider.sandboxed === true,
-      usage: usage[provider.id] ?? null,
+      usage: usage[publicId] ?? usage[provider.id] ?? null,
       defaultModel: modelIdFor(
-        provider.id,
+        publicId,
         provider.defaultModel ?? models[0]?.model ?? "default",
       ),
       models,
@@ -260,6 +269,25 @@ export function findModel(catalog, id) {
   return model ? { provider, model } : null;
 }
 
+/**
+ * Resolve a model stored before the Zen API and desktop OpenCode CLI received
+ * distinct public provider ids.
+ */
+export function findStoredModel(catalog, id) {
+  const exact = findModel(catalog, id);
+  if (exact || typeof id !== "string" || !id.startsWith("opencode/"))
+    return exact;
+  const model = id.slice(9);
+  const cli = catalog.providers.find(
+    (provider) => provider.id === OPENCODE_CLI_PROVIDER_ID,
+  );
+  // Prefer a real CLI catalog entry. This distinguishes old desktop ids such
+  // as `opencode/opencode/muse-...` from old Zen ids without guessing.
+  if (cli?.models.some((item) => item.model === model))
+    return findModel(catalog, `${OPENCODE_CLI_PROVIDER_ID}/${model}`);
+  return findModel(catalog, `${OPENCODE_PROVIDER_ID}/${model}`);
+}
+
 /** The `active` storage document that selects `id` as the global default. */
 export function activeForModel(id) {
   const parsed = parseModelId(id);
@@ -268,7 +296,14 @@ export function activeForModel(id) {
     ? { type: "openai", model: parsed.model }
     : parsed.providerId === OPENCODE_PROVIDER_ID
       ? { type: "opencode", model: parsed.model }
-      : { type: "desktop", providerId: parsed.providerId, model: parsed.model };
+      : {
+          type: "desktop",
+          providerId:
+            parsed.providerId === OPENCODE_CLI_PROVIDER_ID
+              ? "opencode"
+              : parsed.providerId,
+          model: parsed.model,
+        };
 }
 
 /** The provider configuration that `generate()` needs for one model. */
@@ -305,7 +340,8 @@ export function configForModel(catalog, id, { openai, opencode, desktop }) {
     };
   return {
     kind: "desktop",
-    providerId: provider.id,
+    providerId: provider.runtimeId ?? provider.id,
+    catalogProviderId: provider.id,
     providerName: provider.name,
     baseUrl: desktop.baseUrl,
     token: desktop.token,

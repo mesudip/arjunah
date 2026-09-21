@@ -14,6 +14,13 @@ let pageStatus = null; // content-script status: registered assistant, open stat
 let statePort = null;
 let liveRefreshTimer = null;
 let siteLoadRequest = 0;
+let siteUpdateQueue = Promise.resolve();
+let siteUpdatesPending = 0;
+let deferredSiteReload = false;
+
+function sameValue(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
 
 // The popup never hosts its own chat. It is the wallet view: providers, the
 // global default, and what the current site may use. Chat happens on the page.
@@ -108,8 +115,15 @@ function connectStateStream() {
   statePort = port;
   port.onMessage.addListener((message) => {
     if (message?.kind !== "arjunah-state") return;
+    if (siteUpdatesPending) {
+      deferredSiteReload = true;
+      return;
+    }
     clearTimeout(liveRefreshTimer);
-    liveRefreshTimer = setTimeout(() => void loadSite(), 50);
+    liveRefreshTimer = setTimeout(
+      () => void loadSite({ onlyIfChanged: true }),
+      50,
+    );
   });
   port.onDisconnect.addListener(() => {
     if (statePort === port) statePort = null;
@@ -350,12 +364,17 @@ function renderSite() {
       const check = document.createElement("input");
       check.type = "checkbox";
       check.value = provider.id;
-      check.checked = site.providers.includes(provider.id);
+      check.checked =
+        site.chosenProviders == null ||
+        site.chosenProviders.includes(provider.id);
       check.addEventListener("change", async () => {
         const chosen = [...box.querySelectorAll("input:checked")].map(
           (input) => input.value,
         );
-        await update({ providers: chosen });
+        // Keep the chips stable and interactive while ordered writes finish.
+        // Rebuilding this whole section here made one click flash twice: once
+        // for the response and once for its storage-change broadcast.
+        await update({ providers: chosen }, { render: false });
       });
       label.append(check, provider.name);
       box.append(label);
@@ -369,21 +388,32 @@ function renderSite() {
     : "No access granted yet. The site asks when it first needs the model.";
 }
 
-async function update(patch) {
-  try {
-    site = await runtime("site.update", { origin, ...patch });
-    note.textContent = "";
-    renderSite();
-    if (activeTab?.id)
-      chrome.tabs.sendMessage(
-        activeTab.id,
-        { kind: "arjunah-ui", action: "refresh" },
-        () => void chrome.runtime.lastError,
-      );
-  } catch (error) {
-    note.textContent = error.message;
-    renderSite();
-  }
+function update(patch, { render = true } = {}) {
+  siteUpdatesPending++;
+  const operation = siteUpdateQueue.then(async () => {
+    try {
+      site = await runtime("site.update", { origin, ...patch });
+      note.textContent = "";
+      if (render && siteUpdatesPending === 1) renderSite();
+      if (activeTab?.id)
+        chrome.tabs.sendMessage(
+          activeTab.id,
+          { kind: "arjunah-ui", action: "refresh" },
+          () => void chrome.runtime.lastError,
+        );
+    } catch (error) {
+      note.textContent = error.message;
+      if (siteUpdatesPending === 1) renderSite();
+    } finally {
+      siteUpdatesPending--;
+      if (!siteUpdatesPending && deferredSiteReload) {
+        deferredSiteReload = false;
+        void loadSite({ onlyIfChanged: true });
+      }
+    }
+  });
+  siteUpdateQueue = operation.catch(() => undefined);
+  return operation;
 }
 siteModel.addEventListener("change", () => update({ model: siteModel.value }));
 revokeSite.addEventListener("click", async () => {
@@ -410,7 +440,7 @@ defaultModel.addEventListener("change", async () => {
   }
 });
 
-async function loadSite() {
+async function loadSite({ onlyIfChanged = false } = {}) {
   const request = ++siteLoadRequest;
   let nextCatalog;
   let nextSite;
@@ -424,10 +454,16 @@ async function loadSite() {
     note.textContent = error.message;
   }
   if (request !== siteLoadRequest) return;
+  if (siteUpdatesPending) {
+    deferredSiteReload = true;
+    return;
+  }
+  const catalogChanged = !sameValue(catalog, nextCatalog);
+  const siteChanged = !sameValue(site, nextSite);
   catalog = nextCatalog;
   site = nextSite;
-  renderProviders();
-  renderSite();
+  if (!onlyIfChanged || catalogChanged) renderProviders();
+  if (!onlyIfChanged || siteChanged) renderSite();
 }
 function safeOrigin(value) {
   try {

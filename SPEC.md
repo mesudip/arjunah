@@ -137,15 +137,15 @@ Capability grants do not silently authorize newly declared external resources. T
 Every grant carries two user-owned settings that pages cannot change:
 
 - **Site model** (`model`): the model that answers `models.generate` calls without an explicit `model`, and the hosted chat on this site. It defaults to the global default model. The user MAY change it in the consent dialog, the toolbar popup, or the hosted chat header. When the selected model becomes unavailable (key removed, agent signed out), the extension falls back to the global default and MUST say so in its UI.
-- **Exposed providers** (`providers`): at level 2, the providers whose models `models.list()` and `providers.list()` return. `null` means every available provider. At level 1 the exposed set is exactly the site model.
+- **Exposed providers** (`providers`): at level 2, the providers whose models `models.list()` and `providers.list()` return. `null` means every available provider and an empty list means none. The site-model provider is not added implicitly: the extension-owned hosted chat may keep using the site model without disclosing that provider to page code. At level 1 the exposed set is exactly the site model.
 
-Changing either setting cancels the site's in-flight hosted operations so a running turn cannot continue on a model the user just deselected.
+Changing the site model cancels the site's in-flight hosted operations. Narrowing exposed providers does not cancel hosted chat, because its site model is a separate user-owned setting; it cancels only a direct page completion that explicitly selected a model from a provider the user just hid.
 
 ## 5. Providers and models
 
 ### 5.1 Identifiers
 
-Every model has an opaque identifier `<provider-id>/<model>`: `openai/gpt-5.6-sol`, `claude-code/sonnet`, `opencode/opencode/big-pickle`. Provider identifiers match `^[a-z][a-z0-9-]{0,63}$`; `openai` is the user's API key provider and desktop providers use the identifiers in section 12.2. Pages MUST treat both identifiers as opaque and MUST NOT parse plan or account information from them; there is none.
+Every model has an opaque identifier `<provider-id>/<model>`: `openai/gpt-5.6-sol`, `claude-code/sonnet`, `opencode-api/muse-spark-1.3`, `opencode-cli/opencode/big-pickle`. Provider identifiers match `^[a-z][a-z0-9-]{0,63}$`; `openai` is the user's OpenAI API-key provider, `opencode-api` is the OpenCode Zen API-key provider, and desktop providers use the public catalog identifiers in section 12.2. Pages MUST treat both identifiers as opaque and MUST NOT parse plan or account information from them; there is none.
 
 ### 5.2 Listing
 
@@ -497,7 +497,7 @@ The desktop companion is optional. An extension without it is conforming. When p
 
 - **Claude Code** (`claude-code`): the `claude` CLI, available when `claude auth status` reports a sign-in. Accepts images.
 - **Codex** (`codex`): the `codex` CLI, available when `codex login status` reports a sign-in. Accepts images for the catalog models whose input modalities include one. Codex keeps a read-only shell sandbox that this companion cannot disable, so it is disabled until the user enables it on the dashboard; the extension shows the reason.
-- **OpenCode** (`opencode`): the `opencode` CLI, available when it lists at least one model. `opencode run` has no image input, so every OpenCode model reports `vision: false` even where the upstream model would accept one.
+- **OpenCode** (`opencode` on the companion API, `opencode-cli` in the browser catalog): the `opencode` CLI, available when it lists at least one model. `opencode run` has no image input, so every OpenCode model reports `vision: false` even where the upstream model would accept one. The distinct browser id prevents it from colliding with the `opencode-api` Zen provider; the extension translates back to `opencode` only on the private loopback request.
 
 The extension MUST show detected providers in its options UI and popup with their availability and account label, MUST let the user choose the global default model and per-site models among them, and MUST disclose the model that will answer in consent dialogs (`Requests are sent to: …`). A provider that is not available MUST NOT be selectable.
 

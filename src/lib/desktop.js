@@ -549,5 +549,5 @@ export async function desktopGenerate(config, valid, signal, options = {}) {
 }
 
 export function modelId(config) {
-  return `${config?.providerId ?? "openai"}/${config?.model}`;
+  return `${config?.catalogProviderId ?? config?.providerId ?? "openai"}/${config?.model}`;
 }

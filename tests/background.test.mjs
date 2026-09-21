@@ -130,11 +130,11 @@ test("OpenCode Zen key, catalog, and default selection stay independent from Ope
     b.extension,
   );
   const catalog = await b.ok("catalog.get", {}, b.extension);
-  assert.equal(catalog.defaultModel, "opencode/gpt-5.6-luna");
+  assert.equal(catalog.defaultModel, "opencode-api/gpt-5.6-luna");
   assert.ok(
     catalog.providers
-      .find((provider) => provider.id === "opencode")
-      .models.some((model) => model.id === "opencode/claude-sonnet-4-6"),
+      .find((provider) => provider.id === "opencode-api")
+      .models.some((model) => model.id === "opencode-api/claude-sonnet-4-6"),
   );
   assert.equal(b.store.provider.apiKey, "dummy-audit-key");
 });
@@ -171,12 +171,12 @@ test("an OpenCode Zen key alone discovers the catalog and picks a default", asyn
   );
   // The picker must offer exactly what the key discovered, and nothing else.
   const catalog = await b.ok("catalog.get", {}, b.extension);
-  const provider = catalog.providers.find((item) => item.id === "opencode");
+  const provider = catalog.providers.find((item) => item.id === "opencode-api");
   assert.deepEqual(
     provider.models.map((model) => model.id),
-    ["opencode/claude-sonnet-4-6", "opencode/gemini-3.1-pro"],
+    ["opencode-api/claude-sonnet-4-6", "opencode-api/gemini-3.1-pro"],
   );
-  assert.equal(provider.defaultModel, "opencode/claude-sonnet-4-6");
+  assert.equal(provider.defaultModel, "opencode-api/claude-sonnet-4-6");
   assert.equal(provider.available, true);
   // Saving a second provider's key must not hijack the global default.
   assert.equal(catalog.defaultModel, "openai/allowed");
@@ -648,7 +648,7 @@ function desktopMock(b, options = {}) {
       );
     if (target.pathname === "/api/providers")
       return Response.json({
-        providers: [
+        providers: options.providers ?? [
           {
             id: "claude-code",
             name: "Claude Code",
@@ -1011,19 +1011,32 @@ test("a narrowed level 2 site keeps its pinned model in the widget switcher, and
     { origin: "https://site.test", providers: ["claude-code"] },
     b.extension,
   );
-  assert.deepEqual(summary.providers.sort(), ["claude-code", "openai"]);
+  assert.deepEqual(summary.providers, ["claude-code"]);
+  assert.deepEqual(summary.chosenProviders, ["claude-code"]);
   const settings = await b.ok("hosted.settings");
   assert.equal(settings.model.id, "openai/allowed");
   assert.ok(
     settings.models.some((item) => item.id === settings.model.id),
     "the model that answers is selectable in its own switcher",
   );
+  assert.deepEqual(
+    settings.models
+      .filter((item) => item.providerId === "openai")
+      .map((item) => item.id),
+    ["openai/allowed"],
+    "a hidden answering provider contributes only the selected model",
+  );
+  assert.deepEqual(
+    (await b.ok("providers.list")).map((provider) => provider.id),
+    ["claude-code"],
+    "the page sees only the providers the user actually selected",
+  );
   // An API-key provider accepts sampling controls; a subscription agent does
   // not, and says so in the page console instead of failing the request.
   assert.equal(
     (
       await b.ok("models.generate", {
-        model: "openai/allowed",
+        model: "default",
         temperature: 0.2,
         messages: [{ role: "user", content: "hi" }],
       })
@@ -1046,6 +1059,136 @@ test("a narrowed level 2 site keeps its pinned model in the widget switcher, and
     .at(-1).payload;
   assert.equal(sent.temperature, undefined);
   assert.equal(sent.maxTokens, undefined);
+});
+
+test("OpenCode API and CLI have independent ids, choices, and legacy grant compatibility", async (t) => {
+  const b = await broker(t);
+  b.store.opencode = {
+    baseUrl: "https://opencode.ai/zen/v1",
+    model: "muse-spark-1.3",
+    models: ["muse-spark-1.3"],
+    apiKey: "zen-secret",
+  };
+  desktopMock(b, {
+    providers: [
+      {
+        id: "opencode",
+        name: "OpenCode",
+        vendor: "OpenCode",
+        installed: true,
+        available: true,
+        supportsTools: true,
+        supportsThreads: true,
+        models: [
+          {
+            id: "opencode/muse-spark-1.3-contributor-free",
+            displayName: "Muse Spark 1.3 Free",
+          },
+        ],
+        defaultModel: "opencode/muse-spark-1.3-contributor-free",
+      },
+    ],
+  });
+  await b.ok("desktop.pair", { code: "123456" }, b.extension);
+
+  const catalog = await b.ok("catalog.get", {}, b.extension);
+  const openCode = catalog.providers.filter((provider) =>
+    provider.id.startsWith("opencode-"),
+  );
+  assert.deepEqual(
+    openCode.map((provider) => provider.id),
+    ["opencode-api", "opencode-cli"],
+  );
+  assert.equal(openCode[0].models[0].id, "opencode-api/muse-spark-1.3");
+  assert.equal(
+    openCode[1].models[0].id,
+    "opencode-cli/opencode/muse-spark-1.3-contributor-free",
+  );
+
+  await b.approve(["models.generate", "models.list", "models.catalog"], {
+    model: "opencode-api/muse-spark-1.3",
+  });
+  const none = await b.ok(
+    "site.update",
+    { origin: "https://site.test", providers: [] },
+    b.extension,
+  );
+  assert.deepEqual(none.providers, []);
+  assert.deepEqual(none.chosenProviders, []);
+  assert.deepEqual(await b.ok("providers.list"), []);
+  assert.ok(
+    (await b.ok("hosted.settings")).models.some(
+      (model) => model.id === "opencode-api/muse-spark-1.3",
+    ),
+    "the broker-owned picker keeps the site model without exposing it to the page",
+  );
+
+  await b.ok(
+    "site.update",
+    {
+      origin: "https://site.test",
+      model: "opencode-cli/opencode/muse-spark-1.3-contributor-free",
+    },
+    b.extension,
+  );
+  const cliAnswer = await b.ok("models.generate", {
+    model: "default",
+    messages: [{ role: "user", content: "hi" }],
+  });
+  assert.equal(
+    b.requests.at(-1).payload.providerId,
+    "opencode",
+    "the public CLI id maps back to the companion's private adapter id",
+  );
+  assert.equal(
+    cliAnswer.model,
+    "opencode-cli/opencode/muse-spark-1.3-contributor-free",
+  );
+
+  b.store.grants["https://site.test"] = {
+    ...b.store.grants["https://site.test"],
+    model: "opencode/muse-spark-1.3",
+    providers: ["opencode"],
+  };
+  delete b.store.grants["https://site.test"].providerIdsVersion;
+  const legacy = await b.ok(
+    "site.get",
+    { origin: "https://site.test" },
+    b.extension,
+  );
+  assert.equal(legacy.grant.model, "opencode-api/muse-spark-1.3");
+  assert.deepEqual(legacy.chosenProviders.sort(), [
+    "opencode-api",
+    "opencode-cli",
+  ]);
+});
+
+test("changing exposed providers does not cancel an active hosted chat", async (t) => {
+  const b = await broker(t);
+  const prepared = await b.prepare(manifest);
+  await b.approve(["models.generate", "models.list", "models.catalog"]);
+  let started;
+  let release;
+  const running = new Promise((resolve) => {
+    started = resolve;
+  });
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  b.hooks.fetch = async () => {
+    started();
+    await held;
+    return Response.json({ choices: [{ message: { content: "still here" } }] });
+  };
+  const answer = b.ok("chat.complete", prepared);
+  await running;
+  await b.ok(
+    "site.update",
+    { origin: "https://site.test", providers: [] },
+    b.extension,
+  );
+  release();
+  assert.equal((await answer).message.content, "still here");
 });
 
 test("a newer desktop revision is pulled into the browser and a bad desktop payload is rejected safely", async (t) => {
@@ -1525,7 +1668,29 @@ test("hosted conversations carry a thread id to the desktop app and release it o
   );
   assert.equal(generateCall.payload.threadId, "conv-abc");
   assert.equal(generateCall.payload.reasoning, "medium");
-  await b.ok("session.end", { conversationId: "conv-abc" });
+  await b.ok(
+    "session.end",
+    { conversationId: "conv-abc", _session: "unrelated-session" },
+    {
+      url: "brave://newtab/",
+      frameId: 0,
+      tab: { id: 1, url: "brave://newtab/" },
+    },
+  );
+  assert.equal(
+    b.requests.some((item) => item.url.endsWith("/api/thread/end")),
+    false,
+    "an unrelated teardown cannot release this document's agent thread",
+  );
+  await b.ok(
+    "session.end",
+    { conversationId: "conv-abc" },
+    {
+      url: "brave://newtab/",
+      frameId: 0,
+      tab: { id: 1, url: "brave://newtab/" },
+    },
+  );
   await new Promise((resolve) => setTimeout(resolve, 20));
   const ended = b.requests.find(
     (item) =>

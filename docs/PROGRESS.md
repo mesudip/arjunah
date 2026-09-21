@@ -1,5 +1,29 @@
 # Project progress
 
+## 2026-09-21 — 1.0.0-alpha.7
+
+- Prepared the next alpha with distinct public identities for OpenCode Zen and the desktop OpenCode CLI, exact level-2 provider visibility, locally bundled provider artwork in the shared model picker, and reliable document-scoped cleanup when Chromium has already replaced the page URL during teardown.
+- Existing OpenCode grants migrate compatibly: old ambiguous provider selections temporarily expose both new identities, while old stored models resolve against the CLI catalog first and otherwise remain Zen selections.
+- Package versions and the Chrome display version moved to `1.0.0-alpha.7`; the protocol and runtime version remain `1.0.0`, and the specification remains on the `1.0.0-alpha` channel.
+- **Verification.** `npm run validate` passes: 172 unit/security tests, zero-warning Firefox lint, Chrome and Firefox extension suites, the Chrome security suite, hosted and standalone widget suites, the desktop bridge suite, and the idle-polling regression.
+
+## 2026-09-21 — provider icons in the model picker
+
+- Every model in the hosted picker now carries its provider id into the shared renderer, which draws the provider's locally bundled mark before the model name and beside the currently selected model. The artwork is packaged with the extension; opening the picker makes no remote image request.
+- OpenAI API, Claude Code, Codex, OpenCode Zen, and the OpenCode CLI have distinct provider treatment. Codex uses the Codex application artwork rather than the ChatGPT/OpenAI blossom. Both OpenCode surfaces use the official OpenCode mark, with a small `API` overlay reserved for Zen so it cannot be mistaken for the local CLI.
+- SVG is used for OpenAI, Claude, and OpenCode. Codex uses a downscaled PNG because the official application bundle does not provide an SVG. Asset provenance is recorded beside the files in `src/icons/providers/README.md`.
+- Fixed a popup repaint regression exposed while checking provider identity: toggling a level-2 provider no longer disables and reconstructs the complete provider-chip menu twice. Changes stay interactive, remain serialized, and the deferred state refresh redraws only when the fetched catalog or site state is materially different from the response already applied.
+- Tightened the hosted switcher to the same level-2 boundary. When the answering model's provider is not among the providers the user allowed the site to list, broker UI keeps only that one selected model available; it no longer restores every model from the hidden provider. Explicitly exposed providers still contribute their complete catalogs.
+
+## 2026-09-21 — independent OpenCode providers and honest site toggles
+
+- OpenCode Zen and the desktop OpenCode CLI no longer collide under one `opencode` catalog id. Their public ids are `opencode-api` and `opencode-cli`; the latter maps back to the companion's private `opencode` adapter id only at the loopback boundary. This fixes CLI models such as Muse Spark Contributor Free appearing in the picker and then failing `hosted.model` as unavailable.
+- Existing grants remain usable. An old stored OpenCode model is matched against the real CLI catalog first and otherwise treated as Zen; an old ambiguous `providers: ["opencode"]` selection temporarily exposes both new entries until the user saves an unambiguous choice.
+- Level-2 provider toggles now represent exactly what the user selected, including none. The site-model provider is kept only in the broker-owned hosted picker, not silently reinserted into the catalog visible to page code or painted back as a checked toggle.
+- Provider-list changes are serialized in the popup and live refresh waits for them, preventing an older response from repainting a newer click. Such a change no longer cancels hosted chat; it cancels only an in-flight direct page completion that explicitly selected a model from a provider the user removed. Site-model changes still cancel active work.
+- Session cleanup now uses the document scope recorded while the page was alive. Chromium can replace `sender.url` with a browser-internal URL during `pagehide`; that no longer produces repeated `session.end ... unsupported top-level origin` warnings or delays thread cleanup.
+- Added background regressions for distinct API/CLI ids, loopback routing, legacy grant compatibility, an empty exposed-provider set, the private picker retaining the site model, and a hosted turn surviving a provider-list edit.
+
 ## 2026-09-21 — 1.0.0-alpha.6
 
 - A failing site tool now tells the model what went wrong. `invokeSiteTool` threw a fixed "The site tool reported an error." and discarded the `error` the content script had already forwarded, so every site-side failure — a bad color, indistinct rectangle corners, a radius of zero — reached the model as the same opaque sentence with nothing to retry against. The real code and message are forwarded, bounded, and still attributed to the page they came from. The rest of that path was already correct: the page bridge, the content script, and the turn loop all carried the message; one hop overwrote it.

@@ -1,4 +1,7 @@
-export const OPENCODE_PROVIDER_ID = "opencode";
+// The Zen HTTP API and the desktop OpenCode CLI are independent providers.
+// Keep their public catalog ids explicit; the companion's private adapter id
+// remains `opencode` on the loopback wire.
+export const OPENCODE_PROVIDER_ID = "opencode-api";
 export const OPENCODE_BASE_URL = "https://opencode.ai/zen/v1";
 export const OPENCODE_DEFAULT_MODEL = "gpt-5.6-luna";
 

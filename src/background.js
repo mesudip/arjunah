@@ -7,7 +7,9 @@ import {
 } from "./lib/provider.js";
 import {
   buildCatalog,
+  activeModelId,
   findModel,
+  findStoredModel,
   configForModel,
   activeForModel,
   parseModelId,
@@ -15,6 +17,7 @@ import {
   publicModelEntry,
   OPENAI_PROVIDER_ID,
   OPENCODE_PROVIDER_ID,
+  OPENCODE_CLI_PROVIDER_ID,
   DESKTOP_DOWN,
   DESKTOP_UNPAIRED,
 } from "./lib/catalog.js";
@@ -586,6 +589,30 @@ async function handle(method, params, sender) {
     throw new BrokerError("NOT_SUPPORTED", "Unknown extension operation.");
   }
 
+  if (method === "session.end") {
+    // `pagehide` may run after Chromium has already replaced sender.url with a
+    // browser-internal URL. Cleanup needs only the document scope we recorded
+    // while the page was alive; rejecting it as a new page request creates a
+    // warning and leaks the old thread until its timeout.
+    const tabId = sender.tab?.id;
+    const scope = Number.isInteger(tabId) ? documentScopes.get(tabId) : null;
+    if (scope?.session === params._session) {
+      invalidate(
+        (turn) =>
+          turn.binding.tabId === tabId &&
+          turn.binding.session === params._session,
+      );
+      clearMcpSessions(scope.origin, scope.session);
+      documentScopes.delete(tabId);
+      // The hosted conversation ended: release the agent thread behind it.
+      if (typeof params.conversationId === "string")
+        void getDesktop().then((link) =>
+          desktopEndThread(link, params.conversationId),
+        );
+    }
+    return true;
+  }
+
   const origin = senderOrigin(sender);
   if (method === "broker.status") return brokerStatus(origin, params);
   if (method === "ui.openOptions") {
@@ -616,22 +643,6 @@ async function handle(method, params, sender) {
       binding,
       params,
     );
-  }
-  if (method === "session.end") {
-    const binding = pageBinding(sender, params);
-    invalidate(
-      (turn) =>
-        turn.binding.tabId === binding.tabId &&
-        turn.binding.session === params._session,
-    );
-    clearMcpSessions(binding.origin, binding.session);
-    documentScopes.delete(binding.tabId);
-    // The hosted conversation ended: release the agent thread behind it.
-    if (typeof params.conversationId === "string")
-      void getDesktop().then((link) =>
-        desktopEndThread(link, params.conversationId),
-      );
-    return true;
   }
   if (method === "thread.end") {
     // Leaving or deleting one site-owned thread releases only the agent thread
@@ -683,8 +694,12 @@ async function handle(method, params, sender) {
   }
   if (method === "models.generate") {
     return withTurn(pageBinding(sender, params), async (turn) => {
+      turn.kind = "direct";
       const grant = await guard(turn, ["models.generate"]);
       const config = await resolveSiteConfig(grant, params.model);
+      turn.providerId = config.catalogProviderId ?? config.providerId;
+      turn.usesExposedModel =
+        params.model != null && params.model !== "default";
       const { model: _model, ...request } = params;
       const result = await generate(
         config,
@@ -806,6 +821,7 @@ async function handle(method, params, sender) {
     const item = getPrepared(params.preparedId, binding);
     prepared.delete(params.preparedId);
     return withTurn(item.binding, async (turn) => {
+      turn.kind = "hosted";
       const context =
         params.context == null ? null : validateContext(params.context);
       const required = [...item.required, ...(context ? ["context.read"] : [])];
@@ -1063,14 +1079,7 @@ async function resolveConfig(active) {
     active,
     ...catalogInputs(await desktopReachable(desktop)),
   });
-  const id =
-    active.type === "desktop"
-      ? `${active.providerId}/${active.model}`
-      : active.type === "openai" && openai?.model
-        ? `${OPENAI_PROVIDER_ID}/${active.model ?? openai.model}`
-        : active.type === "opencode" && opencode?.model
-          ? `${OPENCODE_PROVIDER_ID}/${active.model ?? opencode.model}`
-          : null;
+  const id = activeModelId(active, openai, opencode);
   return id ? configForModel(catalog, id, { openai, opencode, desktop }) : null;
 }
 async function configFor(modelId) {
@@ -1093,7 +1102,7 @@ async function configFor(modelId) {
  * otherwise the global default (SPEC 4.1). Returns { provider, model, fallback }.
  */
 function siteModel(grant, catalog) {
-  const chosen = grant?.model ? findModel(catalog, grant.model) : null;
+  const chosen = grant?.model ? findStoredModel(catalog, grant.model) : null;
   if (chosen?.provider.available) return { ...chosen, fallback: false };
   const fallback = catalog.defaultModel
     ? findModel(catalog, catalog.defaultModel)
@@ -1101,19 +1110,27 @@ function siteModel(grant, catalog) {
   if (fallback?.provider.available) return { ...fallback, fallback: true };
   return null;
 }
+function selectedProviderIds(grant) {
+  if (!Array.isArray(grant?.providers)) return null;
+  const selected = new Set(grant.providers);
+  // Before the two OpenCode surfaces received distinct ids, one `opencode`
+  // checkbox represented both. Preserve that old grant until the user saves a
+  // new, unambiguous selection from the updated popup.
+  if (grant.providerIdsVersion !== 2 && selected.delete("opencode")) {
+    selected.add(OPENCODE_PROVIDER_ID);
+    selected.add(OPENCODE_CLI_PROVIDER_ID);
+  }
+  return selected;
+}
 /** Providers a level-2 site may see; level 1 sees only its model's provider. */
 function exposedProviders(grant, catalog) {
   const site = siteModel(grant, catalog);
   if (!site) return [];
   if (levelOf(grant.capabilities) !== "catalog") return [site.provider];
-  const allowed = Array.isArray(grant.providers) ? grant.providers : null;
-  const list = catalog.providers.filter(
-    (provider) =>
-      provider.available && (!allowed || allowed.includes(provider.id)),
+  const allowed = selectedProviderIds(grant);
+  return catalog.providers.filter(
+    (provider) => provider.available && (!allowed || allowed.has(provider.id)),
   );
-  if (!list.some((provider) => provider.id === site.provider.id))
-    list.unshift(site.provider);
-  return list;
 }
 /** Provider configuration for a page request, enforcing the site's level. */
 async function resolveSiteConfig(grant, requested) {
@@ -1196,8 +1213,7 @@ async function updateSiteSettings(origin, params) {
   const catalog = await getCatalog();
   const choices = await validateSiteChoices(params, catalog);
   if (params.providers === null) choices.providers = null;
-  invalidate((turn) => turn.binding.origin === origin);
-  return mutateGrants(async () => {
+  const result = await mutateGrants(async () => {
     const stored =
       (await chrome.storage.local.get(STORAGE.grants)).grants ?? {};
     if (!stored[origin])
@@ -1205,10 +1221,34 @@ async function updateSiteSettings(origin, params) {
         "PERMISSION_REQUIRED",
         "This site has no grant to update.",
       );
-    stored[origin] = { ...stored[origin], ...choices };
+    stored[origin] = {
+      ...stored[origin],
+      ...choices,
+      ...(Object.hasOwn(choices, "providers") ? { providerIdsVersion: 2 } : {}),
+    };
     await chrome.storage.local.set({ [STORAGE.grants]: stored });
     return true;
   });
+  if (Object.hasOwn(choices, "model"))
+    invalidate((turn) => turn.binding.origin === origin);
+  else if (Object.hasOwn(choices, "providers")) {
+    const allowed = selectedProviderIds({
+      providers: choices.providers,
+      providerIdsVersion: 2,
+    });
+    // Provider visibility is a page-catalog permission, not the hosted chat's
+    // answering model. Keep that chat alive, while cancelling a direct page
+    // completion that explicitly chose a provider the user just hid.
+    invalidate(
+      (turn) =>
+        turn.binding.origin === origin &&
+        turn.kind === "direct" &&
+        turn.usesExposedModel &&
+        allowed &&
+        !allowed.has(turn.providerId),
+    );
+  }
+  return result;
 }
 /** Wallet view for the popup and options page: providers with account details. */
 async function catalogSummary() {
@@ -1235,7 +1275,10 @@ async function siteSummary(origin) {
     fallback: Boolean(grant.model && site?.fallback),
     pinned: Boolean(grant.model),
     providers: exposedProviders(grant, catalog).map((provider) => provider.id),
-    chosenProviders: grant.providers ?? null,
+    chosenProviders:
+      selectedProviderIds(grant) == null
+        ? null
+        : [...selectedProviderIds(grant)],
   };
 }
 /** What the hosted widget header shows: current model, switchable models, usage. */
@@ -1252,6 +1295,19 @@ async function hostedSettings(origin) {
     levelOf(grant?.capabilities ?? []) === "catalog"
       ? exposedProviders(grant, catalog)
       : catalog.providers;
+  const pickerModels = visibleProviders
+    .filter((provider) => provider.available)
+    .flatMap((provider) =>
+      provider.models.map((model) => ({ provider, model })),
+    );
+  // The answering model must remain visible in broker-owned UI even when its
+  // provider is not exposed to page code. That exception is model-sized: it
+  // must not smuggle the provider's entire catalog back into the switcher.
+  if (
+    site &&
+    !visibleProviders.some((provider) => provider.id === site.provider.id)
+  )
+    pickerModels.unshift({ provider: site.provider, model: site.model });
   return {
     level: levelOf(grant?.capabilities ?? []),
     desktop: catalog.desktop,
@@ -1269,21 +1325,18 @@ async function hostedSettings(origin) {
           plan: site.provider.plan,
           quota: site.provider.quota,
           fallback: site.fallback,
-          usage: usage[site.provider.id] ?? null,
+          usage: site.provider.usage ?? usage[site.provider.id] ?? null,
         }
       : null,
-    models: visibleProviders
-      .filter((provider) => provider.available)
-      .flatMap((provider) =>
-        provider.models.map((model) => ({
-          id: model.id,
-          displayName: model.displayName,
-          providerName: provider.name,
-          capabilities: model.capabilities,
-          contextWindow: model.contextWindow ?? null,
-          reasoningLevels: model.reasoningLevels ?? [],
-        })),
-      ),
+    models: pickerModels.map(({ provider, model }) => ({
+      id: model.id,
+      displayName: model.displayName,
+      providerId: provider.id,
+      providerName: provider.name,
+      capabilities: model.capabilities,
+      contextWindow: model.contextWindow ?? null,
+      reasoningLevels: model.reasoningLevels ?? [],
+    })),
     grant: publicGrant(grant, catalog),
   };
 }
@@ -1348,8 +1401,9 @@ async function recordUsage(config, result) {
   }
   try {
     const usage = await getUsage();
+    const usageProviderId = config.catalogProviderId ?? config.providerId;
     const day = new Date().toISOString().slice(0, 10);
-    const previous = usage[config.providerId] ?? {};
+    const previous = usage[usageProviderId] ?? {};
     const entry =
       previous.day === day
         ? { ...previous }
@@ -1373,7 +1427,7 @@ async function recordUsage(config, result) {
       (result.usage?.completionTokens ?? 0);
     entry.lastAt = new Date().toISOString();
     entry.lastModel = result.model;
-    usage[config.providerId] = entry;
+    usage[usageProviderId] = entry;
     await chrome.storage.local.set({ [STORAGE.usage]: usage });
   } catch {
     /* the ledger is informational */
@@ -1799,6 +1853,9 @@ function approveGrant(origin, request, resources, binding, params = {}) {
       providers: Object.hasOwn(choices, "providers")
         ? choices.providers
         : (previous.providers ?? null),
+      providerIdsVersion: Object.hasOwn(choices, "providers")
+        ? 2
+        : previous.providerIdsVersion,
       resources: {
         mcpOrigins: merge("mcpOrigins", resources.mcpOrigins),
         contractFingerprints: merge(
@@ -2099,13 +2156,13 @@ async function hostedChat(
       emit(turn, {
         type: "model.start",
         round,
-        model: `${config.providerId}/${config.model}`,
+        model: `${config.catalogProviderId ?? config.providerId}/${config.model}`,
       });
       const roundStartedAt = Date.now();
       logEvent(
         "info",
         "turn",
-        `${turn.binding.origin}: round ${round} → ${config.providerId}/${config.model}${tools.length ? ` with ${tools.length} tool(s)` : ""}`,
+        `${turn.binding.origin}: round ${round} → ${config.catalogProviderId ?? config.providerId}/${config.model}${tools.length ? ` with ${tools.length} tool(s)` : ""}`,
       );
       let liveSteps = 0;
       const result = await generate(

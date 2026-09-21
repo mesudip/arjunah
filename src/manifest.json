@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "\u0905\u0930\u094d\u091c\u0941\u0928\u0903 (Arjunah)",
   "version": "1.0.0",
-  "version_name": "1.0.0-alpha.6",
+  "version_name": "1.0.0-alpha.7",
   "description": "Bring your own AI to websites through a user-controlled, origin-scoped window.ai.arjunah extension.",
   "minimum_chrome_version": "120",
   "permissions": ["storage", "tabs"],
@@ -41,7 +41,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["page-api.js"],
+      "resources": ["page-api.js", "icons/providers/*"],
       "matches": ["http://*/*", "https://*/*"]
     }
   ]

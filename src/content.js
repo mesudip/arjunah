@@ -7,6 +7,13 @@
   const pagePending = new Map();
   const IMAGE_TYPES = R.IMAGE_TYPES;
   const HISTORY_LIMIT = 40;
+  const PROVIDER_ICONS = Object.freeze({
+    openai: "icons/providers/openai.svg",
+    "claude-code": "icons/providers/claude.svg",
+    codex: "icons/providers/codex.png",
+    "opencode-api": "icons/providers/opencode.svg",
+    "opencode-cli": "icons/providers/opencode.svg",
+  });
   let registration = null,
     view = null,
     host,
@@ -584,6 +591,14 @@
       },
       modelLabel: (id) =>
         settings?.models?.find((model) => model.id === id)?.displayName ?? id,
+      modelIcon({ providerId }) {
+        const path = PROVIDER_ICONS[providerId];
+        if (!path) return null;
+        return {
+          src: chrome.runtime.getURL(path),
+          ...(providerId === "opencode-api" ? { badge: "[API]" } : {}),
+        };
+      },
       // The renderer drew the choice already; the wallet decides whether it
       // stands, and a false answer puts the previous model back (SPEC 8.2).
       modelChanged({ model }) {

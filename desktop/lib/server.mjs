@@ -32,7 +32,7 @@ import { enrichProviders, mapT3Providers } from "./t3/catalog.mjs";
 
 export const APP_NAME = "arjunah-desktop";
 // Rewritten from the release tag at publish time; see .github/workflows/publish-npm.yml.
-export const RELEASE_VERSION = "1.0.0-alpha.6";
+export const RELEASE_VERSION = "1.0.0-alpha.7";
 export const PROTOCOL_VERSION = "1.0.0";
 // Matches the extension's own request ceiling (LIMITS.requestBytes), so a turn
 // carrying the maximum image payload is not cut off at this hop.

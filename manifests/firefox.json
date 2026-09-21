@@ -39,7 +39,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["page-api.js"],
+      "resources": ["page-api.js", "icons/providers/*"],
       "matches": ["http://*/*", "https://*/*"]
     }
   ],
