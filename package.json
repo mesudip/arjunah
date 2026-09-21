@@ -1,6 +1,6 @@
 {
   "name": "arjunah",
-  "version": "1.0.0-alpha.4",
+  "version": "1.0.0-alpha.5",
   "private": true,
   "type": "module",
   "description": "\u0905\u0930\u094d\u091c\u0941\u0928\u0903 (Arjunah): an open protocol, browser extension, TypeScript SDK, and desktop companion for user-controlled AI access on the web.",
@@ -13,14 +13,14 @@
     "lint": "node scripts/check.mjs",
     "test": "node --test tests/*.test.mjs",
     "test:openai": "node --env-file=.env scripts/verify-openai.mjs",
-    "test:e2e": "npm run test:e2e:chrome && npm run test:e2e:firefox && npm run test:e2e:security && npm run test:e2e:hosted && npm run test:e2e:widget && npm run test:e2e:desktop",
+    "test:e2e": "npm run test:e2e:chrome && npm run test:e2e:firefox && npm run test:e2e:security && npm run test:e2e:hosted && npm run test:e2e:widget && npm run test:e2e:desktop && npm run test:e2e:polling",
     "test:e2e:chrome": "node tests/e2e/chrome.mjs",
     "test:e2e:firefox": "node tests/e2e/firefox.mjs",
     "lint:firefox": "node scripts/build-targets.mjs --unpacked && npx --yes web-ext@10.6.0 lint --source-dir dist/firefox-unpacked --warnings-as-errors",
     "validate": "npm run check && npm run lint:firefox && npm run test:e2e",
     "pack": "node scripts/build-targets.mjs",
-    "format": "prettier --write \"src/**/*.{js,html,css,json}\" \"desktop/**/*.{mjs,js,html,css}\" \"tests/**/*.mjs\" \"scripts/*.mjs\" \"packages/sdk/src/*.ts\" \"packages/widget/src/*.js\"",
-    "format:check": "prettier --check \"src/**/*.{js,html,css,json}\" \"desktop/**/*.{mjs,js,html,css}\" \"tests/**/*.mjs\" \"scripts/*.mjs\" \"packages/sdk/src/*.ts\" \"packages/widget/src/*.js\"",
+    "format": "prettier --write \"src/**/*.{js,html,css,json}\" \"desktop/**/*.{mjs,js,html,css}\" \"tests/**/*.mjs\" \"scripts/*.mjs\" \"packages/sdk/src/*.ts\" \"packages/widget/src/*.js\" \".github/workflows/*.yml\"",
+    "format:check": "prettier --check \"src/**/*.{js,html,css,json}\" \"desktop/**/*.{mjs,js,html,css}\" \"tests/**/*.mjs\" \"scripts/*.mjs\" \"packages/sdk/src/*.ts\" \"packages/widget/src/*.js\" \".github/workflows/*.yml\"",
     "test:e2e:security": "node tests/e2e/security.mjs",
     "desktop": "node desktop/bin/arjunah-desktop.mjs start",
     "desktop:providers": "node desktop/bin/arjunah-desktop.mjs providers",
@@ -29,7 +29,8 @@
     "build:sdk": "npm run build -w arjunah",
     "build:widget": "npm run build -w arjunah-widget",
     "test:e2e:widget": "node tests/e2e/widget.mjs",
-    "test:e2e:hosted": "node tests/e2e/hosted-surfaces.mjs"
+    "test:e2e:hosted": "node tests/e2e/hosted-surfaces.mjs",
+    "test:e2e:polling": "node tests/e2e/polling.mjs"
   },
   "devDependencies": {
     "@puppeteer/browsers": "3.2.2",

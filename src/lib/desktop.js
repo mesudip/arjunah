@@ -1,7 +1,7 @@
 import { BrokerError } from "./errors.js";
 import { EFFORTS, LIMITS } from "./constants.js";
 import { readJson, networkError } from "./network.js";
-import { contentText } from "./validation.js";
+import { contentText, repairToolCalls } from "./validation.js";
 
 export const DESKTOP_DEFAULT_URL = "http://127.0.0.1:48123";
 const STATUS_CODES = {
@@ -13,6 +13,24 @@ const STATUS_CODES = {
   502: "PROVIDER_ERROR",
   504: "TIMEOUT",
 };
+
+/**
+ * JSON with object keys in a fixed order, for comparing a value against a copy
+ * of itself that has been through storage. `chrome.storage.local` hands values
+ * back with their keys sorted, so a freshly fetched object and its cached twin
+ * serialise differently under plain `JSON.stringify` even when every field
+ * matches. A cache guard written that way never sees a hit: it rewrites the
+ * cache on every read, and anything listening for the write reads again.
+ */
+export function stableJson(value) {
+  return JSON.stringify(value, (_key, item) =>
+    item && typeof item === "object" && !Array.isArray(item)
+      ? Object.fromEntries(
+          Object.entries(item).sort(([a], [b]) => (a < b ? -1 : 1)),
+        )
+      : item,
+  );
+}
 
 export function desktopOrigin(input) {
   let url;
@@ -444,27 +462,25 @@ export async function desktopGenerate(config, valid, signal, options = {}) {
       "PROVIDER_ERROR",
       "The desktop app returned an invalid message.",
     );
-  const calls = Array.isArray(message.toolCalls)
-    ? message.toolCalls.slice(0, LIMITS.toolCalls)
-    : [];
-  const toolCalls = calls.map((call) => {
-    if (
-      typeof call?.id !== "string" ||
-      !call.id ||
-      typeof call.name !== "string" ||
-      !/^[A-Za-z0-9_-]{1,64}$/.test(call.name) ||
-      typeof call.arguments !== "string"
-    )
-      throw new BrokerError(
-        "PROVIDER_ERROR",
-        "The desktop app returned invalid tool calls.",
-      );
-    return {
-      id: call.id.slice(0, 128),
-      name: call.name,
-      arguments: call.arguments.slice(0, LIMITS.resultBytes),
-    };
-  });
+  // Repaired rather than rejected, for the reason given in `repairToolCalls`:
+  // a call the companion mangled is still a call the model is owed an answer
+  // to, and ending the turn denies it the chance to correct itself.
+  const {
+    calls: wireCalls,
+    rejected,
+    dropped,
+  } = repairToolCalls(
+    (Array.isArray(message.toolCalls) ? message.toolCalls : []).map((call) => ({
+      id: call?.id,
+      type: "function",
+      function: { name: call?.name, arguments: call?.arguments },
+    })),
+  );
+  const toolCalls = wireCalls.map((call) => ({
+    id: call.id,
+    name: call.function.name,
+    arguments: call.function.arguments,
+  }));
   const content = String(message.content ?? "").slice(0, 120000);
   const count = (value) =>
     Number.isSafeInteger(value) && value >= 0 ? value : 0;
@@ -527,6 +543,8 @@ export async function desktopGenerate(config, valid, signal, options = {}) {
         function: { name: call.name, arguments: call.arguments },
       })),
     },
+    rejectedToolCalls: rejected,
+    droppedToolCalls: dropped,
   };
 }
 

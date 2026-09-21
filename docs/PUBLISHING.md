@@ -5,7 +5,7 @@
 - `arjunah`: the website SDK in `packages/sdk/`
 - `arjunah-desktop`: the optional desktop companion in `desktop/`
 
-Normal releases use npm trusted publishing from `.github/workflows/publish-npm.yml`. GitHub receives a short-lived OIDC credential for each run; there is no `NPM_TOKEN` repository secret.
+Normal releases use npm trusted publishing from `.github/workflows/publish-npm.yml`. GitHub receives a short-lived OIDC credential for each run; there is no `NPM_TOKEN` repository secret. This same workflow owns the complete tagged release so GitHub cannot advertise a desktop version before npm has published and verified it.
 
 ## One-time package bootstrap
 
@@ -53,8 +53,10 @@ Configure both `arjunah` and `arjunah-desktop`. The workflow filename is only th
 
 1. Update every synchronized version location listed in `AGENTS.md` and commit the change.
 2. Push the commit to `main` and wait for CI to pass.
-3. In GitHub, open **Actions → Publish to npm → Run workflow**.
-4. Use `alpha` for a prerelease and `latest` only for a stable release.
-5. Confirm both package pages show the new version, expected dist-tag, and GitHub provenance.
+3. Push an annotated `v<package-version>` tag.
+4. Confirm the **Release** workflow publishes and verifies both package versions before its GitHub release job starts.
+5. Confirm both package pages show the expected dist-tag and GitHub provenance.
 
-The workflow runs the complete project check, refuses to begin when either package version already exists, and then publishes the SDK followed by the desktop companion. Creating a `v<package-version>` Git tag is separate: that triggers the extension archive release workflow, not npm publishing.
+The workflow runs the complete project check and Firefox package lint before publishing anything. It builds the extension archives, publishes the SDK followed by the desktop companion, waits for npm to expose both exact versions under the correct `alpha` or `latest` tag, and only then creates the GitHub release. A failure before registry verification leaves no GitHub release claiming that npm installation is ready.
+
+Publication is safe to rerun after a partial failure: an exact package version already present on npm is left untouched, while a missing sibling package is published. The registry verification still requires both packages and the expected dist-tag. To repair a partial publication without creating another GitHub release, open **Actions → Release → Run workflow** and choose the tag appropriate to the package version.

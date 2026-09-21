@@ -1,49 +1,176 @@
-name: Publish to npm
+name: Release
 
-# Manual: publishes the `arjunah` SDK and `arjunah-desktop` companion at the
-# version in their package.json files. Authentication uses npm trusted
-# publishing (OIDC), configured for this workflow on both npm packages. No
-# long-lived npm token is stored in GitHub. Pre-release versions go to the
-# `alpha` dist-tag by default so `npm install arjunah` keeps resolving to the
-# last stable release.
+# A version tag is one transaction: validate and build the extension, publish
+# both npm packages through this workflow's trusted-publisher identity, verify
+# the registry versions and dist-tags, and only then create the GitHub release.
+# Manual dispatch remains available to repair a package publication without
+# recreating an existing GitHub release.
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       dist_tag:
         description: npm dist-tag (alpha for pre-releases, latest for stable)
         default: alpha
         required: true
-
-permissions:
-  contents: read
-  id-token: write
+        type: choice
+        options:
+          - alpha
+          - latest
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Tag must match package.json
+        if: github.event_name == 'push'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "v$version" != "$RELEASE_TAG" ]; then
+            echo "Tag $RELEASE_TAG does not match package version v$version" >&2
+            exit 1
+          fi
+      - run: npm run check
+      - run: npm run lint:firefox
+      - run: npm run pack
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-assets
+          path: |
+            dist/*.zip
+            dist/*.xpi
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      dist_tag: ${{ steps.tag.outputs.value }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false
       - name: Use an npm CLI with trusted publishing support
         run: npm install --global npm@^11.15.0
       - run: npm ci
-      - run: npm run check
-      - name: Ensure both versions are unpublished
+      - name: Select and validate npm dist-tag
+        id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_TAG: ${{ inputs.dist_tag }}
         run: |
+          version="$(node -p "require('./package.json').version")"
+          if [[ "$version" == *-* ]]; then
+            expected="alpha"
+          else
+            expected="latest"
+          fi
+          if [ "$EVENT_NAME" = "push" ]; then
+            selected="$expected"
+          else
+            selected="$REQUESTED_TAG"
+          fi
+          if [ "$selected" != "$expected" ]; then
+            echo "$version must use the $expected dist-tag, not $selected" >&2
+            exit 1
+          fi
+          echo "value=$selected" >> "$GITHUB_OUTPUT"
+      - name: Publish missing packages through npm OIDC
+        env:
+          DIST_TAG: ${{ steps.tag.outputs.value }}
+        run: |
+          publish_if_missing() {
+            package="$1"
+            workspace="$2"
+            version="$3"
+            error_file="$(mktemp)"
+            if published="$(npm view "$package@$version" version 2>"$error_file")"; then
+              if [ "$published" != "$version" ]; then
+                echo "npm returned unexpected version $published for $package@$version" >&2
+                exit 1
+              fi
+              echo "$package@$version is already published; leaving the immutable version intact."
+              return
+            fi
+            if ! grep -q "E404" "$error_file"; then
+              cat "$error_file" >&2
+              exit 1
+            fi
+            npm publish --workspace "$workspace" --access public --tag "$DIST_TAG"
+          }
+
           sdk_version="$(node -p "require('./packages/sdk/package.json').version")"
           desktop_version="$(node -p "require('./desktop/package.json').version")"
-          if npm view "arjunah@$sdk_version" version >/dev/null 2>&1; then
-            echo "arjunah@$sdk_version is already published" >&2
+          publish_if_missing arjunah packages/sdk "$sdk_version"
+          publish_if_missing arjunah-desktop desktop "$desktop_version"
+      - name: Verify npm registry versions and dist-tag
+        env:
+          DIST_TAG: ${{ steps.tag.outputs.value }}
+        run: |
+          verify_package() {
+            package="$1"
+            version="$2"
+            for attempt in {1..12}; do
+              published="$(npm view "$package@$version" version 2>/dev/null || true)"
+              tags="$(npm view "$package" dist-tags --json 2>/dev/null || true)"
+              tagged="$(node -e '
+                try {
+                  const tags = JSON.parse(process.argv[1]);
+                  process.stdout.write(String(tags[process.argv[2]] || ""));
+                } catch {}
+              ' "$tags" "$DIST_TAG")"
+              if [ "$published" = "$version" ] && [ "$tagged" = "$version" ]; then
+                echo "Verified $package@$version with dist-tag $DIST_TAG."
+                return
+              fi
+              sleep 5
+            done
+            echo "npm did not expose $package@$version at dist-tag $DIST_TAG after 60 seconds" >&2
             exit 1
-          fi
-          if npm view "arjunah-desktop@$desktop_version" version >/dev/null 2>&1; then
-            echo "arjunah-desktop@$desktop_version is already published" >&2
-            exit 1
-          fi
-      - name: Publish SDK through npm OIDC
-        run: npm publish --workspace arjunah --access public --tag "${{ inputs.dist_tag }}"
-      - name: Publish desktop companion through npm OIDC
-        run: npm publish --workspace arjunah-desktop --access public --tag "${{ inputs.dist_tag }}"
+          }
+
+          sdk_version="$(node -p "require('./packages/sdk/package.json').version")"
+          desktop_version="$(node -p "require('./desktop/package.json').version")"
+          verify_package arjunah "$sdk_version"
+          verify_package arjunah-desktop "$desktop_version"
+
+  release:
+    if: github.event_name == 'push'
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-assets
+          path: dist
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/*.zip
+            dist/*.xpi
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          body: |
+            **Chrome / Brave / Edge**: download the `.zip`, unzip it, open `chrome://extensions`, turn on Developer mode, choose **Load unpacked**, and pick the unzipped folder.
+            **Firefox**: the `.xpi` is unsigned; load it from `about:debugging#/runtime/this-firefox` as a temporary add-on.
+            **Desktop app**: `npm install -g arjunah-desktop@${{ needs.publish.outputs.dist_tag }} && arjunah-desktop install`.
+            Full instructions: docs/INSTALL.md.

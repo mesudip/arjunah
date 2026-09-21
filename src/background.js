@@ -24,6 +24,7 @@ import {
   DESKTOP_DEFAULT_URL,
   desktopOrigin,
   desktopStatus,
+  stableJson,
   desktopPair,
   desktopUnpair,
   desktopProviders,
@@ -130,13 +131,23 @@ chrome.storage.onChanged?.addListener((changes, area) => {
   const relevant = Object.keys(changes).filter(
     (key) =>
       Object.values(STORAGE).includes(key) &&
-      JSON.stringify(changes[key].oldValue ?? null) !==
-        JSON.stringify(changes[key].newValue ?? null),
+      stableJson(changes[key].oldValue ?? null) !==
+        stableJson(changes[key].newValue ?? null),
   );
   if (!relevant.length) return;
-  reachability.at = 0;
+  // Reachability is about the companion's address and our token. A refreshed
+  // provider cache says nothing about whether it is answering, and zeroing the
+  // ping here would send every listener that reacts to this broadcast back for
+  // a status of its own — three pings where the cached one would have served.
+  const link = changes[STORAGE.desktop];
+  if (
+    link &&
+    (link.oldValue?.baseUrl !== link.newValue?.baseUrl ||
+      link.oldValue?.token !== link.newValue?.token)
+  )
+    reachability.at = 0;
   broadcastState(`storage:${relevant.join(",")}`);
-  if (changes[STORAGE.desktop]) void ensureDesktopEvents();
+  if (link) void ensureDesktopEvents();
 });
 
 function broadcastState(reason, desktopRevision = null) {
@@ -233,7 +244,9 @@ function queueDesktopReconcile(reason, revision) {
       // read itself must not count as news: announcing an unchanged summary
       // would send every listener back here for another read.
       const summary = await desktopSummary(false).catch(() => null);
-      const fingerprint = JSON.stringify(summary);
+      // The summary's providers come from the companion on one pass and from
+      // the cache on the next, so only a key-order-free comparison is stable.
+      const fingerprint = stableJson(summary);
       if (fingerprint === desktopFingerprint) continue;
       desktopFingerprint = fingerprint;
       broadcastState(next.reason, next.revision);
@@ -688,6 +701,15 @@ async function handle(method, params, sender) {
         throw error;
       });
       await guard(turn, ["models.generate"]);
+      // The broker repairs unusable tool calls when it owns the loop and can
+      // answer them itself (section 7.3). Here the page owns the loop, and
+      // handing it a call whose name was rewritten to stay representable would
+      // be silent corruption: it would look up a tool that was never declared.
+      if (result.rejectedToolCalls?.size)
+        throw new BrokerError(
+          "PROVIDER_ERROR",
+          `The provider returned a tool call that could not be used: ${[...result.rejectedToolCalls.values()][0]}`,
+        );
       await recordUsage(config, result);
       // Subscription agents expose no sampling controls (SPEC 12.3). Dropping
       // them silently would be a trap for the site author, so the page console
@@ -1411,7 +1433,26 @@ async function activeSummary() {
     configured: Boolean(config?.model),
   };
 }
-async function desktopSummary(refresh) {
+let desktopSummaryRead = null;
+/**
+ * The companion's state, read once for everyone who wants it. Provider
+ * detection shells out to CLIs and can take seconds, so callers that arrive
+ * while a read is in flight join it rather than starting a second probe: one
+ * state change otherwise costs an identical read per listener. A caller that
+ * explicitly asked to re-probe (`refresh`) is never served a shared answer.
+ */
+function desktopSummary(refresh) {
+  if (!refresh && desktopSummaryRead) return desktopSummaryRead;
+  const read = readDesktopSummary(refresh);
+  if (refresh) return read;
+  desktopSummaryRead = read;
+  const done = () => {
+    if (desktopSummaryRead === read) desktopSummaryRead = null;
+  };
+  read.then(done, done);
+  return read;
+}
+async function readDesktopSummary(refresh) {
   const link = await getDesktop();
   const baseUrl = link?.baseUrl ?? DESKTOP_DEFAULT_URL;
   const status = await desktopStatus({ baseUrl, token: link?.token });
@@ -1436,7 +1477,9 @@ async function desktopSummary(refresh) {
   if (status.running && status.paired) {
     try {
       providers = await desktopProviders(link, refresh);
-      if (JSON.stringify(providers) !== JSON.stringify(link.providers ?? []))
+      // Key order, not content: see stableJson. Plain JSON.stringify here
+      // made every read a cache miss, and every miss a write.
+      if (stableJson(providers) !== stableJson(link.providers ?? []))
         await chrome.storage.local.set({
           [STORAGE.desktop]: { ...link, providers, providersAt: Date.now() },
         });
@@ -1895,6 +1938,8 @@ function stripRaw(result) {
     agentSteps: _steps,
     thread: _thread,
     quota: _quota,
+    rejectedToolCalls: _rejected,
+    droppedToolCalls: _dropped,
     ...publicResult
   } = result;
   return publicResult;
@@ -2121,7 +2166,10 @@ async function hostedChat(
       logEvent(
         "info",
         "turn",
-        `${turn.binding.origin}: round ${round} answered in ${Date.now() - roundStartedAt}ms (${result.usage?.totalTokens ?? 0} tokens, ${result.message.toolCalls.length} tool call(s))`,
+        // The cache split is the number that says whether a long tool loop is
+        // actually expensive: an uncached prompt that grows every round costs
+        // real money, a cached one barely does.
+        `${turn.binding.origin}: round ${round} answered in ${Date.now() - roundStartedAt}ms (${result.usage?.promptTokens ?? 0} in, ${result.usage?.cachedTokens ?? 0} of them cached, ${result.usage?.completionTokens ?? 0} out, ${result.message.toolCalls.length} tool call(s))`,
       );
       // Anything the live poll missed is still shown once the round completes.
       for (const step of (result.agentSteps ?? []).slice(liveSteps))
@@ -2160,22 +2208,56 @@ async function hostedChat(
         content: result.message.content,
         toolCalls: result.rawMessage.tool_calls,
       });
+      // A call the provider mangled, or one naming a tool that was never
+      // declared, is answered rather than fatal. Both used to end the turn,
+      // which left the visitor with an error and the model with no way to
+      // discover what it got wrong. The reason goes into the diagnostic log,
+      // back to the model as this call's result, and onto the transcript as a
+      // failed tool call.
+      const rejectedCalls = result.rejectedToolCalls ?? new Map();
+      if (result.droppedToolCalls)
+        logEvent(
+          "warn",
+          "turn",
+          `${turn.binding.origin}: ${result.droppedToolCalls} tool call(s) past the limit of ${LIMITS.toolCalls} were dropped`,
+        );
       const imageResults = [];
       for (const call of result.message.toolCalls) {
-        const route = item.routes.get(call.name);
-        if (!route)
-          throw new BrokerError(
-            "TOOL_ERROR",
-            "The assistant requested an undeclared tool.",
-          );
+        const rejection = rejectedCalls.get(call.id) ?? null;
+        const route = rejection ? null : item.routes.get(call.name);
+        const failure =
+          rejection ??
+          (route
+            ? null
+            : `There is no tool named "${call.name.slice(0, 64)}". The tools you can call are: ${[...item.routes.keys()].join(", ").slice(0, 500)}.`);
         let output;
         emit(turn, {
           type: "tool.start",
           id: call.id,
-          name: route.originalName,
-          source: route.type,
+          name: route?.originalName ?? call.name,
+          source: route?.type ?? "site",
           arguments: call.arguments.slice(0, 2000),
         });
+        if (failure) {
+          logEvent(
+            "warn",
+            "turn",
+            `${turn.binding.origin}: rejected tool call "${call.name.slice(0, 64)}" — ${failure}`,
+          );
+          emit(turn, {
+            type: "tool.end",
+            id: call.id,
+            name: route?.originalName ?? call.name,
+            ok: false,
+            result: failure,
+          });
+          messages.push({
+            role: "tool",
+            content: failure,
+            toolCallId: call.id,
+          });
+          continue;
+        }
         try {
           let args;
           try {
@@ -2215,10 +2297,18 @@ async function hostedChat(
             turn.controller.signal.aborted
           )
             throw error;
-          output = {
-            isError: true,
-            message: "The tool failed or returned invalid data.",
-          };
+          // Bounded and shape-only by construction: schema reasons name the
+          // property and the constraint, never the value that was sent.
+          const detail =
+            typeof error?.message === "string" && error.message
+              ? error.message.slice(0, 300)
+              : "The tool failed or returned invalid data.";
+          logEvent(
+            "warn",
+            "turn",
+            `${turn.binding.origin}: tool "${route.originalName.slice(0, 64)}" failed — ${detail}`,
+          );
+          output = { isError: true, message: detail };
         }
         await guard(turn, required, item.resources);
         const contentResult = output?.kind === "content";

@@ -790,14 +790,7 @@ test("OpenCode Chat Completions uses the Zen route with image parts", async (t) 
   assert.equal(result.message.content, "vision answer");
 });
 
-for (const kind of [
-  "http",
-  "json",
-  "shape",
-  "calls",
-  "read-timeout",
-  "oversized",
-]) {
+for (const kind of ["http", "json", "shape", "read-timeout", "oversized"]) {
   test(`provider ${kind} failures are bounded and safe to expose`, async (t) => {
     const original = globalThis.fetch;
     t.after(() => {
@@ -810,10 +803,6 @@ for (const kind of [
       if (kind === "json") return new Response("secret-provider-body");
       if (kind === "shape")
         return Response.json({ secret: "secret-provider-body" });
-      if (kind === "calls")
-        return Response.json({
-          choices: [{ message: { tool_calls: [{ id: "x", function: {} }] } }],
-        });
       if (kind === "read-timeout")
         return new Response(
           new ReadableStream({
@@ -845,6 +834,58 @@ for (const kind of [
     if (kind === "oversized") assert.equal(cancelled, true);
   });
 }
+
+test("unusable provider tool calls are repaired and reported, not thrown away", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+  globalThis.fetch = async () =>
+    Response.json({
+      choices: [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              // No name: unroutable, so the turn must be told why.
+              { id: "x", type: "function", function: {} },
+              // A zero-argument call spelled "" rather than "{}": the same
+              // intent, repaired silently rather than reported.
+              {
+                id: "y",
+                type: "function",
+                function: { name: "ok_tool", arguments: "" },
+              },
+              // Repeated id: repaired, because a result can only answer one call.
+              {
+                id: "y",
+                type: "function",
+                function: { name: "ok_tool", arguments: "{}" },
+              },
+            ],
+          },
+        },
+      ],
+    });
+  const result = await generate(
+    { baseUrl: "https://provider.test", model: "a", apiKey: "secret-key" },
+    { messages: [{ role: "user", content: "hi" }] },
+  );
+  assert.equal(result.message.toolCalls.length, 3);
+  assert.equal(result.message.toolCalls[1].name, "ok_tool");
+  assert.equal(result.message.toolCalls[1].arguments, "{}");
+  assert.equal(result.rejectedToolCalls.size, 1);
+  assert.match(result.rejectedToolCalls.get("x"), /tool call with no name/);
+  // Every id is distinct, so each call can be answered by exactly one result.
+  assert.equal(
+    new Set(result.message.toolCalls.map((call) => call.id)).size,
+    3,
+  );
+  assert.equal(
+    /secret-key/.test(JSON.stringify([...result.rejectedToolCalls])),
+    false,
+  );
+});
 
 for (const model of [
   "gpt-5.6",

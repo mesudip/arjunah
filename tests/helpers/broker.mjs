@@ -1,5 +1,26 @@
 import { clearMcpSessions } from "../../src/lib/mcp.js";
 
+/**
+ * A read from `chrome.storage.local` as Chrome really answers it: the value is
+ * JSON, and its object keys come back sorted rather than in the order they were
+ * written. Handing back a faithful clone instead would hide a whole class of
+ * bug — a cache guard that compares a fresh value against its stored copy with
+ * an order-sensitive test never matches, so it rewrites the cache on every
+ * read, and anything listening for that write reads again.
+ */
+function asStored(value) {
+  if (value === undefined) return undefined;
+  return JSON.parse(
+    JSON.stringify(value, (_key, item) =>
+      item && typeof item === "object" && !Array.isArray(item)
+        ? Object.fromEntries(
+            Object.entries(item).sort(([a], [b]) => (a < b ? -1 : 1)),
+          )
+        : item,
+    ),
+  );
+}
+
 export async function broker(t) {
   clearMcpSessions();
   const previous = { chrome: globalThis.chrome, fetch: globalThis.fetch };
@@ -36,7 +57,7 @@ export async function broker(t) {
     storage: {
       local: {
         async get(key) {
-          const result = structuredClone({ [key]: state.store[key] });
+          const result = { [key]: asStored(state.store[key]) };
           await state.hooks.get?.(key);
           return result;
         },

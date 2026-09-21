@@ -106,10 +106,44 @@ function equal(a, b) {
   return false;
 }
 
-function matches(value, schema, depth = 0) {
-  if (depth > 32) return false;
-  const actual =
-    value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+/** The JSON type name of a value, as a schema would spell it. */
+function typeName(value) {
+  return value === null
+    ? "null"
+    : Array.isArray(value)
+      ? "array"
+      : typeof value;
+}
+
+/**
+ * Records why a value was rejected, and where.
+ *
+ * Only the path, the declared constraint, and the *type* of what arrived are
+ * ever written down: a reason travels back to the model and into the
+ * transcript, so it must describe the shape of the mistake and never the
+ * content of an argument. Enum members are the one exception, and they are the
+ * site's own declared schema rather than anything the model or the user typed.
+ *
+ * First write wins, so the outermost meaningful failure is the one reported
+ * instead of whatever the last short-circuit happened to be.
+ */
+function note(report, path, reason) {
+  if (report && !report.reason) {
+    report.path = path;
+    report.reason = `${path || "the arguments"} ${reason}`;
+  }
+  return false;
+}
+
+function preview(values) {
+  const list = values.map((item) => JSON.stringify(item)).join(", ");
+  return list.length > 200 ? `${list.slice(0, 200)}…` : list;
+}
+
+function matches(value, schema, depth = 0, path = "", report = null) {
+  if (depth > 32)
+    return note(report, path, "is nested too deeply to validate.");
+  const actual = typeName(value);
   if (
     schema.type &&
     !(
@@ -117,73 +151,121 @@ function matches(value, schema, depth = 0) {
       (schema.type === "integer" && Number.isInteger(value))
     )
   )
-    return false;
+    return note(
+      report,
+      path,
+      `must be ${schema.type}, but ${actual} was sent.`,
+    );
   if (schema.enum && !schema.enum.some((item) => equal(value, item)))
-    return false;
+    return note(report, path, `must be one of: ${preview(schema.enum)}.`);
   if (Object.hasOwn(schema, "const") && !equal(value, schema.const))
-    return false;
+    return note(report, path, `must be ${JSON.stringify(schema.const)}.`);
+  // Branch keywords validate their children silently: a child's reason
+  // describes one rejected alternative, not why the whole branch failed.
   if (
     schema.anyOf &&
     !schema.anyOf.some((item) => matches(value, item, depth + 1))
   )
-    return false;
+    return note(report, path, "did not match any of the allowed shapes.");
   if (
     schema.oneOf &&
     schema.oneOf.filter((item) => matches(value, item, depth + 1)).length !== 1
   )
-    return false;
+    return note(report, path, "must match exactly one of the allowed shapes.");
   if (
     schema.allOf &&
     !schema.allOf.every((item) => matches(value, item, depth + 1))
   )
-    return false;
-  if (
-    typeof value === "number" &&
-    (!Number.isFinite(value) ||
-      value < (schema.minimum ?? -Infinity) ||
-      value > (schema.maximum ?? Infinity))
-  )
-    return false;
-  if (
-    typeof value === "string" &&
-    ([...value].length < (schema.minLength ?? 0) ||
-      [...value].length > (schema.maxLength ?? Infinity))
-  )
-    return false;
+    return note(report, path, "did not match all of the required shapes.");
+  if (typeof value === "number") {
+    if (!Number.isFinite(value))
+      return note(report, path, "must be a finite number.");
+    if (value < (schema.minimum ?? -Infinity))
+      return note(report, path, `must be at least ${schema.minimum}.`);
+    if (value > (schema.maximum ?? Infinity))
+      return note(report, path, `must be at most ${schema.maximum}.`);
+  }
+  if (typeof value === "string") {
+    const length = [...value].length;
+    if (length < (schema.minLength ?? 0))
+      return note(
+        report,
+        path,
+        `must be at least ${schema.minLength} characters, but ${length} were sent.`,
+      );
+    if (length > (schema.maxLength ?? Infinity))
+      return note(
+        report,
+        path,
+        `must be at most ${schema.maxLength} characters, but ${length} were sent.`,
+      );
+  }
   if (Array.isArray(value)) {
-    if (
-      value.length < (schema.minItems ?? 0) ||
-      value.length > (schema.maxItems ?? Infinity)
-    )
-      return false;
+    if (value.length < (schema.minItems ?? 0))
+      return note(
+        report,
+        path,
+        `must have at least ${schema.minItems} items, but ${value.length} were sent.`,
+      );
+    if (value.length > (schema.maxItems ?? Infinity))
+      return note(
+        report,
+        path,
+        `must have at most ${schema.maxItems} items, but ${value.length} were sent.`,
+      );
     if (
       schema.items &&
-      !value.every((item) => matches(item, schema.items, depth + 1))
+      !value.every((item, index) =>
+        matches(item, schema.items, depth + 1, `${path}[${index}]`, report),
+      )
     )
       return false;
   }
   if (object(value)) {
-    if (schema.required?.some((key) => !Object.hasOwn(value, key)))
-      return false;
+    const missing = (schema.required ?? []).filter(
+      (key) => !Object.hasOwn(value, key),
+    );
+    if (missing.length)
+      return note(
+        report,
+        path,
+        `is missing the required ${missing.length === 1 ? "property" : "properties"} ${preview(missing)}.`,
+      );
     for (const [key, item] of Object.entries(value)) {
       const child = Object.hasOwn(schema.properties ?? {}, key)
         ? schema.properties[key]
         : schema.additionalProperties;
-      if (
-        child === false ||
-        (object(child) && !matches(item, child, depth + 1))
-      )
+      const childPath = path ? `${path}.${key}` : key;
+      if (child === false)
+        return note(report, childPath, "is not a property this tool accepts.");
+      if (object(child) && !matches(item, child, depth + 1, childPath, report))
         return false;
     }
   }
   return true;
 }
 
+/**
+ * Model-supplied arguments checked against the tool's declared schema.
+ *
+ * A failure is the model's mistake to correct, so the thrown message names the
+ * offending property and the constraint it broke. The turn hands that text
+ * back as the tool result rather than ending the turn, and a useless "invalid
+ * arguments" would only earn the same invalid call again.
+ */
 export function validateArguments(args, schema) {
-  if (!object(args) || !matches(args, schema))
+  if (!object(args))
     throw new BrokerError(
       "TOOL_ERROR",
-      "Tool arguments do not match the declared schema.",
+      `Tool arguments must be a JSON object, but ${typeName(args)} was sent.`,
+    );
+  const report = { path: "", reason: "" };
+  if (!matches(args, schema, 0, "", report))
+    throw new BrokerError(
+      "TOOL_ERROR",
+      report.reason
+        ? `Tool arguments do not match the declared schema: ${report.reason}`
+        : "Tool arguments do not match the declared schema.",
     );
   return args;
 }

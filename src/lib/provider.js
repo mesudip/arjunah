@@ -3,6 +3,7 @@ import { LIMITS } from "./constants.js";
 import {
   validateGenerateRequest,
   validateToolCalls,
+  repairToolCalls,
   cloneJson,
   hasImages,
 } from "./validation.js";
@@ -135,15 +136,11 @@ function completionResult(config, body, choice) {
       "PROVIDER_ERROR",
       "The provider response did not contain a message.",
     );
-  let wireCalls;
-  try {
-    wireCalls = validateToolCalls(choice.message.tool_calls ?? []);
-  } catch {
-    throw new BrokerError(
-      "PROVIDER_ERROR",
-      "The provider returned invalid tool calls.",
-    );
-  }
+  const {
+    calls: wireCalls,
+    rejected,
+    dropped,
+  } = repairToolCalls(choice.message.tool_calls ?? []);
   if (
     choice.message.content != null &&
     typeof choice.message.content !== "string"
@@ -184,6 +181,8 @@ function completionResult(config, body, choice) {
     contextWindow: config.contextWindow ?? null,
     thread: false,
     rawMessage: { role: "assistant", content, tool_calls: wireCalls },
+    rejectedToolCalls: rejected,
+    droppedToolCalls: dropped,
   };
 }
 
@@ -552,11 +551,10 @@ function anthropicResult(config, body) {
       content += part.text;
     if (part?.type === "thinking" && typeof part.thinking === "string")
       reasoning += part.thinking;
-    if (
-      part?.type === "tool_use" &&
-      typeof part.id === "string" &&
-      typeof part.name === "string"
-    )
+    // Malformed parts are passed through rather than skipped: a call the
+    // parser drops silently leaves the model waiting on a result that never
+    // comes, where a repaired one is answered with the reason it failed.
+    if (part?.type === "tool_use")
       wireCalls.push({
         id: part.id,
         type: "function",
@@ -566,15 +564,7 @@ function anthropicResult(config, body) {
         },
       });
   }
-  let validated;
-  try {
-    validated = validateToolCalls(wireCalls);
-  } catch {
-    throw new BrokerError(
-      "PROVIDER_ERROR",
-      "The provider returned invalid tool calls.",
-    );
-  }
+  const { calls: validated, rejected, dropped } = repairToolCalls(wireCalls);
   content = content.slice(0, 120000);
   reasoning = reasoning.slice(0, LIMITS.reasoningChars);
   return {
@@ -602,6 +592,8 @@ function anthropicResult(config, body) {
     contextWindow: config.contextWindow ?? null,
     thread: false,
     rawMessage: { role: "assistant", content, tool_calls: validated },
+    rejectedToolCalls: rejected,
+    droppedToolCalls: dropped,
   };
 }
 
@@ -834,7 +826,7 @@ function geminiResult(config, body) {
       if (part.thought === true) reasoning += part.text;
       else content += part.text;
     }
-    if (part?.functionCall && typeof part.functionCall.name === "string")
+    if (part?.functionCall)
       wireCalls.push({
         id: (typeof part.functionCall.id === "string" && part.functionCall.id
           ? part.functionCall.id
@@ -852,15 +844,7 @@ function geminiResult(config, body) {
           : {}),
       });
   });
-  let validated;
-  try {
-    validated = validateToolCalls(wireCalls);
-  } catch {
-    throw new BrokerError(
-      "PROVIDER_ERROR",
-      "The provider returned invalid tool calls.",
-    );
-  }
+  const { calls: validated, rejected, dropped } = repairToolCalls(wireCalls);
   content = content.slice(0, 120000);
   reasoning = reasoning.slice(0, LIMITS.reasoningChars);
   return {
@@ -887,6 +871,8 @@ function geminiResult(config, body) {
     contextWindow: config.contextWindow ?? null,
     thread: false,
     rawMessage: { role: "assistant", content, tool_calls: validated },
+    rejectedToolCalls: rejected,
+    droppedToolCalls: dropped,
   };
 }
 
@@ -1069,12 +1055,7 @@ function responsesResult(config, body) {
       for (const part of Array.isArray(item.content) ? item.content : [])
         if (part?.type === "output_text" && typeof part.text === "string")
           content += part.text;
-    if (
-      item?.type === "function_call" &&
-      typeof item.call_id === "string" &&
-      typeof item.name === "string" &&
-      typeof item.arguments === "string"
-    )
+    if (item?.type === "function_call")
       wireCalls.push({
         id: item.call_id,
         type: "function",
@@ -1082,15 +1063,7 @@ function responsesResult(config, body) {
       });
   }
   content = content.slice(0, 120000);
-  let validated;
-  try {
-    validated = validateToolCalls(wireCalls);
-  } catch {
-    throw new BrokerError(
-      "PROVIDER_ERROR",
-      "The provider returned invalid tool calls.",
-    );
-  }
+  const { calls: validated, rejected, dropped } = repairToolCalls(wireCalls);
   return {
     id:
       typeof body.id === "string" ? body.id.slice(0, 200) : crypto.randomUUID(),
@@ -1116,6 +1089,8 @@ function responsesResult(config, body) {
     contextWindow: config.contextWindow ?? null,
     thread: false,
     rawMessage: { role: "assistant", content, tool_calls: validated },
+    rejectedToolCalls: rejected,
+    droppedToolCalls: dropped,
   };
 }
 

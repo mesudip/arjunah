@@ -890,27 +890,23 @@ test("hosted chat tool rounds work through a desktop provider", async (t) => {
 test("a hosted turn that fails mid-way still records the tokens it spent", async (t) => {
   const b = await broker(t);
   desktopMock(b, {
-    // The second round asks for a tool the site never declared, which aborts
-    // the turn after the first round has already been billed by the provider.
+    // The second round fails at the provider, which aborts the turn after the
+    // first round has already been billed.
     generate: (payload) =>
-      Response.json({
-        id: payload.messages.some((item) => item.role === "tool") ? "d2" : "d1",
-        message: {
-          role: "assistant",
-          content: "",
-          toolCalls: [
-            {
-              id: "call_1",
-              name: payload.messages.some((item) => item.role === "tool")
-                ? "site__undeclared"
-                : "site__echo",
-              arguments: "{}",
+      payload.messages.some((item) => item.role === "tool")
+        ? new Response("upstream is down", { status: 502 })
+        : Response.json({
+            id: "d1",
+            message: {
+              role: "assistant",
+              content: "",
+              toolCalls: [
+                { id: "call_1", name: "site__echo", arguments: "{}" },
+              ],
             },
-          ],
-        },
-        finishReason: "tool_calls",
-        usage: { promptTokens: 5, completionTokens: 6, totalTokens: 11 },
-      }),
+            finishReason: "tool_calls",
+            usage: { promptTokens: 5, completionTokens: 6, totalTokens: 11 },
+          }),
   });
   await b.ok("desktop.pair", { code: "123456" }, b.extension);
   await b.ok(
@@ -922,12 +918,84 @@ test("a hosted turn that fails mid-way still records the tokens it spent", async
   const prepared = await b.prepare(manifest);
   assert.equal(
     (await b.call("chat.complete", prepared)).error.code,
-    "TOOL_ERROR",
+    "PROVIDER_ERROR",
   );
   const usage = await b.ok("usage.get", {}, b.extension);
   assert.equal(usage["claude-code"].dayRequests, 1);
-  assert.equal(usage["claude-code"].dayPromptTokens, 10);
-  assert.equal(usage["claude-code"].dayCompletionTokens, 12);
+  assert.equal(usage["claude-code"].dayPromptTokens, 5);
+  assert.equal(usage["claude-code"].dayCompletionTokens, 6);
+});
+
+test("a tool call the model got wrong is answered with the reason, not fatal", async (t) => {
+  const b = await broker(t);
+  const rounds = [];
+  desktopMock(b, {
+    generate: (payload) => {
+      rounds.push(payload.messages);
+      const round = rounds.length;
+      const call = (name, args) => ({
+        id: `call_${round}`,
+        name,
+        arguments: args,
+      });
+      // Round 1 names a tool that was never declared; round 2 calls the real
+      // one with arguments that break its schema; round 3 gets it right.
+      const toolCalls =
+        round === 1
+          ? [call("site__undeclared", "{}")]
+          : round === 2
+            ? [call("site__echo", JSON.stringify({ text: 7 }))]
+            : round === 3
+              ? [call("site__echo", JSON.stringify({ text: "x" }))]
+              : [];
+      return Response.json({
+        id: `d${round}`,
+        message: {
+          role: "assistant",
+          content: toolCalls.length ? "" : "done",
+          toolCalls,
+        },
+        finishReason: toolCalls.length ? "tool_calls" : "stop",
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      });
+    },
+  });
+  await b.ok("desktop.pair", { code: "123456" }, b.extension);
+  await b.ok(
+    "provider.select",
+    { type: "desktop", providerId: "claude-code" },
+    b.extension,
+  );
+  b.hooks.tool = () => ({ echoed: "x" });
+  const prepared = await b.prepare({
+    ...manifest,
+    tools: [
+      {
+        name: "echo",
+        description: "Echo text back.",
+        inputSchema: {
+          type: "object",
+          properties: { text: { type: "string" } },
+          required: ["text"],
+          additionalProperties: false,
+        },
+      },
+    ],
+  });
+  const answer = await b.ok("chat.complete", prepared);
+  assert.equal(answer.message.content, "done");
+  // The model was told what was wrong with each attempt, specifically enough
+  // to fix it, and the turn survived both mistakes.
+  // The final round carries every result the model was shown along the way.
+  const results = rounds
+    .at(-1)
+    .filter((item) => item.role === "tool")
+    .map((item) => item.content);
+  assert.equal(results.length, 3);
+  assert.match(results[0], /no tool named "site__undeclared"/);
+  assert.match(results[0], /site__echo/);
+  assert.match(results[1], /text must be string, but number was sent/);
+  assert.match(results[2], /echoed/);
 });
 
 test("a narrowed level 2 site keeps its pinned model in the widget switcher, and desktop agents warn about sampling controls", async (t) => {

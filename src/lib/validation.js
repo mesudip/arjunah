@@ -801,6 +801,106 @@ export function validateToolCalls(calls) {
   });
 }
 
+/**
+ * Model-supplied tool calls, made safe to execute rather than rejected outright.
+ *
+ * `validateToolCalls` above is the strict gate for calls a *page* supplies:
+ * malformed input there is the caller's bug and earns INVALID_REQUEST. Calls
+ * that come back from a *model* are a different problem. A malformed one is the
+ * model's own mistake, and the turn can only offer it the chance to correct
+ * that mistake if the conversation stays well-formed — every tool call needs a
+ * result, so a call that cannot be executed still needs an id to answer.
+ *
+ * So each call is repaired into something representable, and the ones that
+ * cannot be executed carry the reason the model will be told:
+ *
+ * - Empty `arguments` becomes `"{}"`. Models calling a zero-argument tool over
+ *   the Responses API routinely send `""`, which is not a rejection-worthy
+ *   mistake, just a different spelling of "no arguments".
+ * - An empty, over-long, or repeated id is replaced with a minted one. The
+ *   broker echoes its own assistant message, so only the pairing between a call
+ *   and its result has to hold; the provider never sees the original id again.
+ * - A name outside the declared charset, arguments over the size bound, and
+ *   anything that is not a function call object cannot be run. Those are
+ *   reported, and the turn answers them as failed tool calls.
+ *
+ * Returns the repaired calls, a `rejected` map from call id to reason, and how
+ * many trailing calls were dropped for exceeding the per-message bound.
+ */
+export function repairToolCalls(calls) {
+  const list = Array.isArray(calls) ? calls : [];
+  const kept = list.slice(0, LIMITS.toolCalls);
+  const rejected = new Map();
+  const ids = new Set();
+  const result = [];
+  const mint = (index) => {
+    let id = `call_${index}`;
+    for (let n = 0; ids.has(id); n++) id = `call_${index}_${n}`;
+    ids.add(id);
+    return id;
+  };
+  for (const [index, call] of kept.entries()) {
+    if (!plainObject(call) || !plainObject(call.function)) {
+      const id = mint(index);
+      result.push({
+        id,
+        type: "function",
+        function: { name: "invalid_tool_call", arguments: "{}" },
+      });
+      rejected.set(
+        id,
+        "The provider returned something that was not a function call, so it could not be run. Issue the call again.",
+      );
+      continue;
+    }
+    let id =
+      typeof call.id === "string" && call.id.length <= 128 ? call.id : "";
+    if (!id || ids.has(id)) id = mint(index);
+    else ids.add(id);
+
+    const declared =
+      typeof call.function.name === "string" ? call.function.name : "";
+    let name = declared;
+    if (!TOOL_NAME.test(declared)) {
+      const cleaned = declared.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 64);
+      name = TOOL_NAME.test(cleaned) ? cleaned : "invalid_tool_call";
+      rejected.set(
+        id,
+        declared
+          ? `"${declared.slice(0, 120)}" is not a usable tool name: names may only contain letters, digits, underscores, and hyphens, and must be 1 to 64 characters long.`
+          : "The provider returned a tool call with no name, so it could not be routed. Issue the call again with the name of a declared tool.",
+      );
+    }
+
+    let args =
+      typeof call.function.arguments === "string"
+        ? call.function.arguments
+        : "";
+    // A zero-argument call arrives as "" from several providers; that is the
+    // same intent as "{}" and is repaired rather than reported.
+    if (!args) args = "{}";
+    if (args.length > LIMITS.resultBytes) {
+      rejected.set(
+        id,
+        `The arguments were ${args.length} characters long, over the ${LIMITS.resultBytes} character limit. Call the tool again with smaller arguments.`,
+      );
+      args = "{}";
+    }
+
+    result.push({
+      id,
+      type: "function",
+      function: { name, arguments: args },
+      ...(typeof call.thoughtSignature === "string" &&
+      call.thoughtSignature &&
+      call.thoughtSignature.length <= LIMITS.signatureChars
+        ? { thoughtSignature: call.thoughtSignature }
+        : {}),
+    });
+  }
+  return { calls: result, rejected, dropped: list.length - kept.length };
+}
+
 export function validateContext(input) {
   if (!plainObject(input)) invalid("Page context must be an object.");
   const output = {};

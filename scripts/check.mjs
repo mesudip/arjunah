@@ -16,6 +16,43 @@ for (const path of [
   if (release(manifest.version) !== VERSION || manifest.version !== pkg.version)
     throw new Error(`${path} and protocol versions drifted.`);
 }
+// Tagged releases must not be able to advertise an npm package that was never
+// published. Keep the build, OIDC publish, registry verification, and GitHub
+// release in the one workflow filename configured as npm's trusted publisher.
+const publishingWorkflow = readFileSync(
+  ".github/workflows/publish-npm.yml",
+  "utf8",
+);
+for (const needle of [
+  'tags: ["v*"]',
+  "npm publish --workspace",
+  "Verify npm registry versions and dist-tag",
+  "needs: publish",
+  "softprops/action-gh-release@v3",
+]) {
+  if (!publishingWorkflow.includes(needle))
+    throw new Error(`The atomic release workflow is missing: ${needle}`);
+}
+for (const file of readdirSync(".github/workflows")) {
+  if (file === "publish-npm.yml" || !file.endsWith(".yml")) continue;
+  const workflow = readFileSync(join(".github/workflows", file), "utf8");
+  if (workflow.includes('tags: ["v*"]'))
+    throw new Error(
+      `${file} competes with the atomic tagged-release workflow.`,
+    );
+}
+for (const legacyAction of [
+  "actions/checkout@v4",
+  "actions/setup-node@v4",
+  "actions/upload-artifact@v4",
+  "softprops/action-gh-release@v2",
+]) {
+  for (const file of readdirSync(".github/workflows")) {
+    const workflow = readFileSync(join(".github/workflows", file), "utf8");
+    if (workflow.includes(legacyAction))
+      throw new Error(`${file} still uses Node 20 action ${legacyAction}.`);
+  }
+}
 const required = [
   "manifest.json",
   "background.js",

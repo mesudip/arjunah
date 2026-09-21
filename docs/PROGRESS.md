@@ -1,5 +1,18 @@
 # Project progress
 
+## 2026-09-21 — 1.0.0-alpha.5
+
+- A tool call the model got wrong no longer ends the turn. Four provider parsers rejected a whole response when any tool call failed validation, and an undeclared tool name threw outright, so a single malformed call surfaced to the visitor as a dead turn and gave the model nothing to correct. Unusable calls are now repaired into something representable, reported to the model as that call's result, logged, and drawn in the transcript as a failed tool call. `validateToolCalls` stays strict for calls a page supplies, where malformed input really is the caller's bug.
+- Empty `arguments`, and empty, oversized, or repeated call ids, are repaired silently: they are spelling differences rather than mistakes, and the empty-arguments case alone accounted for observed `PROVIDER_ERROR` turns against Zen's Responses models. Unroutable names, oversized arguments, and non-function-call objects are repaired only far enough to keep the conversation well-formed, and carry the reason the model is shown.
+- The Anthropic, Gemini, and Responses parsers no longer skip malformed parts. A dropped call left the model waiting on a result that was never coming; a repaired one is answered.
+- Schema failures say what was wrong. The argument validator reports the failing property path and the constraint it broke instead of one flat sentence, so a retry has something to act on. Reasons name the path, the constraint, and the type that arrived, never the value, because they travel to the model and into the transcript.
+- `models.generate` still fails on an unusable tool call: the page owns that loop, and handing it a call whose name was rewritten to stay representable would be silent corruption. Repair internals stay off the page bridge.
+- The round log records the prompt cache split, so a long tool loop can be judged on what it actually cost rather than on its total token count.
+- Fixed the release split that allowed `v1.0.0-alpha.4` to create a GitHub release while npm still exposed `arjunah-desktop@1.0.0-alpha.3`. The npm trusted-publisher workflow now owns the whole tag transaction: validate the tag, run checks and Firefox lint, build the archives, publish both npm packages, verify both exact registry versions and the required dist-tag, and only then create the GitHub release.
+- Kept the publish command in `publish-npm.yml`, the filename already trusted by npm. npm validates the calling workflow for OIDC, so wrapping the old manual workflow from `release.yml` would have broken authentication. The competing tag workflow was removed.
+- Partial npm publication is rerunnable: an immutable version that already exists is retained, a missing sibling is published, and the release remains gated on registry verification for both. Manual dispatch repairs npm without recreating a GitHub release.
+- Moved every action in the release path to a Node 24 runtime (`checkout@v7`, `setup-node@v7`, artifact upload/download v7/v8, and `action-gh-release@v3`), and upgraded the CI and Pages actions to their Node 24 generations too. Workflow YAML is now covered by Prettier, and the static project check enforces the single tagged-release owner, its publish → verify → release gate, and the absence of the known Node 20 action versions.
+
 ## 2026-09-20 — 1.0.0-alpha.4
 
 - Prepared the next alpha with the OpenCode Zen API-key provider as its headline change: a second independent API-key credential beside OpenAI, routed to each Zen model family's native wire format, with browser end-to-end coverage for the new path.

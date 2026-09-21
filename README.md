@@ -84,7 +84,7 @@ npm run validate       # check + Firefox lint + Chrome, Firefox, security, deskt
 npm run pack           # dist/arjunah-chrome-<version>.zip and dist/arjunah-firefox-<version>.xpi
 ```
 
-The repository is an npm workspace: the extension in `src/`, the shared chat renderer in `src/renderer/`, the `arjunah` SDK in `packages/sdk/`, the `arjunah-widget` standalone renderer in `packages/widget/`, the `arjunah-desktop` companion in `desktop/`. Browser suites use temporary profiles and local mock services; `ARJUNAH_E2E_LIVE=opencode` (or `codex`, `claude-code`) drives a real CLI, and `CHROME_PATH` or `FIREFOX_PATH` picks a browser. Tags matching `v*` build a GitHub release; npm publishing is a manual workflow. Contributor context is in [AGENTS.md](AGENTS.md); verification history is in [docs/PROGRESS.md](docs/PROGRESS.md).
+The repository is an npm workspace: the extension in `src/`, the shared chat renderer in `src/renderer/`, the `arjunah` SDK in `packages/sdk/`, the `arjunah-widget` standalone renderer in `packages/widget/`, the `arjunah-desktop` companion in `desktop/`. Browser suites use temporary profiles and local mock services; `ARJUNAH_E2E_LIVE=opencode` (or `codex`, `claude-code`) drives a real CLI, and `CHROME_PATH` or `FIREFOX_PATH` picks a browser. Tags matching `v*` run the checked npm and GitHub release pipeline. Contributor context is in [AGENTS.md](AGENTS.md); verification history is in [docs/PROGRESS.md](docs/PROGRESS.md).
 
 ## Status
 
