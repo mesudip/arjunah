@@ -2,7 +2,6 @@ import { randomBytes, randomUUID } from "node:crypto";
 
 export const SESSION_LIMITS = Object.freeze({
   maxSessions: 6,
-  batchMs: 250,
   // How long a session waits for the browser to return tool results.
   resumeMs: 120_000,
   // How long one /api/generate call waits for the next model event.
@@ -25,10 +24,8 @@ export class ToolSession {
     this.providerId = providerId;
     this.onEnd = onEnd;
     this.pending = new Map(); // callId -> { name, resolve }
-    this.collected = [];
     this.events = [];
     this.waiter = null;
-    this.batchTimer = null;
     this.resumeTimer = null;
     this.child = null;
     this.ended = false;
@@ -86,47 +83,49 @@ export class ToolSession {
     const id = `call_${randomBytes(12).toString("hex")}`;
     return new Promise((resolve) => {
       this.pending.set(id, { name, resolve });
-      this.collected.push({ id, name, arguments: JSON.stringify(args ?? {}) });
-      clearTimeout(this.batchTimer);
-      this.batchTimer = setTimeout(() => this.flush(), SESSION_LIMITS.batchMs);
+      // MCP supplies no end-of-batch marker. Surface each request immediately
+      // instead of guessing with a debounce; sibling calls remain pending and
+      // may be resumed independently as the browser returns their results.
+      this.emit({
+        type: "tool_calls",
+        calls: [{ id, name, arguments: JSON.stringify(args ?? {}) }],
+      });
+      this.armResumeTimer();
     });
   }
 
-  flush() {
-    if (!this.collected.length) return;
-    const calls = this.collected;
-    this.collected = [];
-    this.emit({ type: "tool_calls", calls });
+  armResumeTimer() {
     clearTimeout(this.resumeTimer);
-    this.resumeTimer = setTimeout(() => {
-      if (this.pending.size) this.end(true);
-    }, SESSION_LIMITS.resumeMs);
+    this.resumeTimer = this.pending.size
+      ? setTimeout(() => {
+          if (this.pending.size) this.end(true);
+        }, SESSION_LIMITS.resumeMs)
+      : null;
   }
 
   matches(results) {
     return (
       !this.ended &&
       results.length > 0 &&
-      results.every((item) => this.pending.has(item.id)) &&
-      results.length === this.pending.size
+      results.every((item) => this.pending.has(item.id))
     );
   }
 
   resume(results) {
-    clearTimeout(this.resumeTimer);
     for (const item of results) {
       const entry = this.pending.get(item.id);
       this.pending.delete(item.id);
       entry?.resolve({
         content: String(item.content).slice(0, SESSION_LIMITS.toolResultBytes),
+        images: Array.isArray(item.images) ? item.images.slice(0, 8) : [],
       });
     }
+    this.armResumeTimer();
   }
 
   end(kill) {
     if (this.ended) return;
     this.ended = true;
-    clearTimeout(this.batchTimer);
     clearTimeout(this.resumeTimer);
     for (const entry of this.pending.values())
       entry.resolve({

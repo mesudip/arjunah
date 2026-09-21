@@ -43,13 +43,14 @@ var ArjunahRenderer = (function () {
     .panel{--bg:#fff;--surface:#f5f6f8;--surface-strong:#eceef2;--ink:#171717;--muted:#6b7280;--line:#e5e7eb;--bubble:#fff;--user:var(--accent);--shadow:0 24px 70px #0f172a26,0 2px 10px #0f172a10;color-scheme:light}
     .panel[data-mode=dark]{--bg:#171717;--surface:#212121;--surface-strong:#2f2f2f;--ink:#f3f4f6;--muted:#a1a1aa;--line:#343434;--bubble:#212121;color-scheme:dark}
     @media (prefers-color-scheme:dark){.panel[data-mode=auto]{--bg:#171717;--surface:#212121;--surface-strong:#2f2f2f;--ink:#f3f4f6;--muted:#a1a1aa;--line:#343434;--bubble:#212121;color-scheme:dark}}
-    .launcher{pointer-events:auto;position:fixed;right:20px;bottom:20px;width:54px;height:54px;border:0;border-radius:18px;background:var(--accent);color:var(--accent-ink);box-shadow:0 12px 32px #0f172a40;font:700 15px/1 system-ui,-apple-system,sans-serif;cursor:pointer;display:grid;place-items:center;transition:transform .18s ease,box-shadow .18s ease}
+    .launcher{pointer-events:auto;position:fixed;right:20px;bottom:20px;width:54px;height:54px;padding:0;border:0;border-radius:13px;overflow:hidden;background:transparent;box-shadow:0 12px 32px #0f172a40;cursor:pointer;display:grid;place-items:center;transition:transform .18s ease,box-shadow .18s ease}.launcher svg{display:block;width:100%;height:100%}
     .launcher:hover{transform:translateY(-2px) scale(1.02);box-shadow:0 16px 38px #0f172a48}.launcher:active{transform:translateY(0) scale(.97)}
     .panel{pointer-events:auto;position:fixed;right:20px;bottom:86px;width:min(460px,calc(100vw - 24px));height:min(680px,calc(100vh - 110px));min-width:320px;min-height:380px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);resize:both;overflow:hidden;border:1px solid var(--line);border-radius:18px;background:var(--bg);color:var(--ink);box-shadow:var(--shadow);font:14px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;display:flex;flex-direction:column}
     .panel:not([hidden]){animation:panel-in .22s cubic-bezier(.2,.8,.2,1) both}
     .panel[hidden],.launcher[hidden],[hidden]{display:none!important}
     .head{display:flex;align-items:center;gap:6px;padding:11px 10px 10px 16px;border-bottom:1px solid var(--line);cursor:grab;user-select:none;background:var(--bg)}
     .head:active{cursor:grabbing}
+    .grip{position:absolute;left:6px;top:6px;z-index:9;width:14px;height:14px;color:var(--muted);opacity:.55;cursor:nwse-resize;touch-action:none}.grip:hover{opacity:1;color:var(--ink)}.grip svg{display:block}
     .brand{flex:1;min-width:0;display:grid}
     .brand strong{font-size:14px;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .brand small{color:var(--muted);font-size:11.5px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -255,9 +256,11 @@ var ArjunahRenderer = (function () {
     .compose-control:hover,.compose-control[aria-expanded=true]{background:var(--surface)}.compose-control:disabled{opacity:.45;cursor:default}
     .attach.compose-control{width:32px;padding:0;justify-content:center;font-size:19px}.context-toggle{padding:0;width:32px;justify-content:center;font-size:16px}.context-toggle input{position:absolute;opacity:0;pointer-events:none}.context-toggle:has(input:checked){background:var(--surface-strong);color:var(--accent)}
     .model-picker{position:relative;min-width:0}.model-button{max-width:190px}.model-label{overflow:hidden;text-overflow:ellipsis}.chevron{font-size:13px;color:var(--muted)}
-    .model-menu{position:absolute;left:0;bottom:calc(100% + 10px);z-index:8;width:min(330px,calc(100vw - 70px));max-height:360px;overflow:auto;padding:8px;border:1px solid var(--line);border-radius:17px;background:var(--bg);box-shadow:0 20px 50px #0f172a2b,0 2px 8px #0f172a12;animation:popover-in .15s ease both}
+    .model-menu{position:absolute;left:0;bottom:calc(100% + 10px);z-index:8;width:min(330px,calc(100vw - 70px));max-height:360px;display:flex;flex-direction:column;padding:8px;border:1px solid var(--line);border-radius:17px;background:var(--bg);box-shadow:0 20px 50px #0f172a2b,0 2px 8px #0f172a12;animation:popover-in .15s ease both}
+    .model-search{flex:none;width:100%;box-sizing:border-box;margin-bottom:6px;height:32px;padding:0 10px;border:1px solid var(--line);border-radius:11px;background:var(--surface);color:var(--ink);font:inherit;font-size:13px;outline:0}.model-search:focus{border-color:var(--accent)}
+    .model-list{flex:1 1 auto;min-height:0;overflow:auto}
     .menu-title{padding:7px 10px 8px;color:var(--muted);font-size:12px}.menu-group{padding:7px 10px 3px;color:var(--muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em}
-    .model-option{width:100%;display:flex;align-items:center;gap:9px;border:0;border-radius:11px;background:transparent;color:var(--ink);padding:9px 10px;cursor:pointer;text-align:left}.model-option:hover,.model-option.selected{background:var(--surface)}.model-option span:first-child{flex:1}.model-option small{color:var(--muted)}.model-check{width:14px;font-weight:700}
+    .model-option{width:100%;display:flex;align-items:center;gap:9px;border:0;border-radius:11px;background:transparent;color:var(--ink);padding:9px 10px;cursor:pointer;text-align:left}.model-option:hover,.model-option.selected,.model-option.active{background:var(--surface)}.model-option.active{outline:2px solid var(--accent);outline-offset:-2px}.model-option span:first-child{flex:1}.model-option small{color:var(--muted)}.model-check{width:14px;font-weight:700}
     .think{height:32px;max-width:130px;border:0;border-radius:10px;background:transparent;color:var(--muted);padding:0 5px;font-size:12px;outline:0;cursor:pointer}.think:hover{background:var(--surface);color:var(--ink)}
     .send{width:36px;height:36px;border-radius:50%;background:var(--ink);color:var(--bg);font-size:17px}.stop{background:var(--surface-strong);color:var(--ink);font-size:12px}
     .telemetry{position:relative;margin:0;color:var(--muted);font-size:12px}.telemetry>summary{display:grid;place-items:center;width:32px;height:32px;padding:0;border-radius:10px;cursor:pointer;list-style:none}.telemetry>summary::after,.telemetry[open]>summary::after{content:none}.telemetry>summary::-webkit-details-marker{display:none}.telemetry>summary:hover,.telemetry[open]>summary{background:var(--surface)}
@@ -285,6 +288,7 @@ var ArjunahRenderer = (function () {
   `;
 
   const PANEL_HTML = `<section class="panel" hidden data-mode="light" data-tool-view="compact" role="dialog" aria-label="AI assistant">
+  <div class="grip" title="Resize" aria-hidden="true"><svg viewBox="0 0 14 14" width="14" height="14"><path d="M2 7 7 2M2 12 12 2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></div>
   <header class="head">
     <button class="icon thread-toggle" title="Conversations" aria-label="Conversations" aria-pressed="false" hidden>☰</button>
     <div class="brand"><strong class="name">AI assistant</strong><small class="sub">अर्जुनः</small></div>
@@ -311,7 +315,7 @@ var ArjunahRenderer = (function () {
           <span class="compose-left-slot"></span>
           <div class="model-picker" hidden>
             <button class="model-button compose-control" type="button" title="Select model" aria-label="Select model" aria-haspopup="listbox" aria-expanded="false"><span class="model-label">Select model</span><span class="chevron">⌄</span></button>
-            <div class="model-menu" role="listbox" hidden></div>
+            <div class="model-menu" hidden><input class="model-search" type="text" spellcheck="false" autocomplete="off" placeholder="Search models" aria-label="Search models" aria-autocomplete="list" /><div class="model-list" role="listbox"></div></div>
           </div>
           <select class="think" title="Thinking effort" aria-label="Thinking effort" hidden></select>
         </div>
@@ -730,6 +734,9 @@ var ArjunahRenderer = (function () {
     return true;
   }
 
+  /** Distinguishes the ids of two widgets sharing one document. */
+  let viewCount = 0;
+
   /**
    * Builds the panel and owns everything inside it. The host supplies callbacks
    * and fills the three slots with whatever chrome belongs to its mode.
@@ -762,6 +769,9 @@ var ArjunahRenderer = (function () {
       modelButton: q(".model-button"),
       modelLabel: q(".model-label"),
       modelMenu: q(".model-menu"),
+      grip: q(".grip"),
+      modelSearch: q(".model-search"),
+      modelList: q(".model-list"),
       thinkSelect: q(".think"),
       attachButton: q(".attach"),
       fileInput: q("input[type=file]"),
@@ -788,6 +798,13 @@ var ArjunahRenderer = (function () {
     let models = [];
     let selectedModel = null;
     let reasoningEffort = "";
+    // What the picker was last drawn from, so an unchanged catalog skips a redraw.
+    let modelState = null;
+    // The open menu's search box and its keyboard highlight.
+    let modelQuery = "";
+    let modelActive = null;
+    // A page may host several widgets, so option ids must not collide.
+    const listId = `arjunah-models-${++viewCount}`;
     // Entity mentions (SPEC 8.3) and the collected-input prompt (SPEC 7.3).
     let mentionQuery = null;
     let mentionResults = [];
@@ -1691,6 +1708,7 @@ var ArjunahRenderer = (function () {
       refs.sendButton.hidden = value;
       refs.stopButton.hidden = !value;
       refs.modelButton.disabled = value;
+      if (value) closeModelMenu();
       setComposerEditable(!value && !composerBlocked);
       host.busyChanged?.(value);
       renderThreadList();
@@ -2109,36 +2127,153 @@ var ArjunahRenderer = (function () {
           : ((models.find((model) => model.default) ?? models[0])?.id ?? null);
       if (!levelsFor(selectedModel).includes(reasoningEffort))
         reasoningEffort = "";
-      renderModelPicker();
+      // The host re-pushes the catalog on every state broadcast, most of which
+      // change nothing here. Redrawing anyway would throw away the open menu's
+      // scroll position mid-gesture, so an identical catalog is a no-op.
+      if (modelFingerprint() !== modelState) renderModelPicker();
       return selectedModel;
     }
 
-    function renderModelPicker() {
-      refs.modelPicker.hidden = models.length === 0;
+    function modelFingerprint() {
+      return JSON.stringify([models, selectedModel, reasoningEffort]);
+    }
+
+    function openModelMenu() {
+      refs.modelMenu.hidden = false;
+      refs.modelButton.setAttribute("aria-expanded", "true");
+      // A picker opens on the whole catalog; the last search was for the last
+      // question, not this one.
+      modelQuery = "";
+      refs.modelSearch.value = "";
+      modelActive = selectedModel;
+      renderModelOptions();
+      refs.modelSearch.focus();
+      scrollModelActiveIntoView();
+    }
+
+    function closeModelMenu() {
       refs.modelMenu.hidden = true;
       refs.modelButton.setAttribute("aria-expanded", "false");
-      if (!models.length) {
-        refs.thinkSelect.hidden = true;
+    }
+
+    /**
+     * The catalog in the order the query asks for: an exact name first, then a
+     * match at the start, then one at a word boundary, then one anywhere, and
+     * among equals the entry the query covers more of. Every word must match, so
+     * typing more narrows. Kept in step with `src/lib/search.js`, which the
+     * options page uses; the renderer ships as a standalone classic script, so
+     * it cannot share that module and keeps its own copy instead.
+     */
+    function searchWords(query) {
+      return String(query ?? "")
+        .toLowerCase()
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean)
+        .slice(0, 8);
+    }
+
+    function wordScore(text, word) {
+      const haystack = String(text ?? "").toLowerCase();
+      if (!haystack) return 0;
+      const at = haystack.indexOf(word);
+      if (at < 0) return 0;
+      const rank =
+        haystack === word
+          ? 800
+          : at === 0
+            ? 600
+            : /[^a-z0-9]/.test(haystack[at - 1])
+              ? 400
+              : 200;
+      return (
+        rank +
+        Math.round((word.length / haystack.length) * 100) -
+        Math.min(at, 80) / 10
+      );
+    }
+
+    function searchScore(fields, words) {
+      let total = 0;
+      for (const word of words) {
+        let best = 0;
+        fields.forEach((field, index) => {
+          const score = wordScore(field, word);
+          if (score) best = Math.max(best, score - index * 25);
+        });
+        if (!best) return 0;
+        total += best;
+      }
+      return total / words.length;
+    }
+
+    /** The models the open menu should list, in the order it should list them. */
+    function matchingModels() {
+      const words = searchWords(modelQuery);
+      if (!words.length) return models.slice();
+      return models
+        .map((model, order) => ({
+          model,
+          order,
+          score: searchScore(
+            [model.displayName, model.id, model.provider],
+            words,
+          ),
+        }))
+        .filter((row) => row.score > 0)
+        .sort((a, b) => b.score - a.score || a.order - b.order)
+        .map((row) => row.model);
+    }
+
+    function scrollModelActiveIntoView() {
+      refs.modelList
+        .querySelector(".model-option.active")
+        ?.scrollIntoView({ block: "nearest" });
+    }
+
+    /** Move the keyboard highlight through the matches, wrapping at both ends. */
+    function moveModelActive(step) {
+      const matches = matchingModels();
+      if (!matches.length) return;
+      const at = matches.findIndex((model) => model.id === modelActive);
+      const next = at < 0 ? (step > 0 ? 0 : matches.length - 1) : at + step;
+      modelActive = matches[(next + matches.length) % matches.length].id;
+      renderModelOptions();
+      scrollModelActiveIntoView();
+    }
+
+    /** Just the list: redrawn on every keystroke, so it never touches the input. */
+    function renderModelOptions() {
+      const matches = matchingModels();
+      const searching = searchWords(modelQuery).length > 0;
+      if (!matches.some((model) => model.id === modelActive))
+        modelActive = matches[0]?.id ?? null;
+      refs.modelList.replaceChildren();
+      if (!matches.length) {
+        const empty = doc.createElement("div");
+        empty.className = "menu-title";
+        empty.textContent = "No model matches that search.";
+        refs.modelList.append(empty);
+        refs.modelSearch.removeAttribute("aria-activedescendant");
         return;
       }
-      refs.modelMenu.replaceChildren();
-      const heading = doc.createElement("div");
-      heading.className = "menu-title";
-      heading.textContent = "Select model";
-      refs.modelMenu.append(heading);
       let group = null;
-      for (const model of models) {
-        if (model.provider && model.provider !== group) {
+      for (const [index, model] of matches.entries()) {
+        // Ranked results are ordered by the query, not by provider, so the
+        // provider headings would lie about what follows them.
+        if (!searching && model.provider && model.provider !== group) {
           group = model.provider;
           const label = doc.createElement("div");
           label.className = "menu-group";
           label.textContent = group;
-          refs.modelMenu.append(label);
+          refs.modelList.append(label);
         }
         const current = model.id === selectedModel;
+        const active = model.id === modelActive;
         const option = doc.createElement("button");
         option.type = "button";
-        option.className = `model-option${current ? " selected" : ""}`;
+        option.id = `${listId}-model-${index}`;
+        option.className = `model-option${current ? " selected" : ""}${active ? " active" : ""}`;
         option.setAttribute("role", "option");
         option.setAttribute("aria-selected", String(current));
         const name = doc.createElement("span");
@@ -2152,12 +2287,31 @@ var ArjunahRenderer = (function () {
         check.textContent = current ? "✓" : "";
         option.append(name, size, check);
         option.addEventListener("click", () => {
-          refs.modelMenu.hidden = true;
-          refs.modelButton.setAttribute("aria-expanded", "false");
+          closeModelMenu();
           void chooseModel(model.id, reasoningEffort);
         });
-        refs.modelMenu.append(option);
+        if (active)
+          refs.modelSearch.setAttribute("aria-activedescendant", option.id);
+        refs.modelList.append(option);
       }
+    }
+
+    function renderModelPicker() {
+      // A redraw must not double as a dismissal: the user may be scrolling the
+      // open menu while the host pushes an unrelated catalog update.
+      const wasOpen = models.length > 0 && !refs.modelMenu.hidden;
+      const scrollTop = refs.modelList.scrollTop;
+      modelState = modelFingerprint();
+      refs.modelPicker.hidden = models.length === 0;
+      if (!models.length) {
+        closeModelMenu();
+        refs.thinkSelect.hidden = true;
+        return;
+      }
+      renderModelOptions();
+      refs.modelMenu.hidden = !wasOpen;
+      refs.modelButton.setAttribute("aria-expanded", String(wasOpen));
+      if (wasOpen) refs.modelList.scrollTop = scrollTop;
       refs.modelLabel.textContent =
         models.find((model) => model.id === selectedModel)?.displayName ??
         "Select model";
@@ -2457,21 +2611,46 @@ var ArjunahRenderer = (function () {
       here.selection.addRange(here.range);
       if (entitiesEnabled()) void refreshMentionMenu();
     });
-    refs.modelButton.addEventListener("click", () => {
-      const open = refs.modelMenu.hidden;
-      refs.modelMenu.hidden = !open;
-      refs.modelButton.setAttribute("aria-expanded", String(open));
+    refs.modelList.id = listId;
+    refs.modelSearch.setAttribute("aria-controls", listId);
+    refs.modelButton.addEventListener("click", () =>
+      refs.modelMenu.hidden ? openModelMenu() : closeModelMenu(),
+    );
+    refs.modelSearch.addEventListener("input", () => {
+      modelQuery = refs.modelSearch.value;
+      // A new search proposes its own best answer rather than keeping a
+      // highlight that may no longer be in the list.
+      modelActive = null;
+      renderModelOptions();
+      refs.modelList.scrollTop = 0;
+    });
+    refs.modelSearch.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        return moveModelActive(event.key === "ArrowDown" ? 1 : -1);
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        if (!modelActive) return;
+        closeModelMenu();
+        void chooseModel(modelActive, reasoningEffort);
+      }
     });
     refs.thinkSelect.addEventListener("change", () =>
       chooseModel(selectedModel, refs.thinkSelect.value),
     );
     panel.addEventListener("click", (event) => {
-      if (!event.target.closest?.(".model-picker")) {
-        refs.modelMenu.hidden = true;
-        refs.modelButton.setAttribute("aria-expanded", "false");
+      if (!event.target.closest?.(".model-picker")) closeModelMenu();
+    });
+    panel.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !refs.modelMenu.hidden) {
+        event.stopPropagation();
+        closeModelMenu();
+        refs.modelButton.focus();
       }
     });
     enableDrag(refs.head, panel);
+    enableResize(refs.grip, panel);
     initComposer();
 
     function setOptions(next) {
@@ -2606,6 +2785,66 @@ var ArjunahRenderer = (function () {
     handle.addEventListener("pointercancel", stop);
   }
 
+  /**
+   * The top-left twin of the panel's own bottom-right resize corner. CSS
+   * `resize` only ever grows from one corner, so this drives the other by hand:
+   * it pins the bottom-right edge first, then the drag is nothing but a width
+   * and height change, which keeps the corner under the pointer.
+   */
+  function enableResize(grip, panel) {
+    let start = null;
+    grip.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      const rect = panel.getBoundingClientRect();
+      const view = panel.ownerDocument.defaultView;
+      // A fixed element's offsets are measured against the client area, which
+      // `innerWidth` overstates by the scrollbar; that error would shift the
+      // edge this drag is meant to hold still.
+      const client = panel.ownerDocument.documentElement;
+      panel.style.left = "auto";
+      panel.style.top = "auto";
+      panel.style.right = `${client.clientWidth - rect.right}px`;
+      panel.style.bottom = `${client.clientHeight - rect.bottom}px`;
+      panel.style.width = `${rect.width}px`;
+      panel.style.height = `${rect.height}px`;
+      const style = view.getComputedStyle(panel);
+      start = {
+        x: event.clientX,
+        y: event.clientY,
+        width: rect.width,
+        height: rect.height,
+        // The pinned edges double as the maxima: growing past them would put
+        // the panel's own top-left corner off screen.
+        maxWidth: rect.right,
+        maxHeight: rect.bottom,
+        minWidth: Number.parseFloat(style.minWidth) || 0,
+        minHeight: Number.parseFloat(style.minHeight) || 0,
+      };
+      grip.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    });
+    grip.addEventListener("pointermove", (event) => {
+      if (!start) return;
+      const clamp = (value, min, max) =>
+        Math.min(Math.max(value, min), Math.max(min, max));
+      panel.style.width = `${clamp(
+        start.width + (start.x - event.clientX),
+        start.minWidth,
+        start.maxWidth,
+      )}px`;
+      panel.style.height = `${clamp(
+        start.height + (start.y - event.clientY),
+        start.minHeight,
+        start.maxHeight,
+      )}px`;
+    });
+    const stop = () => {
+      start = null;
+    };
+    grip.addEventListener("pointerup", stop);
+    grip.addEventListener("pointercancel", stop);
+  }
+
   return {
     STYLE,
     IMAGE_TYPES,
@@ -2617,6 +2856,7 @@ var ArjunahRenderer = (function () {
     cardMessageText,
     createChatView,
     enableDrag,
+    enableResize,
     pretty,
     compactNumber,
     userInputMatches,

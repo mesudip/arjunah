@@ -14,6 +14,7 @@ import {
   publicProvider,
   publicModelEntry,
   OPENAI_PROVIDER_ID,
+  OPENCODE_PROVIDER_ID,
   DESKTOP_DOWN,
   DESKTOP_UNPAIRED,
 } from "./lib/catalog.js";
@@ -49,9 +50,16 @@ import {
 import { validateCard } from "./lib/cards.js";
 import { logEvent, logEntries, clearLog } from "./lib/logs.js";
 import { OPENAI_BASE_URL } from "./lib/openai.js";
+import {
+  OPENCODE_BASE_URL,
+  opencodeCapabilities,
+  opencodePreferredModel,
+  opencodeProtocol,
+} from "./lib/opencode.js";
 
 const STORAGE = {
   provider: "provider",
+  opencode: "opencode",
   grants: "grants",
   desktop: "desktop",
   active: "active",
@@ -63,6 +71,8 @@ const prepared = new Map();
 let grantQueue = Promise.resolve();
 const statePorts = new Set();
 let stateRevision = 0;
+// The last companion summary announced, so a reconcile that found nothing stays quiet.
+let desktopFingerprint = null;
 let desktopSocket = null;
 let desktopSocketKey = "";
 let desktopReconnectTimer = null;
@@ -72,9 +82,11 @@ let pendingDesktopReason = null;
 const documentScopes = new Map();
 
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.storage.local.get(STORAGE.provider).then(({ provider }) => {
-    if (!provider) chrome.runtime.openOptionsPage();
-  });
+  chrome.storage.local
+    .get([STORAGE.provider, STORAGE.opencode])
+    .then(({ provider, opencode }) => {
+      if (!provider && !opencode) chrome.runtime.openOptionsPage();
+    });
 });
 void pullSync()
   .catch(() => {})
@@ -111,8 +123,15 @@ chrome.runtime.onConnect?.addListener((port) => {
 });
 chrome.storage.onChanged?.addListener((changes, area) => {
   if (area !== "local") return;
-  const relevant = Object.keys(changes).filter((key) =>
-    Object.values(STORAGE).includes(key),
+  // `set()` reports a change even when it rewrites the same value, and several
+  // of our own reads write back a refreshed cache. Broadcasting those would ask
+  // every listener to re-read, which writes the cache again: an endless round
+  // trip to the companion. Only a real difference is state worth announcing.
+  const relevant = Object.keys(changes).filter(
+    (key) =>
+      Object.values(STORAGE).includes(key) &&
+      JSON.stringify(changes[key].oldValue ?? null) !==
+        JSON.stringify(changes[key].newValue ?? null),
   );
   if (!relevant.length) return;
   reachability.at = 0;
@@ -210,7 +229,13 @@ function queueDesktopReconcile(reason, revision) {
       const next = pendingDesktopReason;
       pendingDesktopReason = null;
       reachability.at = 0;
-      await desktopSummary(false).catch(() => {});
+      // Reading the companion is how we learn whether anything moved, so the
+      // read itself must not count as news: announcing an unchanged summary
+      // would send every listener back here for another read.
+      const summary = await desktopSummary(false).catch(() => null);
+      const fingerprint = JSON.stringify(summary);
+      if (fingerprint === desktopFingerprint) continue;
+      desktopFingerprint = fingerprint;
       broadcastState(next.reason, next.revision);
     }
   })().finally(() => {
@@ -242,9 +267,15 @@ async function handle(method, params, sender) {
   )
     throw new BrokerError("INVALID_REQUEST", "Invalid broker request.");
   if (
-    ["provider.", "grants.", "desktop.", "catalog.", "usage.", "logs."].some(
-      (prefix) => method.startsWith(prefix),
-    ) ||
+    [
+      "provider.",
+      "opencode.",
+      "grants.",
+      "desktop.",
+      "catalog.",
+      "usage.",
+      "logs.",
+    ].some((prefix) => method.startsWith(prefix)) ||
     method === "site.get" ||
     method === "site.update"
   ) {
@@ -280,6 +311,18 @@ async function handle(method, params, sender) {
           }
         : null;
     }
+    if (method === "opencode.get") {
+      const config = await getOpenCode();
+      return config
+        ? {
+            baseUrl: config.baseUrl,
+            model: config.model,
+            models: config.models ?? [],
+            tier: config.tier ?? null,
+            hasApiKey: Boolean(config.apiKey),
+          }
+        : null;
+    }
     if (method === "provider.save") {
       const config = await providerInput(params);
       invalidate();
@@ -293,11 +336,43 @@ async function handle(method, params, sender) {
         hasApiKey: Boolean(config.apiKey),
       };
     }
+    if (method === "opencode.save") {
+      const { config, models } = await opencodeDiscover(params);
+      const previous = await getOpenCode();
+      const stored = {
+        ...config,
+        models,
+        // A proven tier survives a model change, but not a different key.
+        tier:
+          previous?.apiKey === config.apiKey ? (previous.tier ?? null) : null,
+      };
+      invalidate();
+      clearMcpSessions();
+      await chrome.storage.local.set({ [STORAGE.opencode]: stored });
+      if (!(await getActive()).type) await setActive({ type: "opencode" });
+      void pushSync().catch(() => {});
+      return {
+        baseUrl: stored.baseUrl,
+        model: stored.model,
+        models,
+        tier: stored.tier,
+        hasApiKey: Boolean(stored.apiKey),
+      };
+    }
     if (method === "provider.clear") {
       invalidate();
       clearMcpSessions();
       await chrome.storage.local.remove(STORAGE.provider);
       if ((await getActive()).type === "openai")
+        await chrome.storage.local.remove(STORAGE.active);
+      void pushSync().catch(() => {});
+      return true;
+    }
+    if (method === "opencode.clear") {
+      invalidate();
+      clearMcpSessions();
+      await chrome.storage.local.remove(STORAGE.opencode);
+      if ((await getActive()).type === "opencode")
         await chrome.storage.local.remove(STORAGE.active);
       void pushSync().catch(() => {});
       return true;
@@ -316,6 +391,13 @@ async function handle(method, params, sender) {
         if (openai && openai.model !== active.model)
           await chrome.storage.local.set({
             provider: { ...openai, model: active.model },
+          });
+      }
+      if (active.type === "opencode" && active.model) {
+        const opencode = await getOpenCode();
+        if (opencode && opencode.model !== active.model)
+          await chrome.storage.local.set({
+            [STORAGE.opencode]: { ...opencode, model: active.model },
           });
       }
       await setActive({
@@ -413,6 +495,53 @@ async function handle(method, params, sender) {
         modelCount: models.length,
         models,
         selectedModelFound: models.some((item) => item.id === config.model),
+      };
+    }
+    if (method === "opencode.test") {
+      const { config, models } = await opencodeDiscover(params);
+      const probe = await generate(config, {
+        messages: [
+          {
+            role: "user",
+            content:
+              "Reply briefly to confirm the connection. Do not call tools.",
+          },
+        ],
+        tools: [
+          {
+            name: "connection_check",
+            description: "A connection test placeholder. Do not call it.",
+            inputSchema: {
+              type: "object",
+              properties: {},
+              additionalProperties: false,
+            },
+          },
+        ],
+        maxTokens: 1024,
+      });
+      if (!probe.message.content.trim() || probe.message.toolCalls.length)
+        throw new BrokerError(
+          "PROVIDER_ERROR",
+          "The model did not complete the connection test. Check the selected model.",
+        );
+      // Zen publishes no account endpoint and no tier header, so the only
+      // honest evidence of what a key may do is a request it just completed.
+      const saved = await getOpenCode();
+      if (saved && saved.apiKey === config.apiKey && saved.tier !== "paid") {
+        await chrome.storage.local.set({
+          [STORAGE.opencode]: { ...saved, tier: "paid" },
+        });
+        invalidate();
+      }
+      return {
+        ok: true,
+        generationVerified: true,
+        tier: "paid",
+        model: config.model,
+        modelCount: models.length,
+        models,
+        selectedModelFound: models.includes(config.model),
       };
     }
     if (method === "grants.list") {
@@ -822,13 +951,17 @@ function getPrepared(id, binding) {
 async function getOpenAI() {
   return (await chrome.storage.local.get(STORAGE.provider)).provider ?? null;
 }
+async function getOpenCode() {
+  return (await chrome.storage.local.get(STORAGE.opencode)).opencode ?? null;
+}
 async function getDesktop() {
   return (await chrome.storage.local.get(STORAGE.desktop)).desktop ?? null;
 }
 async function getActive() {
   const active = (await chrome.storage.local.get(STORAGE.active)).active;
-  if (active?.type === "desktop" || active?.type === "openai") return active;
-  return (await getOpenAI()) ? { type: "openai" } : {};
+  if (["desktop", "openai", "opencode"].includes(active?.type)) return active;
+  if (await getOpenAI()) return { type: "openai" };
+  return (await getOpenCode()) ? { type: "opencode" } : {};
 }
 function setActive(active) {
   return chrome.storage.local.set({ [STORAGE.active]: active });
@@ -875,14 +1008,16 @@ function catalogInputs(state) {
   return { desktopRunning: state.running, desktopAccepted: state.accepted };
 }
 async function getCatalog({ forcePing = false } = {}) {
-  const [openai, desktop, active, usage] = await Promise.all([
+  const [openai, opencode, desktop, active, usage] = await Promise.all([
     getOpenAI(),
+    getOpenCode(),
     getDesktop(),
     getActive(),
     getUsage(),
   ]);
   return buildCatalog({
     openai,
+    opencode,
     desktop,
     active,
     usage,
@@ -894,9 +1029,14 @@ async function getProvider() {
   return resolveConfig(await getActive());
 }
 async function resolveConfig(active) {
-  const [openai, desktop] = await Promise.all([getOpenAI(), getDesktop()]);
+  const [openai, opencode, desktop] = await Promise.all([
+    getOpenAI(),
+    getOpenCode(),
+    getDesktop(),
+  ]);
   const catalog = buildCatalog({
     openai,
+    opencode,
     desktop,
     active,
     ...catalogInputs(await desktopReachable(desktop)),
@@ -906,18 +1046,25 @@ async function resolveConfig(active) {
       ? `${active.providerId}/${active.model}`
       : active.type === "openai" && openai?.model
         ? `${OPENAI_PROVIDER_ID}/${active.model ?? openai.model}`
-        : null;
-  return id ? configForModel(catalog, id, { openai, desktop }) : null;
+        : active.type === "opencode" && opencode?.model
+          ? `${OPENCODE_PROVIDER_ID}/${active.model ?? opencode.model}`
+          : null;
+  return id ? configForModel(catalog, id, { openai, opencode, desktop }) : null;
 }
 async function configFor(modelId) {
-  const [openai, desktop] = await Promise.all([getOpenAI(), getDesktop()]);
+  const [openai, opencode, desktop] = await Promise.all([
+    getOpenAI(),
+    getOpenCode(),
+    getDesktop(),
+  ]);
   const catalog = buildCatalog({
     openai,
+    opencode,
     desktop,
     active: await getActive(),
     ...catalogInputs(await desktopReachable(desktop)),
   });
-  return configForModel(catalog, modelId, { openai, desktop });
+  return configForModel(catalog, modelId, { openai, opencode, desktop });
 }
 /**
  * The model that answers this site: its stored choice when still available,
@@ -1221,6 +1368,16 @@ async function validateActive(input) {
       typeof input.model === "string" ? input.model.trim().slice(0, 200) : "";
     return model ? { type: "openai", model } : { type: "openai" };
   }
+  if (input?.type === "opencode") {
+    if (!(await getOpenCode()))
+      throw new BrokerError(
+        "NOT_CONFIGURED",
+        "Save an OpenCode Zen API key before selecting it.",
+      );
+    const model =
+      typeof input.model === "string" ? input.model.trim().slice(0, 200) : "";
+    return model ? { type: "opencode", model } : { type: "opencode" };
+  }
   if (input?.type !== "desktop")
     throw new BrokerError("INVALID_REQUEST", "Unknown provider selection.");
   const link = await getDesktop();
@@ -1376,8 +1533,16 @@ async function pushSync() {
   const link = await getDesktop();
   if (!link?.token) return;
   const openai = await getOpenAI();
+  const opencode = await getOpenCode();
   const config = {
     openai: openai ? { model: openai.model, apiKey: openai.apiKey } : null,
+    opencode: opencode
+      ? {
+          model: opencode.model,
+          models: opencode.models ?? [],
+          apiKey: opencode.apiKey,
+        }
+      : null,
     active: await getActive(),
   };
   const sync = await desktopSyncPut(link, config);
@@ -1414,9 +1579,32 @@ async function applySync(remote) {
       },
     });
   else if (openai === null) await chrome.storage.local.remove(STORAGE.provider);
+  const opencode = config.opencode;
+  if (
+    opencode &&
+    typeof opencode.apiKey === "string" &&
+    opencode.apiKey &&
+    typeof opencode.model === "string" &&
+    opencode.model
+  )
+    await chrome.storage.local.set({
+      [STORAGE.opencode]: {
+        baseUrl: OPENCODE_BASE_URL,
+        model: opencode.model.slice(0, 200),
+        models: (Array.isArray(opencode.models) ? opencode.models : [])
+          .filter((item) => typeof item === "string")
+          .slice(0, 200)
+          .map((item) => item.slice(0, 200)),
+        apiKey: opencode.apiKey.slice(0, 10000),
+      },
+    });
+  else if (opencode === null)
+    await chrome.storage.local.remove(STORAGE.opencode);
   const active = config.active;
   if (active?.type === "openai" && (await getOpenAI()))
     await setActive({ type: "openai" });
+  else if (active?.type === "opencode" && (await getOpenCode()))
+    await setActive({ type: "opencode" });
   else if (active?.type === "desktop" && typeof active.providerId === "string")
     await setActive({
       type: "desktop",
@@ -1457,6 +1645,81 @@ async function providerInput(input) {
       "An OpenAI API key is required. Enter a key or select Use saved API key.",
     );
   return { baseUrl, model, apiKey };
+}
+/**
+ * The credential half of an OpenCode Zen configuration. A model is deliberately
+ * not required here: the key is what discovers the account's catalog, so asking
+ * for a model first would mean asking the user to guess one.
+ */
+async function opencodeCredential(input) {
+  const baseUrl = String(input.baseUrl ?? OPENCODE_BASE_URL).replace(/\/$/, "");
+  if (baseUrl !== OPENCODE_BASE_URL)
+    throw new BrokerError(
+      "INVALID_REQUEST",
+      `This build supports the OpenCode Zen API at ${OPENCODE_BASE_URL} only.`,
+    );
+  const origin = providerOrigin(baseUrl);
+  let apiKey = String(input.apiKey ?? "").trim();
+  if (apiKey.length > 10000)
+    throw new BrokerError("INVALID_REQUEST", "Provider API key is invalid.");
+  if (!apiKey && input.keepApiKey !== false) {
+    const previous = await getOpenCode();
+    if (previous && providerOrigin(previous.baseUrl) === origin)
+      apiKey = previous.apiKey;
+  }
+  if (!apiKey)
+    throw new BrokerError(
+      "INVALID_REQUEST",
+      "An OpenCode Zen API key is required.",
+    );
+  return {
+    kind: "opencode",
+    providerId: OPENCODE_PROVIDER_ID,
+    providerName: "OpenCode Zen API",
+    baseUrl,
+    apiKey,
+  };
+}
+
+/** A credential plus the resolved model, ready to generate with. */
+function opencodeConfig(credential, model) {
+  const protocol = opencodeProtocol(model);
+  if (!protocol)
+    throw new BrokerError(
+      "NOT_SUPPORTED",
+      "This OpenCode model does not provide a conversational API.",
+    );
+  return {
+    ...credential,
+    model,
+    protocol,
+    capabilities: opencodeCapabilities(model),
+  };
+}
+
+/**
+ * Discover the account's conversational models and settle on one. A model the
+ * caller asked for wins when the account offers it; otherwise the account's own
+ * catalog picks the default, so saving a key alone is enough to start.
+ */
+async function opencodeDiscover(input) {
+  const credential = await opencodeCredential(input);
+  const models = (await listProviderModels(credential)).map((item) => item.id);
+  if (!models.length)
+    throw new BrokerError(
+      "NOT_SUPPORTED",
+      "This OpenCode Zen account offers no conversational models.",
+    );
+  const requested = String(input.model ?? "")
+    .trim()
+    .slice(0, 200);
+  if (requested && !models.includes(requested))
+    throw new BrokerError(
+      "INVALID_REQUEST",
+      `OpenCode Zen does not offer ${requested} on this key. Choose a model from the list.`,
+    );
+  const model = requested || opencodePreferredModel(models);
+  return { config: opencodeConfig(credential, model), models };
 }
 async function getGrant(origin) {
   await grantQueue;
@@ -1872,8 +2135,21 @@ async function hostedChat(
           exitCode: step.exitCode,
           output: step.output,
         });
-      if (!result.message.toolCalls.length)
-        return stripRaw(await settle(result));
+      if (!result.message.toolCalls.length) {
+        const completed = await settle(result);
+        return {
+          ...stripRaw(completed),
+          // Ordinary API providers make one upstream request per round, so
+          // their prompt usage is the live context. Agent CLIs may make many;
+          // for them only an explicit final-request measurement is valid.
+          contextTokens:
+            completed.contextTokens ??
+            (completed.thread ? null : completed.usage.promptTokens),
+          contextCachedTokens:
+            completed.contextCachedTokens ??
+            (completed.thread ? null : completed.usage.cachedTokens),
+        };
+      }
       if (round === LIMITS.toolRounds)
         throw new BrokerError(
           "TOOL_ERROR",

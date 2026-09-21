@@ -783,6 +783,20 @@ export function validateToolCalls(calls) {
           true,
         ),
       },
+      // Opaque provider state that must survive a tool round trip: Gemini 3
+      // rejects a continuation whose function call lost its thought signature.
+      // Bounded and charset-checked, then handed back only to the provider that
+      // issued it; it is never interpreted here and never reaches a page.
+      ...(typeof call.thoughtSignature === "string" && call.thoughtSignature
+        ? {
+            thoughtSignature: boundedString(
+              call.thoughtSignature,
+              "tool call signature",
+              LIMITS.signatureChars,
+              true,
+            ),
+          }
+        : {}),
     };
   });
 }

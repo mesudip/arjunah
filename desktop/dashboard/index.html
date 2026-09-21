@@ -97,8 +97,21 @@
               placeholder="Leave blank to keep the synced key"
           /></label>
           <label
+            >OpenCode Zen default model<input
+              id="opencode-model"
+              placeholder="gpt-5.6-luna"
+          /></label>
+          <label
+            >OpenCode Zen API key<input
+              id="opencode-key"
+              type="password"
+              autocomplete="off"
+              placeholder="Leave blank to keep the synced key"
+          /></label>
+          <label
             >Active provider<select id="active">
               <option value="openai">OpenAI API key</option>
+              <option value="opencode">OpenCode Zen API key</option>
               <option value="desktop:claude-code">Claude Code (desktop)</option>
               <option value="desktop:codex">Codex (desktop)</option>
               <option value="desktop:opencode">OpenCode (desktop)</option>

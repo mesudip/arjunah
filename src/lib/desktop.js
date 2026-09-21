@@ -507,6 +507,12 @@ export async function desktopGenerate(config, valid, signal, options = {}) {
       cachedTokens: count(body.usage?.cachedTokens),
       reasoningTokens: count(body.usage?.reasoningTokens),
     },
+    contextTokens: Number.isSafeInteger(body.contextTokens)
+      ? body.contextTokens
+      : null,
+    contextCachedTokens: Number.isSafeInteger(body.contextCachedTokens)
+      ? body.contextCachedTokens
+      : null,
     contextWindow: Number.isInteger(body.contextWindow)
       ? body.contextWindow
       : (config.contextWindow ?? null),

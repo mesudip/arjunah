@@ -220,10 +220,17 @@ try {
       const card = [...document.querySelectorAll("#providers .provider")].find(
         (item) => item.textContent.includes(name),
       );
-      const select = card.querySelector("select");
-      select.value =
-        select.options[pickLast ? select.options.length - 1 : 0].value;
-      card.querySelector("button").click();
+      // The model control is a typable combobox (SPEC 8.2), which draws its
+      // rows only while open and closes again once one is picked.
+      const combo = card.querySelector(".combo");
+      combo
+        .querySelector(".combo-input")
+        .dispatchEvent(new Event("click", { bubbles: true }));
+      const rows = [...combo.querySelectorAll(".combo-option")];
+      rows[pickLast ? rows.length - 1 : 0].dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true }),
+      );
+      card.querySelector(".controls > .btn").click();
     },
     liveName,
     !live,

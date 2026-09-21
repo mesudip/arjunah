@@ -1,6 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { request as httpRequest } from "node:http";
@@ -224,6 +233,10 @@ test("sync stores browser configuration with increasing revisions and masks keys
     body: {
       config: {
         openai: { model: "gpt-5.6-sol", apiKey: "sk-secret-value-1234" },
+        opencode: {
+          model: "gpt-5.6-luna",
+          apiKey: "zen-secret-value-5678",
+        },
         active: { type: "openai" },
       },
     },
@@ -231,12 +244,15 @@ test("sync stores browser configuration with increasing revisions and masks keys
   assert.equal(first.body.revision, 1);
   const read = await call("/api/sync", { headers });
   assert.equal(read.body.config.openai.apiKey, "sk-secret-value-1234");
+  assert.equal(read.body.config.opencode.apiKey, "zen-secret-value-5678");
   const dashboard = await fetch(`${base}/api/dashboard/state`, {
     headers: { "X-Dashboard-Token": instance.dashboardToken },
   });
   const state = await dashboard.json();
   assert.equal(JSON.stringify(state).includes("sk-secret-value-1234"), false);
+  assert.equal(JSON.stringify(state).includes("zen-secret-value-5678"), false);
   assert.match(state.sync.config.openai.apiKey, /…/);
+  assert.match(state.sync.config.opencode.apiKey, /…/);
   const forbidden = await fetch(`${base}/api/dashboard/state`, {
     headers: { "X-Dashboard-Token": "nope" },
   });
@@ -252,6 +268,8 @@ test("generate runs the adapter with system prompt and prompt split from message
       output: Promise.resolve({
         content: "answer",
         usage: { promptTokens: 5, completionTokens: 2, totalTokens: 7 },
+        contextTokens: 3,
+        contextCachedTokens: 2,
         model: "default",
       }),
     };
@@ -272,6 +290,8 @@ test("generate runs the adapter with system prompt and prompt split from message
   assert.equal(result.status, 200);
   assert.equal(result.body.message.content, "answer");
   assert.equal(result.body.finishReason, "stop");
+  assert.equal(result.body.contextTokens, 3);
+  assert.equal(result.body.contextCachedTokens, 2);
   assert.equal(seen.systemPrompt, "Rules.");
   assert.equal(seen.prompt, "Hi");
   assert.equal(seen.mcp, null);
@@ -382,6 +402,79 @@ test("bridged tool calls pause the agent until the browser returns results throu
   assert.equal(second.body.message.content, 'tool said {"echoed":"ping"}');
 });
 
+test("concurrent MCP calls cross the browser loop without a debounce or all-results barrier", async (t) => {
+  const { call, pair } = await app(t, (options) => {
+    const invoke = async (name, id) => {
+      const response = await fetch(options.mcp.url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${options.mcp.token}`,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id,
+          method: "tools/call",
+          params: { name, arguments: {} },
+        }),
+      });
+      return (await response.json()).result.content[0].text;
+    };
+    return {
+      child: null,
+      output: Promise.all([invoke("site__a", 1), invoke("site__b", 2)]).then(
+        (results) => ({
+          content: results.join(" + "),
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+          model: "default",
+        }),
+      ),
+    };
+  });
+  const headers = await pair();
+  const tools = ["site__a", "site__b"].map((name) => ({
+    name,
+    inputSchema: { type: "object", properties: {} },
+  }));
+  const messages = [{ role: "user", content: "Use both tools" }];
+  const round = async () => {
+    const response = await call("/api/generate", {
+      method: "POST",
+      headers,
+      body: { providerId: "fake", messages, tools },
+    });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    if (response.body.finishReason === "tool_calls") {
+      const item = response.body.message.toolCalls[0];
+      messages.push(
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            {
+              id: item.id,
+              type: "function",
+              function: { name: item.name, arguments: item.arguments },
+            },
+          ],
+        },
+        { role: "tool", tool_call_id: item.id, content: item.name },
+      );
+    }
+    return response.body;
+  };
+  const first = await round();
+  const second = await round();
+  const final = await round();
+  assert.deepEqual(
+    [first, second].map((item) => item.message.toolCalls[0].name).sort(),
+    ["site__a", "site__b"],
+  );
+  assert.equal(final.finishReason, "stop");
+  assert.equal(final.message.content, "site__a + site__b");
+  assert.equal("batchMs" in SESSION_LIMITS, false);
+});
+
 test("agent failures surface as provider errors without internals", async (t) => {
   const { call, pair } = await app(t, () => ({
     child: null,
@@ -450,6 +543,102 @@ test("a vision provider receives image attachments and a text-only one does not"
     [],
     "a provider without vision never sees the bytes",
   );
+});
+
+test("tool-result images resume the suspended MCP call instead of starting a second agent", async (t) => {
+  let runs = 0;
+  let returnedContent = null;
+  const { call, pair } = await app(
+    t,
+    (options) => {
+      runs++;
+      options.onThread?.("agent-image-session");
+      const output = (async () => {
+        const response = await fetch(options.mcp.url, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${options.mcp.token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: { name: "look", arguments: {} },
+          }),
+        });
+        returnedContent = (await response.json()).result.content;
+        return {
+          content: "I can see it.",
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+          model: "default",
+          thread: "agent-image-session",
+        };
+      })();
+      return { child: null, output };
+    },
+    { supportsVision: true },
+  );
+  const headers = await pair();
+  const firstMessages = [{ role: "user", content: "Inspect the canvas." }];
+  const first = await call("/api/generate", {
+    method: "POST",
+    headers,
+    body: {
+      providerId: "fake",
+      model: "default",
+      threadId: "canvas-1",
+      messages: firstMessages,
+      tools: [{ name: "look", inputSchema: { type: "object" } }],
+    },
+  });
+  assert.equal(first.status, 200);
+  assert.equal(first.body.finishReason, "tool_calls");
+  const wireCall = first.body.message.toolCalls[0];
+  const second = await call("/api/generate", {
+    method: "POST",
+    headers,
+    body: {
+      providerId: "fake",
+      model: "default",
+      threadId: "canvas-1",
+      messages: [
+        ...firstMessages,
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            {
+              id: wireCall.id,
+              type: "function",
+              function: { name: wireCall.name, arguments: wireCall.arguments },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          tool_call_id: wireCall.id,
+          content: "Canvas snapshot.",
+        },
+        {
+          role: "user",
+          content: "Image returned by the look tool.",
+          images: [{ mediaType: "image/png", data: PIXEL }],
+        },
+      ],
+      tools: [{ name: "look", inputSchema: { type: "object" } }],
+    },
+  });
+  assert.equal(second.status, 200, JSON.stringify(second.body));
+  assert.equal(second.body.message.content, "I can see it.");
+  assert.equal(runs, 1, "the original agent process remains the only writer");
+  assert.deepEqual(returnedContent, [
+    {
+      type: "text",
+      text: "Canvas snapshot.\n\nImage returned by the look tool.",
+    },
+    { type: "image", data: PIXEL, mimeType: "image/png" },
+  ]);
 });
 
 test("image attachments are bounded and refused on non-user messages", async (t) => {
@@ -569,6 +758,28 @@ test("transcript builder flattens history and detects trailing tool results", ()
     { id: "c1", content: '{"ok":true}' },
   ]);
   assert.equal(trailingToolResults([{ role: "user", content: "x" }]), null);
+  assert.deepEqual(
+    trailingToolResults([
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "look", function: { name: "look" } }],
+      },
+      { role: "tool", tool_call_id: "look", content: "Canvas snapshot." },
+      {
+        role: "user",
+        content: "Image returned by the look tool.",
+        images: [{ mediaType: "image/png", data: "aGVsbG8=" }],
+      },
+    ]),
+    [
+      {
+        id: "look",
+        content: "Canvas snapshot.\n\nImage returned by the look tool.",
+        images: [{ mediaType: "image/png", data: "aGVsbG8=" }],
+      },
+    ],
+  );
   assert.equal(
     trailingToolResults([
       { role: "assistant", content: "", tool_calls: [{ id: "a" }] },
@@ -578,26 +789,22 @@ test("transcript builder flattens history and detects trailing tool results", ()
   );
 });
 
-test("sessions batch concurrent tool calls and resolve pending calls with errors when abandoned", async () => {
+test("sessions surface concurrent tool calls immediately and resume each result independently", async () => {
   const session = new ToolSession({ tools: [], model: "m", providerId: "p" });
   const a = session.call("site__a", { n: 1 });
   const b = session.call("site__b", { n: 2 });
-  const event = await session.nextEvent();
-  assert.equal(event.type, "tool_calls");
+  const first = await session.nextEvent();
+  const second = await session.nextEvent();
   assert.deepEqual(
-    event.calls.map((item) => item.name),
+    [first, second].map((event) => event.calls[0].name),
     ["site__a", "site__b"],
   );
-  assert.equal(
-    session.matches([{ id: event.calls[0].id }]),
-    false,
-    "partial results do not resume",
-  );
-  session.resume([
-    { id: event.calls[0].id, content: "one" },
-    { id: event.calls[1].id, content: "two" },
-  ]);
+  assert.equal(session.matches([{ id: first.calls[0].id }]), true);
+  session.resume([{ id: first.calls[0].id, content: "one" }]);
   assert.equal((await a).content, "one");
+  assert.equal(session.pending.size, 1, "the sibling call remains pending");
+  assert.equal(session.matches([{ id: second.calls[0].id }]), true);
+  session.resume([{ id: second.calls[0].id, content: "two" }]);
   assert.equal((await b).content, "two");
   const other = new ToolSession({ tools: [], model: "m", providerId: "p" });
   const pending = other.call("site__c", {});
@@ -606,17 +813,19 @@ test("sessions batch concurrent tool calls and resolve pending calls with errors
   assert.ok(SESSION_LIMITS.resumeMs > 0);
 });
 
-test("partial tool results identify and retire their stale suspended session", async () => {
+test("partial tool results resume their live session without retiring sibling calls", async () => {
   const registry = new SessionRegistry();
   const session = registry.create({ tools: [], model: "m", providerId: "p" });
   const a = session.call("site__a", {});
   const b = session.call("site__b", {});
   const event = await session.nextEvent();
   const partial = [{ id: event.calls[0].id, content: "one" }];
-  assert.equal(registry.findByResults(partial), null);
+  assert.equal(registry.findByResults(partial), session);
   assert.equal(registry.findByAnyResult(partial), session);
+  session.resume(partial);
+  assert.equal((await a).content, "one");
+  assert.equal(session.pending.size, 1);
   session.end(true);
-  assert.equal((await a).isError, true);
   assert.equal((await b).isError, true);
 });
 
@@ -754,6 +963,71 @@ test("Codex output parsing keeps the commands the agent ran and the outer sandbo
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
+});
+
+test("Codex app-server parsing separates turn totals from the final request context", async () => {
+  const { parseCodexAppServerMessages } = await import(
+    "../desktop/lib/providers/codex.mjs"
+  );
+  const usage = (input, output, cached, total) => ({
+    jsonrpc: "2.0",
+    method: "thread/tokenUsage/updated",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      tokenUsage: {
+        total: {
+          totalTokens: total,
+          inputTokens: total - output,
+          cachedInputTokens: cached,
+          cacheWriteInputTokens: 0,
+          outputTokens: output,
+          reasoningOutputTokens: 0,
+        },
+        last: {
+          totalTokens: input + output,
+          inputTokens: input,
+          cachedInputTokens: cached,
+          cacheWriteInputTokens: 0,
+          outputTokens: output,
+          reasoningOutputTokens: 0,
+        },
+        modelContextWindow: 258400,
+      },
+    },
+  });
+  const messages = [
+    { id: "thread", result: { thread: { id: "thread-1" } } },
+    { id: "turn", result: { turn: { id: "turn-1" } } },
+    usage(100, 10, 80, 110),
+    usage(200, 20, 160, 330),
+    // app-server may repeat the final snapshot; it must not inflate the turn.
+    usage(200, 20, 160, 330),
+    {
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { type: "agentMessage", text: "Done" },
+      },
+    },
+    {
+      method: "turn/completed",
+      params: {
+        threadId: "thread-1",
+        turn: { id: "turn-1", status: "completed" },
+      },
+    },
+  ];
+  const parsed = parseCodexAppServerMessages(messages, "", 0, "gpt-5.6-sol");
+  assert.equal(parsed.content, "Done");
+  assert.equal(parsed.usage.promptTokens, 300);
+  assert.equal(parsed.usage.completionTokens, 30);
+  assert.equal(parsed.usage.cachedTokens, 240);
+  assert.equal(parsed.contextTokens, 200);
+  assert.equal(parsed.contextCachedTokens, 160);
+  assert.equal(parsed.contextWindow, 258400);
+  assert.equal(parsed.thread, "thread-1");
 });
 
 test("live agent progress is recorded per turn and served to the paired browser", async (t) => {
@@ -999,6 +1273,12 @@ test("Claude Code stream output yields text, thinking tokens, context window, an
           { type: "thinking", thinking: "Count the primes." },
           { type: "text", text: "5" },
         ],
+        usage: {
+          input_tokens: 7,
+          cache_read_input_tokens: 3000,
+          cache_creation_input_tokens: 400,
+          output_tokens: 10,
+        },
       },
     },
     {
@@ -1034,6 +1314,8 @@ test("Claude Code stream output yields text, thinking tokens, context window, an
   assert.equal(parsed.usage.cachedTokens, 4341);
   assert.equal(parsed.usage.reasoningTokens, 80);
   assert.equal(parsed.contextWindow, 1000000);
+  assert.equal(parsed.contextTokens, 3407);
+  assert.equal(parsed.contextCachedTokens, 3000);
   assert.equal(parsed.reasoning, "Count the primes.");
   assert.equal(parsed.thread, "s-1");
   assert.deepEqual(parsed.quota, {
@@ -1066,6 +1348,188 @@ test("Claude Code stream output yields text, thinking tokens, context window, an
     text: "Claude Code session ready; sending the prompt…",
   });
   assert.equal(parseClaudeOutput("", "boom", 1, "default").isError, true);
+});
+
+test("a Claude Code run that hits a ceiling reports why instead of an empty message", async () => {
+  const { parseClaudeOutput } = await import(
+    "../desktop/lib/providers/claude-code.mjs"
+  );
+  // The CLI reports these with an empty `result`, so the subtype is the message.
+  const ceiling = parseClaudeOutput(
+    `${JSON.stringify({
+      type: "result",
+      subtype: "error_max_turns",
+      is_error: true,
+      num_turns: 121,
+      result: "",
+      session_id: "s-1",
+    })}\n`,
+    "",
+    0,
+    "default",
+  );
+  assert.equal(ceiling.isError, true);
+  assert.match(ceiling.errorMessage, /^Claude Code stopped after \d+ turns/);
+  const unknown = parseClaudeOutput(
+    `${JSON.stringify({
+      type: "result",
+      subtype: "error_surprise",
+      is_error: true,
+      result: "   ",
+    })}\n`,
+    "",
+    0,
+    "default",
+  );
+  assert.equal(
+    unknown.errorMessage,
+    "Claude Code reported error_surprise.",
+    "an unknown subtype still says something",
+  );
+  assert.equal(
+    parseClaudeOutput(
+      `${JSON.stringify({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        result: "the model refused",
+      })}\n`,
+      "",
+      0,
+      "default",
+    ).errorMessage,
+    "the model refused",
+    "a reported reason still wins over the subtype",
+  );
+});
+
+test("a conversation keeps its CLI session between turns and loses it after ten idle minutes", async (t) => {
+  // Faked before the app exists, so the thread's clock and the sweep agree.
+  t.mock.timers.enable({ apis: ["Date"] });
+  const runs = [];
+  const { call, pair } = await app(t, (options) => {
+    runs.push(options);
+    options.onThread?.("agent-session-1");
+    return {
+      child: null,
+      output: Promise.resolve({
+        content: `reply ${runs.length}`,
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        model: "default",
+        thread: "agent-session-1",
+      }),
+    };
+  });
+  // The faked clock starts at zero, where the pairing throttle sees no gap yet.
+  t.mock.timers.tick(2_000);
+  const headers = await pair();
+  // The browser posts the whole conversation so far on every turn.
+  const history = [];
+  const turn = async (content) => {
+    history.push({ role: "user", content });
+    const response = await call("/api/generate", {
+      method: "POST",
+      headers,
+      body: {
+        providerId: "fake",
+        model: "default",
+        threadId: "conv-idle",
+        messages: history,
+      },
+    });
+    history.push({
+      role: "assistant",
+      content: response.body?.message?.content,
+    });
+    return response;
+  };
+  assert.equal((await turn("Remember ZEBRA.")).status, 200);
+  t.mock.timers.tick(9 * 60_000);
+  assert.equal((await turn("Still there?")).status, 200);
+  assert.equal(
+    runs[1].thread?.handle,
+    "agent-session-1",
+    "a conversation that is still warm resumes its CLI session",
+  );
+  t.mock.timers.tick(11 * 60_000);
+  assert.equal((await turn("And now?")).status, 200);
+  assert.equal(
+    runs[2].thread?.handle ?? null,
+    null,
+    "past ten idle minutes the session is gone and the next turn starts fresh",
+  );
+  assert.notEqual(
+    runs[2].scratch.directory,
+    runs[0].scratch.directory,
+    "the expired thread's working directory went with it",
+  );
+});
+
+test("Claude Code's own turn ceiling sits above the protocol's tool-round limit", async () => {
+  const { start } = await import("../desktop/lib/providers/claude-code.mjs");
+  const { LIMITS } = await import("../src/lib/constants.js");
+  let spawned = null;
+  const run = start({
+    binary: "/bin/echo",
+    model: "default",
+    systemPrompt: "",
+    prompt: "hi",
+    onLog: (_level, message) => {
+      spawned ??= message;
+    },
+  });
+  run.child?.kill?.("SIGKILL");
+  await run.output.catch(() => {});
+  // Every tool round of a turn runs inside one `claude -p` process, because the
+  // MCP call blocks until the browser answers. A ceiling at or below the
+  // protocol's own limit would end the run before the browser's limit spoke.
+  const args = run.child?.spawnargs ?? [];
+  const turns = Number(args[args.indexOf("--max-turns") + 1]);
+  assert.ok(
+    turns > LIMITS.toolRounds,
+    `--max-turns ${turns} must exceed the ${LIMITS.toolRounds}-round protocol ceiling`,
+  );
+});
+
+test("ending a Claude Code thread deletes the conversation behind a symlinked scratch path", async (t) => {
+  const { endThread, sessionDirectories } = await import(
+    "../desktop/lib/providers/claude-code.mjs"
+  );
+  const root = mkdtempSync(join(tmpdir(), "arjunah-claude-cleanup-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const config = join(root, "config");
+  const real = join(root, "real-scratch");
+  const link = join(root, "linked-scratch");
+  mkdirSync(real, { recursive: true });
+  symlinkSync(real, link, "dir");
+  // Claude Code slugifies the working directory it resolved, not the spelling
+  // it was handed — the difference macOS's /var → /private/var symlink creates.
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = config;
+  t.after(() => {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+  });
+  const handle = "6f1d6a9e-40bb-4f0e-9a0a-6a9b0f2a5c31";
+  const [resolvedDirectory] = sessionDirectories(link);
+  assert.equal(
+    resolvedDirectory,
+    join(config, "projects", realpathSync(real).replace(/[^A-Za-z0-9]/g, "-")),
+  );
+  mkdirSync(join(resolvedDirectory, "memory"), { recursive: true });
+  const transcript = join(resolvedDirectory, `${handle}.jsonl`);
+  writeFileSync(transcript, '{"type":"user"}\n');
+  endThread(handle, link);
+  assert.equal(
+    existsSync(transcript),
+    false,
+    "the conversation must not survive the thread that made it",
+  );
+  assert.equal(
+    existsSync(resolvedDirectory),
+    false,
+    "the emptied project directory goes too, memory folder and all",
+  );
 });
 
 test("a logged command line keeps flags and drops long values", async () => {

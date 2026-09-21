@@ -4,7 +4,10 @@ import {
   OPENAI_DEFAULT_MODEL,
   OPENAI_MODELS,
 } from "./lib/openai.js";
+import { OPENCODE_BASE_URL, opencodeDisplayName } from "./lib/opencode.js";
+import { searchFilter } from "./lib/search.js";
 let existing = null;
+let opencodeExisting = null;
 let desktop = null;
 let catalog = null; // catalog.get: providers with usage and quota, global default
 let statePort = null;
@@ -87,6 +90,15 @@ function values() {
     keepApiKey: !$("#keep-key").disabled && $("#keep-key").checked,
   };
 }
+function opencodeValues() {
+  return {
+    baseUrl: $("#opencode-base-url").value.trim(),
+    model: $("#opencode-model").value.trim(),
+    apiKey: $("#opencode-api-key").value,
+    keepApiKey:
+      !$("#opencode-keep-key").disabled && $("#opencode-keep-key").checked,
+  };
+}
 function isChatModel(model) {
   return (
     /^(gpt-|o[1-9])/.test(model) &&
@@ -102,14 +114,64 @@ function setModelOptions(
   const models = [
     ...new Set([...OPENAI_MODELS, ...availableModels.filter(isChatModel)]),
   ];
-  $("#openai-models").replaceChildren(
-    ...models.map((model) => {
-      const option = document.createElement("option");
-      option.value = model;
-      return option;
+  mountCombo(
+    "#openai-model-mount",
+    "model",
+    modelCombo({
+      label: "OpenAI default model",
+      models: models.map((model) => ({ id: model, displayName: model })),
+      value: selected,
+      allowCustom: true,
+      placeholder: "Search or type a model",
     }),
   );
-  $("#model").value = selected;
+}
+/**
+ * Swaps a combo into a form field's place, keeping the id the rest of the page
+ * reads it by. `value` reads and writes like the control it replaced.
+ */
+function mountCombo(mountSelector, id, combo) {
+  combo.id = id;
+  $(mountSelector).replaceChildren(combo);
+}
+/**
+ * The Zen model list is whatever the saved key discovered; there is no useful
+ * list to offer before that, so the control says so instead of inviting a guess.
+ */
+function setOpenCodeModelOptions(selected = "", availableModels = []) {
+  const models = [
+    ...new Set(
+      availableModels
+        .map((item) => (typeof item === "string" ? item : item?.id))
+        .filter((item) => typeof item === "string"),
+    ),
+  ];
+  mountCombo(
+    "#opencode-model-mount",
+    "opencode-model",
+    modelCombo({
+      label: "OpenCode Zen default model",
+      models: models.map((model) => ({
+        id: model,
+        displayName: opencodeDisplayName(model),
+      })),
+      value: models.includes(selected) ? selected : (models[0] ?? ""),
+      disabled: !models.length,
+      empty: "Save your key to load models",
+      placeholder: models.length
+        ? "Search models"
+        : "Save your key to load models",
+    }),
+  );
+}
+function refreshOpenCodeKeyControl() {
+  const canReuse = Boolean(opencodeExisting?.hasApiKey);
+  const keep = $("#opencode-keep-key");
+  keep.disabled = !canReuse;
+  if (!canReuse) keep.checked = false;
+  $("#opencode-api-key").required = !(canReuse && keep.checked);
+  $("#opencode-api-key").placeholder =
+    canReuse && keep.checked ? "Saved key will be used" : "OpenCode API key";
 }
 function status(selector, message, error = false) {
   const node = $(selector);
@@ -121,6 +183,203 @@ function element(tag, text, className) {
   if (text != null) node.textContent = text;
   if (className) node.className = className;
   return node;
+}
+let comboCount = 0;
+/**
+ * A model chooser you can type into. Provider catalogs run to hundreds of names
+ * that differ by a suffix, so a plain <select> means hunting through a list for
+ * the one already in mind. This filters as you type and orders what is left by
+ * how well it answers the query (see `lib/search.js`).
+ *
+ * Only a model from the list can be chosen: the box is a filter over the
+ * catalog, not a free text field, so `value` is always something real. Reads the
+ * same way a <select> did — `node.value` — so callers did not have to change.
+ */
+function modelCombo({
+  label,
+  models,
+  value = "",
+  disabled = false,
+  title = "",
+  placeholder = "Search models",
+  empty = "No models available",
+  // OpenAI ships models faster than any bundled list knows about, so that field
+  // stays a text box the suggestions only assist. Catalogs the provider reports
+  // are complete by definition, and typing a name they lack is a mistake.
+  allowCustom = false,
+}) {
+  const entries = models.map((model) => ({
+    id: String(model.id ?? ""),
+    displayName: String(model.displayName ?? model.id ?? ""),
+  }));
+  const listId = `combo-list-${++comboCount}`;
+  let current = entries.some((entry) => entry.id === value)
+    ? value
+    : allowCustom
+      ? String(value ?? "")
+      : (entries[0]?.id ?? "");
+  let active = current;
+  let open = false;
+  // The box shows the chosen model's name, which must not act as a filter: a
+  // picker opens on the whole catalog and narrows only once something is typed.
+  let query = null;
+
+  const root = element("div", null, "combo");
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "combo-input";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.placeholder = placeholder;
+  input.setAttribute("role", "combobox");
+  input.setAttribute("aria-label", label);
+  input.setAttribute("aria-expanded", "false");
+  input.setAttribute("aria-controls", listId);
+  input.setAttribute("aria-autocomplete", "list");
+  input.disabled = disabled || (!entries.length && !allowCustom);
+  if (title) input.title = title;
+  const list = element("div", null, "combo-list");
+  list.id = listId;
+  list.setAttribute("role", "listbox");
+  list.hidden = true;
+  root.append(input, list);
+
+  const nameOf = (id) =>
+    entries.find((entry) => entry.id === id)?.displayName ??
+    (allowCustom ? String(id ?? "") : "");
+  const matches = () =>
+    searchFilter(entries, query ?? "", (entry) => [
+      entry.displayName,
+      entry.id,
+    ]);
+
+  function draw() {
+    const rows = matches();
+    if (!rows.some((row) => row.id === active)) active = rows[0]?.id ?? null;
+    list.replaceChildren();
+    if (!rows.length) {
+      list.append(element("div", empty, "combo-empty"));
+      input.removeAttribute("aria-activedescendant");
+      return;
+    }
+    rows.forEach((row, index) => {
+      const option = element("button", null, "combo-option");
+      option.type = "button";
+      option.id = `${listId}-${index}`;
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", String(row.id === current));
+      option.classList.toggle("selected", row.id === current);
+      option.classList.toggle("active", row.id === active);
+      option.append(element("span", row.displayName));
+      if (row.displayName !== row.id)
+        option.append(element("small", row.id, "combo-id"));
+      // `mousedown` beats the input's `blur`, which would close the list first.
+      option.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        commit(row.id);
+      });
+      if (row.id === active)
+        input.setAttribute("aria-activedescendant", option.id);
+      list.append(option);
+    });
+  }
+
+  function show() {
+    if (open || input.disabled) return;
+    open = true;
+    list.hidden = false;
+    input.setAttribute("aria-expanded", "true");
+    query = null;
+    active = current;
+    draw();
+    list.querySelector(".combo-option.active")?.scrollIntoView({
+      block: "nearest",
+    });
+  }
+
+  /**
+   * `acceptTyped` distinguishes leaving the box from choosing a row. On the way
+   * out, a field that takes names off the list keeps what was typed; a row that
+   * was picked is already the answer, and re-reading the search text would throw
+   * that pick away.
+   */
+  function hide(acceptTyped = true) {
+    open = false;
+    list.hidden = true;
+    input.setAttribute("aria-expanded", "false");
+    if (acceptTyped && allowCustom) current = input.value.trim();
+    input.value = nameOf(current);
+  }
+
+  function commit(id) {
+    current = id;
+    hide(false);
+  }
+
+  function move(step) {
+    const rows = matches();
+    if (!rows.length) return;
+    const at = rows.findIndex((row) => row.id === active);
+    const next = at < 0 ? (step > 0 ? 0 : rows.length - 1) : at + step;
+    active = rows[(next + rows.length) % rows.length].id;
+    draw();
+    list.querySelector(".combo-option.active")?.scrollIntoView({
+      block: "nearest",
+    });
+  }
+
+  input.value = nameOf(current);
+  input.addEventListener("focus", () => {
+    show();
+    input.select();
+  });
+  input.addEventListener("click", show);
+  input.addEventListener("input", () => {
+    show();
+    query = input.value;
+    // A new search proposes its own best answer rather than keeping a highlight
+    // that may no longer be in the list.
+    active = null;
+    draw();
+    list.scrollTop = 0;
+  });
+  input.addEventListener("blur", hide);
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (!open) return show();
+      return move(event.key === "ArrowDown" ? 1 : -1);
+    }
+    if (event.key === "Enter" && open) {
+      event.preventDefault();
+      if (active) commit(active);
+      return;
+    }
+    if (event.key === "Escape" && open) {
+      event.stopPropagation();
+      // Escape abandons the search rather than adopting it.
+      hide(false);
+    }
+  });
+
+  Object.defineProperty(root, "value", {
+    get: () => current,
+    set: (next) => {
+      current = entries.some((entry) => entry.id === next)
+        ? next
+        : allowCustom
+          ? String(next ?? "")
+          : (entries[0]?.id ?? "");
+      input.value = nameOf(current);
+    },
+  });
+  Object.defineProperty(root, "disabled", {
+    get: () => input.disabled,
+    set: (next) => {
+      input.disabled = Boolean(next) || (!entries.length && !allowCustom);
+    },
+  });
+  return root;
 }
 const GUIDANCE_LABELS = {
   missing: "Not installed",
@@ -350,17 +609,15 @@ function renderProviders() {
   );
   if (existing) openaiCard.append(renderStats("openai"));
   const openaiControls = element("div", null, "controls");
-  const openaiSelect = document.createElement("select");
-  openaiSelect.setAttribute("aria-label", "OpenAI model");
-  for (const model of catalog?.providers.find((p) => p.id === "openai")
-    ?.models ?? []) {
-    const option = document.createElement("option");
-    option.value = model.model;
-    option.textContent = model.displayName;
-    option.selected = model.model === existing?.model;
-    openaiSelect.append(option);
-  }
-  openaiSelect.disabled = !existing;
+  const openaiSelect = modelCombo({
+    label: "OpenAI model",
+    models: (
+      catalog?.providers.find((p) => p.id === "openai")?.models ?? []
+    ).map((model) => ({ id: model.model, displayName: model.displayName })),
+    value: existing?.model ?? "",
+    disabled: !existing,
+    empty: "Save your key to load models",
+  });
   const useOpenAI = element(
     "button",
     active.type === "openai" ? "Change model" : "Use as default",
@@ -374,6 +631,61 @@ function renderProviders() {
   openaiControls.append(openaiSelect, useOpenAI);
   openaiCard.append(openaiControls);
   cards.push(openaiCard);
+  const openCodeProvider = catalog?.providers.find(
+    (provider) => provider.id === "opencode",
+  );
+  const openCodeCard = element("div", null, "provider");
+  openCodeCard.classList.toggle("available", Boolean(opencodeExisting));
+  openCodeCard.classList.toggle("active", active.type === "opencode");
+  openCodeCard.append(
+    element("span", null, `dot ${opencodeExisting ? "on" : ""}`),
+  );
+  const openCodeTitle = element("div", null, "title");
+  openCodeTitle.append(element("strong", "OpenCode Zen API key"));
+  openCodeTitle.append(element("span", "API key", "badge"));
+  if (active.type === "opencode")
+    openCodeTitle.append(
+      element("span", "Global default", "badge badge-accent"),
+    );
+  openCodeCard.append(openCodeTitle);
+  openCodeCard.append(
+    element(
+      "div",
+      opencodeExisting
+        ? `${opencodeDisplayName(opencodeExisting.model)} · ${
+            opencodeExisting.tier === "paid"
+              ? "paid (Go) key"
+              : "key not yet tested"
+          } · ${(opencodeExisting.models ?? []).length} models`
+        : "No key saved. Add one below.",
+      "meta",
+    ),
+  );
+  if (opencodeExisting) openCodeCard.append(renderStats("opencode"));
+  const openCodeControls = element("div", null, "controls");
+  const openCodeSelect = modelCombo({
+    label: "OpenCode model",
+    models: (openCodeProvider?.models ?? []).map((model) => ({
+      id: model.model,
+      displayName: model.displayName,
+    })),
+    value: opencodeExisting?.model ?? "",
+    disabled: !opencodeExisting,
+    empty: "Save your key to load models",
+  });
+  const useOpenCode = element(
+    "button",
+    active.type === "opencode" ? "Change model" : "Use as default",
+    `btn ${active.type === "opencode" ? "btn-secondary" : "btn-primary"}`,
+  );
+  useOpenCode.type = "button";
+  useOpenCode.disabled = !opencodeExisting;
+  useOpenCode.addEventListener("click", () =>
+    select({ type: "opencode", model: openCodeSelect.value }),
+  );
+  openCodeControls.append(openCodeSelect, useOpenCode);
+  openCodeCard.append(openCodeControls);
+  cards.push(openCodeCard);
   for (const provider of desktop?.providers ?? []) {
     const isActive =
       active.type === "desktop" && active.providerId === provider.id;
@@ -412,22 +724,11 @@ function renderProviders() {
     if (provider.notice) card.append(rich("div", provider.notice, "notice"));
     if (!provider.available) card.append(renderGuidance(provider));
     const controls = element("div", null, "controls");
-    const select_ = document.createElement("select");
-    select_.setAttribute("aria-label", `${provider.name} model`);
     const models = provider.desktopProblem
       ? [{ id: "", displayName: "Models unavailable" }]
       : provider.models?.length
         ? provider.models
         : [{ id: "default", displayName: "Default model" }];
-    for (const model of models) {
-      const option = document.createElement("option");
-      option.value = model.id;
-      option.textContent = model.displayName;
-      option.selected = isActive
-        ? model.id === active.model
-        : model.id === provider.defaultModel;
-      select_.append(option);
-    }
     const blocked = provider.available
       ? ""
       : provider.desktopProblem
@@ -437,8 +738,13 @@ function renderProviders() {
           : provider.installed
             ? `${provider.name} is not signed in. Follow the steps on the left, then click Refresh.`
             : `${provider.name} is not installed. Follow the steps on the left, then click Refresh.`;
-    select_.disabled = !provider.available;
-    select_.title = blocked || "Model";
+    const select_ = modelCombo({
+      label: `${provider.name} model`,
+      models,
+      value: isActive ? active.model : provider.defaultModel,
+      disabled: !provider.available,
+      title: blocked || "Model",
+    });
     const use = element(
       "button",
       isActive ? "Change model" : "Use as default",
@@ -500,6 +806,7 @@ async function select(active) {
     const result = await runtime("provider.select", active);
     desktop = { ...desktop, ...result };
     existing = await runtime("provider.get");
+    opencodeExisting = await runtime("opencode.get");
     if (existing) setModelOptions(existing.model);
     catalog = await runtime("catalog.get").catch(() => catalog);
     renderProviders();
@@ -581,21 +888,34 @@ async function refreshDesktop(refresh = false) {
 }
 
 existing = await runtime("provider.get");
+opencodeExisting = await runtime("opencode.get");
 catalog = await runtime("catalog.get").catch(() => null);
 $("#base-url").value = OPENAI_BASE_URL;
+$("#opencode-base-url").value = OPENCODE_BASE_URL;
 setModelOptions(existing?.model);
+setOpenCodeModelOptions(
+  opencodeExisting?.model,
+  opencodeExisting?.models ?? [],
+);
 if (existing) {
   $("#keep-key").checked = existing.hasApiKey;
 }
+if (opencodeExisting)
+  $("#opencode-keep-key").checked = opencodeExisting.hasApiKey;
 refreshKeyControl();
+refreshOpenCodeKeyControl();
 renderProviders();
 await refreshGrants();
 refreshDesktop();
 connectStateStream();
 $("#base-url").addEventListener("input", refreshKeyControl);
 $("#keep-key").addEventListener("change", refreshKeyControl);
+$("#opencode-keep-key").addEventListener("change", refreshOpenCodeKeyControl);
 $("#provider-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  // The model field is a combo now, so the browser no longer enforces `required`.
+  if (!$("#model").value.trim())
+    return status("#provider-status", "Choose or type a model first.", true);
   status("#provider-status", "Saving…");
   try {
     existing = await runtime("provider.save", values());
@@ -606,6 +926,30 @@ $("#provider-form").addEventListener("submit", async (event) => {
     refreshDesktop();
   } catch (error) {
     status("#provider-status", error.message, true);
+  }
+});
+$("#opencode-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  status("#opencode-status", "Saving and loading models…");
+  try {
+    const chosen = $("#opencode-model").value;
+    opencodeExisting = await runtime("opencode.save", opencodeValues());
+    $("#opencode-api-key").value = "";
+    $("#opencode-keep-key").checked = opencodeExisting.hasApiKey;
+    setOpenCodeModelOptions(
+      opencodeExisting.model,
+      opencodeExisting.models ?? [],
+    );
+    refreshOpenCodeKeyControl();
+    status(
+      "#opencode-status",
+      chosen
+        ? `Saved. ${opencodeDisplayName(opencodeExisting.model)} is the default model.`
+        : `Saved. ${opencodeExisting.models.length} models loaded; ${opencodeDisplayName(opencodeExisting.model)} selected as the default. Pick another above and save again to change it.`,
+    );
+    refreshDesktop();
+  } catch (error) {
+    status("#opencode-status", error.message, true);
   }
 });
 $("#test").addEventListener("click", async () => {
@@ -629,6 +973,21 @@ $("#test").addEventListener("click", async () => {
     status("#provider-status", error.message, true);
   }
 });
+$("#test-opencode").addEventListener("click", async () => {
+  status("#opencode-status", "Testing…");
+  try {
+    const result = await runtime("opencode.test", opencodeValues());
+    opencodeExisting = await runtime("opencode.get");
+    setOpenCodeModelOptions(result.model, result.models ?? []);
+    status(
+      "#opencode-status",
+      `Connected. ${opencodeDisplayName(result.model)} answered a tool-enabled test request, so this is a paid (Go) key; ${result.modelCount} usable models found.`,
+    );
+    refreshDesktop();
+  } catch (error) {
+    status("#opencode-status", error.message, true);
+  }
+});
 $("#clear-provider").addEventListener("click", async () => {
   try {
     await runtime("provider.clear");
@@ -641,6 +1000,19 @@ $("#clear-provider").addEventListener("click", async () => {
     refreshDesktop();
   } catch (error) {
     status("#provider-status", error.message, true);
+  }
+});
+$("#clear-opencode").addEventListener("click", async () => {
+  try {
+    await runtime("opencode.clear");
+    opencodeExisting = null;
+    $("#opencode-api-key").value = "";
+    setOpenCodeModelOptions();
+    refreshOpenCodeKeyControl();
+    status("#opencode-status", "OpenCode Zen key cleared.");
+    refreshDesktop();
+  } catch (error) {
+    status("#opencode-status", error.message, true);
   }
 });
 $("#clear-grants").addEventListener("click", async () => {
@@ -665,6 +1037,7 @@ $("#pair-form").addEventListener("submit", async (event) => {
     });
     $("#desktop-code").value = "";
     existing = await runtime("provider.get");
+    opencodeExisting = await runtime("opencode.get");
     setModelOptions(existing?.model);
     refreshKeyControl();
     renderDesktop();

@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>अर्जुनः Paint</title>
+    <link rel="icon" href="../favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
@@ -13,8 +14,11 @@
       <span id="extension-state">Looking for अर्जुनः…</span>
     </header>
     <nav class="menu" aria-label="Commands">
-      <button id="new">New</button><button id="undo">Undo</button
-      ><button id="redo">Redo</button>
+      <button id="new">New</button
+      ><button id="undo" title="Undo (Ctrl/Cmd+Z)">Undo</button
+      ><button id="redo" title="Redo (Ctrl/Cmd+Y or Ctrl/Cmd+Shift+Z)">
+        Redo
+      </button>
       <button id="download-png">Download PNG</button
       ><button id="download-svg">Download SVG</button>
       <button id="ask-ai" class="ai" disabled>✨ Ask अर्जुनः to draw</button>
@@ -25,9 +29,89 @@
         <button data-tool="pencil" class="active">✎<span>Pencil</span></button>
         <button data-tool="brush">🖌<span>Brush</span></button>
         <button data-tool="eraser">▰<span>Eraser</span></button>
-        <button data-tool="fill">▨<span>Fill</span></button>
+        <button data-tool="fill">
+          <svg
+            viewBox="0 0 16 16"
+            shape-rendering="crispEdges"
+            aria-hidden="true"
+            focusable="false"
+          >
+            <rect x="8" y="5" width="1" height="1" fill="#fff" />
+            <rect x="7" y="6" width="3" height="1" fill="#fff" />
+            <rect x="6" y="7" width="5" height="1" fill="#fff" />
+            <rect x="7" y="8" width="5" height="1" fill="#fff" />
+            <rect x="8" y="9" width="5" height="1" fill="#fff" />
+            <rect x="9" y="10" width="4" height="1" fill="#fff" />
+            <rect x="9" y="11" width="3" height="1" fill="#fff" />
+            <rect x="9" y="4" width="1" height="1" fill="#9a9a9a" />
+            <rect x="9" y="5" width="2" height="1" fill="#9a9a9a" />
+            <rect x="10" y="6" width="2" height="1" fill="#9a9a9a" />
+            <rect x="11" y="7" width="1" height="1" fill="#9a9a9a" />
+            <rect x="12" y="8" width="1" height="1" fill="#9a9a9a" />
+            <rect x="13" y="9" width="1" height="1" fill="#9a9a9a" />
+            <rect x="8" y="2" width="1" height="1" fill="#0a3fc8" />
+            <rect x="7" y="3" width="2" height="1" fill="#0a3fc8" />
+            <rect x="6" y="4" width="2" height="1" fill="#0a3fc8" />
+            <rect x="5" y="5" width="2" height="1" fill="#0a3fc8" />
+            <rect x="4" y="6" width="1" height="1" fill="#0a3fc8" />
+            <rect x="4" y="7" width="1" height="1" fill="#0a3fc8" />
+            <rect x="3" y="8" width="2" height="1" fill="#0a3fc8" />
+            <rect x="3" y="9" width="2" height="1" fill="#0a3fc8" />
+            <rect x="2" y="10" width="2" height="1" fill="#0a3fc8" />
+            <rect x="2" y="11" width="2" height="1" fill="#0a3fc8" />
+            <rect x="1" y="12" width="4" height="1" fill="#0a3fc8" />
+            <rect x="1" y="13" width="4" height="1" fill="#0a3fc8" />
+            <rect x="4" y="0" width="4" height="1" fill="#000" />
+            <rect x="3" y="1" width="2" height="1" fill="#000" />
+            <rect x="7" y="1" width="2" height="1" fill="#000" />
+            <rect x="2" y="2" width="2" height="1" fill="#000" />
+            <rect x="7" y="2" width="1" height="1" fill="#000" />
+            <rect x="9" y="2" width="1" height="1" fill="#000" />
+            <rect x="2" y="3" width="2" height="1" fill="#000" />
+            <rect x="6" y="3" width="1" height="1" fill="#000" />
+            <rect x="9" y="3" width="1" height="1" fill="#000" />
+            <rect x="2" y="4" width="2" height="1" fill="#000" />
+            <rect x="5" y="4" width="1" height="1" fill="#000" />
+            <rect x="8" y="4" width="1" height="1" fill="#000" />
+            <rect x="10" y="4" width="1" height="1" fill="#000" />
+            <rect x="3" y="5" width="2" height="1" fill="#000" />
+            <rect x="7" y="5" width="1" height="1" fill="#000" />
+            <rect x="11" y="5" width="1" height="1" fill="#000" />
+            <rect x="3" y="6" width="1" height="1" fill="#000" />
+            <rect x="5" y="6" width="2" height="1" fill="#000" />
+            <rect x="12" y="6" width="1" height="1" fill="#000" />
+            <rect x="3" y="7" width="1" height="1" fill="#000" />
+            <rect x="5" y="7" width="1" height="1" fill="#000" />
+            <rect x="12" y="7" width="1" height="1" fill="#000" />
+            <rect x="2" y="8" width="1" height="1" fill="#000" />
+            <rect x="5" y="8" width="2" height="1" fill="#000" />
+            <rect x="13" y="8" width="1" height="1" fill="#000" />
+            <rect x="2" y="9" width="1" height="1" fill="#000" />
+            <rect x="5" y="9" width="1" height="1" fill="#000" />
+            <rect x="7" y="9" width="1" height="1" fill="#000" />
+            <rect x="14" y="9" width="1" height="1" fill="#000" />
+            <rect x="1" y="10" width="1" height="1" fill="#000" />
+            <rect x="4" y="10" width="1" height="1" fill="#000" />
+            <rect x="8" y="10" width="1" height="1" fill="#000" />
+            <rect x="13" y="10" width="1" height="1" fill="#000" />
+            <rect x="1" y="11" width="1" height="1" fill="#000" />
+            <rect x="4" y="11" width="1" height="1" fill="#000" />
+            <rect x="8" y="11" width="1" height="1" fill="#000" />
+            <rect x="12" y="11" width="1" height="1" fill="#000" />
+            <rect x="0" y="12" width="1" height="1" fill="#000" />
+            <rect x="5" y="12" width="1" height="1" fill="#000" />
+            <rect x="9" y="12" width="3" height="1" fill="#000" />
+            <rect x="0" y="13" width="1" height="1" fill="#000" />
+            <rect x="5" y="13" width="1" height="1" fill="#000" />
+            <rect x="0" y="14" width="6" height="1" fill="#000" />
+          </svg>
+          <span>Fill</span>
+        </button>
+        <button data-tool="line">╱<span>Line</span></button>
         <button data-tool="circle">◯<span>Circle</span></button>
         <button data-tool="rectangle">□<span>Rectangle</span></button>
+        <button data-tool="rounded-rectangle">▢<span>Round rect</span></button>
+        <button data-tool="curve">⌒<span>Curve</span></button>
         <button data-tool="text">A<span>Text</span></button>
         <button data-tool="eyedropper">◉<span>Pick color</span></button>
         <label class="size"

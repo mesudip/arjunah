@@ -324,7 +324,11 @@ export function createDesktopApp({
   // remembers the agent's own session handle so later turns send only the new
   // messages instead of the whole transcript.
   const threads = new Map();
-  const THREAD_IDLE_MS = 30 * 60_000;
+  // A conversation keeps its CLI session alive between turns and loses it ten
+  // minutes after the last one, which is also when the agent's persisted
+  // session data is deleted from this computer (SECURITY.md).
+  const THREAD_IDLE_MS = 10 * 60_000;
+  const THREAD_SWEEP_MS = 60_000;
   const THREAD_ID = /^[A-Za-z0-9_-]{1,100}$/;
   const threadCleanups = new Set();
   function endThread(id) {
@@ -356,6 +360,18 @@ export function createDesktopApp({
   function sweepThreads() {
     for (const [id, thread] of threads)
       if (Date.now() - thread.lastAt > THREAD_IDLE_MS) endThread(id);
+  }
+  // Generate calls sweep before they run, but a conversation the user simply
+  // walked away from must expire on time too: its CLI session data may not
+  // outlive the idle window just because no other browser turn arrived.
+  let threadTimer = null;
+  function scheduleThreadSweep() {
+    clearTimeout(threadTimer);
+    threadTimer = setTimeout(() => {
+      sweepThreads();
+      scheduleThreadSweep();
+    }, THREAD_SWEEP_MS);
+    threadTimer.unref?.();
   }
   // Facts providers report only after a run: subscription quota and the real
   // context window of the model that answered.
@@ -570,6 +586,8 @@ export function createDesktopApp({
     const config = sync.config ? structuredClone(sync.config) : null;
     if (config?.openai?.apiKey)
       config.openai.apiKey = `${config.openai.apiKey.slice(0, 3)}…${config.openai.apiKey.slice(-4)}`;
+    if (config?.opencode?.apiKey)
+      config.opencode.apiKey = `${config.opencode.apiKey.slice(0, 3)}…${config.opencode.apiKey.slice(-4)}`;
     return { ...sync, config };
   }
 
@@ -899,6 +917,12 @@ export function createDesktopApp({
       },
       finishReason: "stop",
       usage: event.usage,
+      contextTokens: Number.isSafeInteger(event.contextTokens)
+        ? event.contextTokens
+        : null,
+      contextCachedTokens: Number.isSafeInteger(event.contextCachedTokens)
+        ? event.contextCachedTokens
+        : null,
       // Commands the agent ran inside its own sandbox, for the browser's activity view.
       steps: Array.isArray(event.steps) ? event.steps.slice(0, 32) : [],
       reasoning: typeof event.reasoning === "string" ? event.reasoning : null,
@@ -958,7 +982,14 @@ export function createDesktopApp({
         });
       const result = await session.call(name, rpc.params?.arguments ?? {});
       return reply({
-        content: [{ type: "text", text: result.content }],
+        content: [
+          { type: "text", text: result.content },
+          ...(result.images ?? []).map((image) => ({
+            type: "image",
+            data: image.data,
+            mimeType: image.mediaType,
+          })),
+        ],
         isError: Boolean(result.isError),
       });
     }
@@ -1243,6 +1274,12 @@ export function createDesktopApp({
         const next = { ...current, ...(body.config ?? {}) };
         if (next.openai && body.config?.openai && !body.config.openai.apiKey)
           next.openai.apiKey = current.openai?.apiKey ?? null;
+        if (
+          next.opencode &&
+          body.config?.opencode &&
+          !body.config.opencode.apiKey
+        )
+          next.opencode.apiKey = current.opencode?.apiKey ?? null;
         const sync = store.updateSync(next, "desktop");
         record(
           "sync",
@@ -1301,12 +1338,14 @@ export function createDesktopApp({
           server.off("error", reject);
           void refreshProviderView().catch(() => {});
           scheduleProviderMonitor();
+          scheduleThreadSweep();
           resolve(server.address());
         });
       });
     },
     async close() {
       clearTimeout(providerTimer);
+      clearTimeout(threadTimer);
       for (const client of eventClients) client.socket.destroy();
       eventClients.clear();
       for (const id of [...threads.keys()]) endThread(id);

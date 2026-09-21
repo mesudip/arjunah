@@ -385,8 +385,41 @@ try {
     true,
   );
   await shadow(`root.querySelector(".model-button").click();`);
+  // Opening hands focus to the search box, on the whole catalog (SPEC 8.2).
+  assert.deepEqual(
+    await shadow(`return {
+      focused: root.activeElement?.className,
+      query: root.querySelector(".model-search").value,
+      count: root.querySelectorAll(".model-option").length,
+    };`),
+    { focused: "model-search", query: "", count: 2 },
+  );
+  // Typing filters to the matches and drops the provider headings, whose order
+  // the ranking no longer follows.
+  await shadow(`const box = root.querySelector(".model-search");
+    box.value = "deep";
+    box.dispatchEvent(new Event("input", { bubbles: true }));`);
+  assert.deepEqual(
+    await shadow(`return {
+      rows: [...root.querySelectorAll(".model-option span:first-child")].map((n) => n.textContent),
+      groups: root.querySelectorAll(".menu-group").length,
+    };`),
+    { rows: ["Deep"], groups: 0 },
+  );
+  // A search matching nothing says so rather than showing an empty box.
+  await shadow(`const box = root.querySelector(".model-search");
+    box.value = "nothing-like-this";
+    box.dispatchEvent(new Event("input", { bubbles: true }));`);
+  assert.match(
+    await shadow(`return root.querySelector(".model-list").textContent;`),
+    /No model matches/,
+  );
+  await shadow(`const box = root.querySelector(".model-search");
+    box.value = "deep";
+    box.dispatchEvent(new Event("input", { bubbles: true }));`);
+  // Enter takes the best match, so the whole switch needs no mouse.
   await shadow(
-    `[...root.querySelectorAll(".model-option")].find((o) => o.textContent.includes("Deep")).click();`,
+    `root.querySelector(".model-search").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));`,
   );
   await waitFor(
     `root.querySelector(".model-label").textContent === "Deep"`,

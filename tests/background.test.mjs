@@ -75,6 +75,132 @@ test("OpenAI key retention works for both Save and Test, and settings never rece
   assert.equal((await b.ok("provider.get", {}, b.extension)).apiKey, undefined);
 });
 
+test("OpenCode Zen key, catalog, and default selection stay independent from OpenAI", async (t) => {
+  const b = await broker(t);
+  const input = {
+    baseUrl: "https://opencode.ai/zen/v1",
+    model: "gpt-5.6-luna",
+    keepApiKey: true,
+  };
+  b.hooks.fetch = async (url) => {
+    if (url.endsWith("/models"))
+      return Response.json({
+        data: [
+          { id: "gpt-5.6-luna" },
+          { id: "claude-sonnet-4-6" },
+          { id: "gemini-3.1-pro" },
+          { id: "deepseek-v4-flash-vision-exp" },
+          { id: "jev-1.13" },
+        ],
+      });
+    return Response.json({
+      id: "response-1",
+      status: "completed",
+      output: [
+        {
+          type: "message",
+          content: [{ type: "output_text", text: "Connected." }],
+        },
+      ],
+      usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 },
+    });
+  };
+  assert.equal(
+    (await b.call("opencode.test", input, b.extension)).error.message,
+    "An OpenCode Zen API key is required.",
+  );
+  const saved = await b.ok(
+    "opencode.save",
+    { ...input, apiKey: "zen-secret" },
+    b.extension,
+  );
+  assert.deepEqual(saved.models.sort(), [
+    "claude-sonnet-4-6",
+    "deepseek-v4-flash-vision-exp",
+    "gemini-3.1-pro",
+    "gpt-5.6-luna",
+  ]);
+  const tested = await b.ok("opencode.test", input, b.extension);
+  assert.equal(tested.generationVerified, true);
+  assert.equal(b.store.opencode.apiKey, "zen-secret");
+  assert.equal((await b.ok("opencode.get", {}, b.extension)).apiKey, undefined);
+  await b.ok(
+    "provider.select",
+    { type: "opencode", model: "gpt-5.6-luna" },
+    b.extension,
+  );
+  const catalog = await b.ok("catalog.get", {}, b.extension);
+  assert.equal(catalog.defaultModel, "opencode/gpt-5.6-luna");
+  assert.ok(
+    catalog.providers
+      .find((provider) => provider.id === "opencode")
+      .models.some((model) => model.id === "opencode/claude-sonnet-4-6"),
+  );
+  assert.equal(b.store.provider.apiKey, "dummy-audit-key");
+});
+
+test("an OpenCode Zen key alone discovers the catalog and picks a default", async (t) => {
+  const b = await broker(t);
+  const catalogs = [];
+  b.hooks.fetch = async (url) => {
+    if (url.endsWith("/models")) {
+      catalogs.push(url);
+      return Response.json({
+        data: [
+          { id: "jev-1.13" },
+          { id: "claude-sonnet-4-6" },
+          { id: "gemini-3.1-pro" },
+        ],
+      });
+    }
+    throw new Error(`unexpected request to ${url}`);
+  };
+  // No model is sent: the key is what discovers which models exist, so asking
+  // for one first would mean asking the user to guess.
+  const saved = await b.ok(
+    "opencode.save",
+    { baseUrl: "https://opencode.ai/zen/v1", apiKey: "zen-secret" },
+    b.extension,
+  );
+  assert.equal(catalogs.length, 1);
+  assert.deepEqual(saved.models, ["claude-sonnet-4-6", "gemini-3.1-pro"]);
+  assert.equal(
+    saved.model,
+    "claude-sonnet-4-6",
+    "the account's own catalog picks the default when the preferred id is absent",
+  );
+  // The picker must offer exactly what the key discovered, and nothing else.
+  const catalog = await b.ok("catalog.get", {}, b.extension);
+  const provider = catalog.providers.find((item) => item.id === "opencode");
+  assert.deepEqual(
+    provider.models.map((model) => model.id),
+    ["opencode/claude-sonnet-4-6", "opencode/gemini-3.1-pro"],
+  );
+  assert.equal(provider.defaultModel, "opencode/claude-sonnet-4-6");
+  assert.equal(provider.available, true);
+  // Saving a second provider's key must not hijack the global default.
+  assert.equal(catalog.defaultModel, "openai/allowed");
+  // A model this key cannot call is refused rather than silently substituted.
+  assert.equal(
+    (
+      await b.call(
+        "opencode.save",
+        { baseUrl: "https://opencode.ai/zen/v1", model: "gpt-5.6-luna" },
+        b.extension,
+      )
+    ).error.message,
+    "OpenCode Zen does not offer gpt-5.6-luna on this key. Choose a model from the list.",
+  );
+  // Changing only the default reuses the stored key rather than demanding it again.
+  const moved = await b.ok(
+    "opencode.save",
+    { baseUrl: "https://opencode.ai/zen/v1", model: "gemini-3.1-pro" },
+    b.extension,
+  );
+  assert.equal(moved.model, "gemini-3.1-pro");
+  assert.equal(b.store.opencode.apiKey, "zen-secret");
+});
+
 test("malformed extension grant origins are rejected as invalid requests", async (t) => {
   const b = await broker(t);
   const result = await b.call(

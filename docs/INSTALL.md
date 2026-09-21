@@ -1,6 +1,6 @@
 # Installing अर्जुनः
 
-Two parts. The **browser extension** is all you need if you have an OpenAI API key. The **desktop app** is optional: it lets websites use the Claude Code, Codex, or OpenCode subscription you are already signed in to, with no API key.
+Two parts. The **browser extension** is all you need if you have an OpenAI or OpenCode Zen API key. The **desktop app** is optional: it lets websites use the Claude Code, Codex, or OpenCode subscription you are already signed in to, with no API key.
 
 ## 1. The browser extension
 
@@ -24,6 +24,7 @@ The alpha build is unsigned, so Firefox removes it when it restarts and you load
 Open the extension's settings (right-click the icon, **Options**) and do one of:
 
 - Enter an **OpenAI API key** and pick a default model. The key stays in extension storage and is never given to any website.
+- Enter an **OpenCode Zen API key** and pick a model from its live catalog. अर्जुनः uses the native Responses, Anthropic Messages, Gemini generateContent, or Chat Completions format required by that model, including supported image input and incremental output.
 - Pair the **desktop app** (next section) to use your subscriptions instead.
 
 Then try it: open a site that supports अर्जुनः, visit the [hosted Paint playground](https://mesudip.github.io/arjunah/paint/), or run `npm run demo` from a checkout and open <http://127.0.0.1:8090/paint/>.

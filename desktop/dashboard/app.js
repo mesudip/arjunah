@@ -232,7 +232,7 @@ function render() {
     providers.append(
       rich(
         "p",
-        "No provider is ready yet. Paired browsers can still use an OpenAI API key saved in the extension. Follow the steps above for the subscription you want to use, then click Re-check providers.",
+        "No provider is ready yet. Paired browsers can still use an OpenAI or OpenCode Zen API key saved in the extension. Follow the steps above for the subscription you want to use, then click Re-check providers.",
         "empty",
       ),
     );
@@ -245,9 +245,18 @@ function render() {
     $("#openai-key").placeholder = config.openai?.apiKey
       ? `Synced key ${config.openai.apiKey}`
       : "No key synced yet";
+    $("#opencode-model").value = config.opencode?.model ?? "";
+    $("#opencode-key").value = "";
+    $("#opencode-key").placeholder = config.opencode?.apiKey
+      ? `Synced key ${config.opencode.apiKey}`
+      : "No key synced yet";
     const active = config.active ?? { type: "openai" };
     $("#active").value =
-      active.type === "desktop" ? `desktop:${active.providerId}` : "openai";
+      active.type === "desktop"
+        ? `desktop:${active.providerId}`
+        : active.type === "opencode"
+          ? "opencode"
+          : "openai";
     $("#active-model").value =
       active.type === "desktop" ? (active.model ?? "") : "";
   }
@@ -411,6 +420,8 @@ $("#codex-toggle").addEventListener("change", async (event) => {
 for (const field of [
   "#openai-model",
   "#openai-key",
+  "#opencode-model",
+  "#opencode-key",
   "#active",
   "#active-model",
 ])
@@ -425,14 +436,17 @@ $("#config-form").addEventListener("submit", async (event) => {
       model: $("#openai-model").value.trim() || null,
       apiKey: $("#openai-key").value.trim() || null,
     },
-    active:
-      activeValue === "openai"
-        ? { type: "openai" }
-        : {
-            type: "desktop",
-            providerId: activeValue.slice(8),
-            model: $("#active-model").value.trim() || "default",
-          },
+    opencode: {
+      model: $("#opencode-model").value.trim() || null,
+      apiKey: $("#opencode-key").value.trim() || null,
+    },
+    active: ["openai", "opencode"].includes(activeValue)
+      ? { type: activeValue }
+      : {
+          type: "desktop",
+          providerId: activeValue.slice(8),
+          model: $("#active-model").value.trim() || "default",
+        },
   };
   await api("/api/dashboard/config", {
     method: "PUT",

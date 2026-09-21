@@ -99,6 +99,57 @@
 
       <section class="card">
         <div class="section-head">
+          <h2>OpenCode Zen API key</h2>
+          <span class="eyebrow">API key</span>
+        </div>
+        <p class="help">
+          Use an OpenCode Zen API key with its native model formats. अर्जुनः
+          routes GPT, Claude, Gemini, Grok, Muse, Qwen, and open-model families
+          through the format each model requires. The key stays in this browser
+          profile and syncs only to a desktop app you paired.
+        </p>
+        <form id="opencode-form">
+          <label class="field"
+            >Base URL<input
+              id="opencode-base-url"
+              type="url"
+              required
+              readonly /></label
+          ><label class="field"
+            >API key<input
+              id="opencode-api-key"
+              type="password"
+              autocomplete="off"
+              placeholder="Stored locally"
+          /></label>
+          <label class="keep-key"
+            ><input id="opencode-keep-key" type="checkbox" /> Use the saved
+            OpenCode API key</label
+          >
+          <label class="field"
+            >Default model<span id="opencode-model-mount"></span
+          ></label>
+          <div class="actions">
+            <button type="button" id="clear-opencode" class="btn btn-danger">
+              Clear key
+            </button>
+            <button type="button" id="test-opencode" class="btn btn-secondary">
+              Test connection
+            </button>
+            <button type="submit" class="btn btn-primary">Save key</button>
+          </div>
+        </form>
+        <p id="opencode-status" class="status" role="status"></p>
+        <p class="help">
+          Create a key at <a href="https://opencode.ai/auth">OpenCode Zen</a>.
+          Saving the key loads the models your account can call and selects one
+          for you; pick a different default above and save again to change it.
+          Testing sends a short tool-enabled request to the selected model.
+        </p>
+      </section>
+
+      <section class="card">
+        <div class="section-head">
           <h2>OpenAI API key</h2>
           <span class="eyebrow">API key</span>
         </div>
@@ -111,12 +162,7 @@
           <label class="field"
             >Base URL<input id="base-url" type="url" required readonly /></label
           ><label class="field"
-            >Default model<input
-              id="model"
-              required
-              list="openai-models" /><datalist
-              id="openai-models"
-            ></datalist></label
+            >Default model<span id="openai-model-mount"></span></label
           ><label class="field"
             >API key<input
               id="api-key"

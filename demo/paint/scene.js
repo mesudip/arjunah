@@ -2,6 +2,8 @@ export const WIDTH = 960;
 export const HEIGHT = 600;
 export const STORAGE_KEY = "arjunah.paint.project.v1";
 
+const ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
+const issuedIds = new Set();
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const esc = (value) =>
   String(value)
@@ -35,15 +37,33 @@ export function loadProject(storage = globalThis.localStorage) {
           !object ||
           typeof object !== "object" ||
           typeof object.id !== "string" ||
-          !["stroke", "circle", "rectangle", "text", "fill"].includes(
-            object.kind,
-          ),
+          ![
+            "stroke",
+            "line",
+            "curve",
+            "circle",
+            "rectangle",
+            "rounded_rectangle",
+            "text",
+            "fill",
+          ].includes(object.kind),
       ) ||
       new Set(parsed.objects.map((object) => object.id)).size !==
         parsed.objects.length
     )
       return { project: newProject(), recovered: Boolean(parsed) };
-    return { project: parsed, recovered: false };
+    const currentId = /^[a-z0-9]{3,4}$/;
+    parsed.objects
+      .map((object) => object.id)
+      .filter((id) => currentId.test(id))
+      .forEach((id) => issuedIds.add(id));
+    let migrated = false;
+    for (const object of parsed.objects) {
+      if (currentId.test(object.id)) continue;
+      object.id = objectId();
+      migrated = true;
+    }
+    return { project: parsed, recovered: false, migrated };
   } catch {
     return { project: newProject(), recovered: true };
   }
@@ -54,8 +74,27 @@ export function saveProject(project, storage = globalThis.localStorage) {
   storage?.setItem(STORAGE_KEY, JSON.stringify(project));
 }
 
+function randomObjectId() {
+  const bytes = new Uint8Array(5);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index++)
+      bytes[index] = Math.floor(Math.random() * 256);
+  }
+  const length = 3 + (bytes[0] % 2);
+  let id = "";
+  for (let index = 0; index < length; index++)
+    id += ID_ALPHABET[bytes[index + 1] % ID_ALPHABET.length];
+  return id;
+}
+
 export function objectId() {
-  return `obj_${globalThis.crypto?.randomUUID?.().slice(0, 8) ?? Math.random().toString(36).slice(2, 10)}`;
+  let id;
+  do id = randomObjectId();
+  while (issuedIds.has(id));
+  issuedIds.add(id);
+  return id;
 }
 
 export function makeObject(kind, data, source = "user") {
@@ -165,6 +204,39 @@ export function drawObject(ctx, object) {
     if (object.points.length === 1)
       ctx.lineTo(object.points[0].x + 0.01, object.points[0].y);
     ctx.stroke();
+  } else if (object.kind === "line") {
+    ctx.strokeStyle = object.color;
+    ctx.lineWidth = object.width;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(object.points[0].x, object.points[0].y);
+    ctx.lineTo(object.points[1].x, object.points[1].y);
+    ctx.stroke();
+  } else if (object.kind === "curve") {
+    ctx.strokeStyle = object.color;
+    ctx.lineWidth = object.width;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(object.points[0].x, object.points[0].y);
+    if (object.points.length === 1) {
+      ctx.lineTo(object.points[0].x + 0.01, object.points[0].y);
+    } else if (object.points.length === 2) {
+      ctx.lineTo(object.points[1].x, object.points[1].y);
+    } else {
+      for (let index = 1; index < object.points.length - 1; index++) {
+        const point = object.points[index];
+        const next = object.points[index + 1];
+        ctx.quadraticCurveTo(
+          point.x,
+          point.y,
+          (point.x + next.x) / 2,
+          (point.y + next.y) / 2,
+        );
+      }
+      ctx.lineTo(object.points.at(-1).x, object.points.at(-1).y);
+    }
+    ctx.stroke();
   } else if (object.kind === "circle") {
     ctx.beginPath();
     ctx.ellipse(object.cx, object.cy, object.rx, object.ry, 0, 0, Math.PI * 2);
@@ -188,6 +260,32 @@ export function drawObject(ctx, object) {
       ctx.strokeStyle = object.outline;
       ctx.lineWidth = object.outlineWidth;
       ctx.strokeRect(object.x1, object.y1, width, height);
+    }
+  } else if (object.kind === "rounded_rectangle") {
+    const x = Math.min(object.x1, object.x2);
+    const y = Math.min(object.y1, object.y2);
+    const width = Math.abs(object.x2 - object.x1);
+    const height = Math.abs(object.y2 - object.y1);
+    const radius = Math.min(object.radius, width / 2, height / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.lineTo(x + width - radius, y);
+    ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+    ctx.lineTo(x + width, y + height - radius);
+    ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+    ctx.lineTo(x + radius, y + height);
+    ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+    ctx.lineTo(x, y + radius);
+    ctx.quadraticCurveTo(x, y, x + radius, y);
+    ctx.closePath();
+    if (object.fill) {
+      ctx.fillStyle = object.fill;
+      ctx.fill();
+    }
+    if (object.outline && object.outlineWidth > 0) {
+      ctx.strokeStyle = object.outline;
+      ctx.lineWidth = object.outlineWidth;
+      ctx.stroke();
     }
   } else if (object.kind === "text") {
     ctx.fillStyle = object.color;
@@ -220,7 +318,7 @@ export function objectBounds(object) {
       width: object.rx * 2,
       height: object.ry * 2,
     };
-  if (object.kind === "rectangle")
+  if (["rectangle", "rounded_rectangle"].includes(object.kind))
     return {
       x: Math.min(object.x1, object.x2),
       y: Math.min(object.y1, object.y2),
@@ -247,6 +345,12 @@ export function objectBounds(object) {
   };
 }
 
+function compactNumber(value) {
+  if (!Number.isFinite(value)) return value;
+  const rounded = Math.round((value + Number.EPSILON) * 100) / 100;
+  return Object.is(rounded, -0) ? 0 : rounded;
+}
+
 export function summarizeObject(object, index) {
   const style = {};
   for (const key of [
@@ -256,16 +360,44 @@ export function summarizeObject(object, index) {
     "outline",
     "width",
     "fontSize",
+    "radius",
     "text",
   ])
-    if (object[key] != null) style[key] = object[key];
+    if (object[key] != null)
+      style[key] =
+        typeof object[key] === "number"
+          ? compactNumber(object[key])
+          : object[key];
+  const bounds = Object.fromEntries(
+    Object.entries(objectBounds(object)).map(([key, value]) => [
+      key,
+      compactNumber(value),
+    ]),
+  );
   return {
     id: object.id,
     z: index,
     kind: object.kind,
     source: object.source,
-    bounds: objectBounds(object),
+    ...(object.groupName ? { group_name: object.groupName } : {}),
+    bounds,
     style,
+  };
+}
+
+export function objectIdsForGroups(project, groupNames) {
+  const requested = [...new Set(groupNames)];
+  const available = new Set(
+    project.objects.map((object) => object.groupName).filter(Boolean),
+  );
+  const foundGroups = requested.filter((name) => available.has(name));
+  const found = new Set(foundGroups);
+  return {
+    ids: project.objects
+      .filter((object) => found.has(object.groupName))
+      .map((object) => object.id),
+    foundGroups,
+    missingGroups: requested.filter((name) => !available.has(name)),
   };
 }
 
@@ -304,10 +436,30 @@ function vectorElement(object) {
     return `<ellipse cx="${object.cx}" cy="${object.cy}" rx="${object.rx}" ry="${object.ry}" fill="${esc(object.fill || "none")}" stroke="${esc(object.outline || "none")}" stroke-width="${object.outlineWidth || 0}"/>`;
   if (object.kind === "rectangle")
     return `<rect x="${Math.min(object.x1, object.x2)}" y="${Math.min(object.y1, object.y2)}" width="${Math.abs(object.x2 - object.x1)}" height="${Math.abs(object.y2 - object.y1)}" fill="${esc(object.fill || "none")}" stroke="${esc(object.outline || "none")}" stroke-width="${object.outlineWidth || 0}"/>`;
+  if (object.kind === "rounded_rectangle")
+    return `<rect x="${Math.min(object.x1, object.x2)}" y="${Math.min(object.y1, object.y2)}" width="${Math.abs(object.x2 - object.x1)}" height="${Math.abs(object.y2 - object.y1)}" rx="${object.radius}" ry="${object.radius}" fill="${esc(object.fill || "none")}" stroke="${esc(object.outline || "none")}" stroke-width="${object.outlineWidth || 0}"/>`;
   if (object.kind === "text")
     return `<text x="${object.x}" y="${object.y}" fill="${esc(object.color)}" font-size="${object.fontSize}" font-family="Arial, sans-serif" text-anchor="${object.align === "center" ? "middle" : object.align === "right" ? "end" : "start"}" dominant-baseline="hanging">${esc(object.text)}</text>`;
   if (object.kind === "stroke")
     return `<polyline points="${object.points.map((point) => `${point.x},${point.y}`).join(" ")}" fill="none" stroke="${esc(object.color)}" stroke-width="${object.width}" stroke-linecap="round" stroke-linejoin="round"/>`;
+  if (object.kind === "line")
+    return `<line x1="${object.points[0].x}" y1="${object.points[0].y}" x2="${object.points[1].x}" y2="${object.points[1].y}" stroke="${esc(object.color)}" stroke-width="${object.width}" stroke-linecap="round"/>`;
+  if (object.kind === "curve") {
+    const [first, ...rest] = object.points;
+    if (!rest.length)
+      return `<path d="M ${first.x} ${first.y} l 0.01 0" fill="none" stroke="${esc(object.color)}" stroke-width="${object.width}" stroke-linecap="round" stroke-linejoin="round"/>`;
+    let path = `M ${first.x} ${first.y}`;
+    if (rest.length === 1) path += ` L ${rest[0].x} ${rest[0].y}`;
+    else {
+      for (let index = 0; index < rest.length - 1; index++) {
+        const point = rest[index];
+        const next = rest[index + 1];
+        path += ` Q ${point.x} ${point.y} ${(point.x + next.x) / 2} ${(point.y + next.y) / 2}`;
+      }
+      path += ` L ${rest.at(-1).x} ${rest.at(-1).y}`;
+    }
+    return `<path d="${path}" fill="none" stroke="${esc(object.color)}" stroke-width="${object.width}" stroke-linecap="round" stroke-linejoin="round"/>`;
+  }
   return "";
 }
 

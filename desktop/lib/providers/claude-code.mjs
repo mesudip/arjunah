@@ -17,7 +17,7 @@ import {
 import { IMAGE_LIMITS } from "../transcript.mjs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { readdirSync, rmdirSync, writeFileSync } from "node:fs";
+import { readdirSync, realpathSync, writeFileSync } from "node:fs";
 
 export const id = "claude-code";
 export const name = "Claude Code";
@@ -28,6 +28,18 @@ export const supportsReasoning = true;
 // Claude Code takes images through its stream-json input format (see `start`).
 export const supportsVision = true;
 const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+// One user turn may run up to 100 tool rounds (LIMITS.toolRounds in
+// src/lib/constants.js), and every one of them happens inside this single
+// process: the MCP call blocks until the browser posts the result back. Claude
+// Code spends roughly one turn per round plus the turn that writes the answer,
+// so this runaway guard sits above the protocol ceiling. The browser's own
+// limit is then the one that stops a runaway loop, with a message that says so.
+const MAX_TURNS = 120;
+// `result` is empty on these, so the subtype is all the run says about itself.
+const ERROR_SUBTYPES = Object.freeze({
+  error_max_turns: `Claude Code stopped after ${MAX_TURNS} turns in one run.`,
+  error_during_execution: "Claude Code stopped while running the turn.",
+});
 const LINKS = [
   {
     label: "Install Claude Code",
@@ -426,11 +438,33 @@ export function parseClaudeOutput(stdout, stderr, code, model) {
   if (result.is_error || result.subtype?.startsWith("error"))
     return {
       isError: true,
-      errorMessage: String(
-        result.result ?? result.subtype ?? "Claude Code reported an error.",
+      // A run that hits a ceiling reports the subtype and an empty `result`,
+      // which would otherwise reach the browser as a bare "Claude Code failed:".
+      errorMessage: (
+        String(result.result ?? "").trim() ||
+        ERROR_SUBTYPES[result.subtype] ||
+        (result.subtype
+          ? `Claude Code reported ${result.subtype}.`
+          : "Claude Code reported an error.")
       ).slice(0, 300),
     };
   const usage = result.usage ?? {};
+  // `result.usage` is the total across every model request in this agent run.
+  // The final assistant event is the request that is actually occupying the
+  // model's context window, so keep its usage separate from the run ledger.
+  const lastRequestUsage = [...events]
+    .reverse()
+    .find(
+      (event) =>
+        event.type === "assistant" &&
+        event.message?.usage &&
+        typeof event.message.usage === "object",
+    )?.message?.usage;
+  const contextTokens = lastRequestUsage
+    ? (lastRequestUsage.input_tokens ?? 0) +
+      (lastRequestUsage.cache_read_input_tokens ?? 0) +
+      (lastRequestUsage.cache_creation_input_tokens ?? 0)
+    : null;
   const modelUsage = result.modelUsage ?? {};
   const usedModel = Object.keys(modelUsage)[0] ?? model;
   const reasoning = events
@@ -458,6 +492,12 @@ export function parseClaudeOutput(stdout, stderr, code, model) {
     model: usedModel,
     contextWindow: Number.isInteger(modelUsage[usedModel]?.contextWindow)
       ? modelUsage[usedModel].contextWindow
+      : null,
+    contextTokens: Number.isSafeInteger(contextTokens) ? contextTokens : null,
+    contextCachedTokens: Number.isSafeInteger(
+      lastRequestUsage?.cache_read_input_tokens,
+    )
+      ? lastRequestUsage.cache_read_input_tokens
       : null,
     reasoning: reasoning || null,
     quota: rateLimit ? quotaFrom(rateLimit) : null,
@@ -526,7 +566,7 @@ export function start({
     "--strict-mcp-config",
     "--disable-slash-commands",
     "--max-turns",
-    "24",
+    String(MAX_TURNS),
   ];
   let handle = thread?.handle ?? null;
   if (!thread) args.push("--no-session-persistence");
@@ -607,20 +647,44 @@ export function start({
   });
 }
 
+/**
+ * The project directories Claude Code may have used for a scratch directory.
+ * It slugifies the *resolved* working directory, which on macOS is the
+ * `/private/var/…` spelling of the `/var/…` path `tmpdir()` hands out; slugging
+ * the path as given would look for a directory that never existed and leave the
+ * conversation on disk. Both spellings are tried, because only the one the CLI
+ * chose exists and neither can be assumed.
+ */
+export function sessionDirectories(scratch) {
+  const root = join(
+    process.env.CLAUDE_CONFIG_DIR || join(process.env.HOME ?? "", ".claude"),
+    "projects",
+  );
+  let resolved = scratch;
+  try {
+    resolved = realpathSync(scratch);
+  } catch {
+    /* already removed; the path as given is the only candidate left */
+  }
+  return [...new Set([resolved, scratch])].map((path) =>
+    join(root, path.replace(/[^A-Za-z0-9]/g, "-")),
+  );
+}
+
 /** Removes the saved session transcript Claude Code wrote for a finished thread. */
 export function endThread(handle, scratchDirectory_) {
   if (!/^[0-9a-f-]{36}$/.test(String(handle ?? "")) || !scratchDirectory_)
     return;
-  const slug = scratchDirectory_.replace(/[^A-Za-z0-9]/g, "-");
-  const directory = join(
-    process.env.CLAUDE_CONFIG_DIR || join(process.env.HOME ?? "", ".claude"),
-    "projects",
-    slug,
-  );
-  removeQuietly(join(directory, `${handle}.jsonl`));
-  try {
-    if (!readdirSync(directory).length) rmdirSync(directory);
-  } catch {
-    /* other sessions or already gone */
+  for (const directory of sessionDirectories(scratchDirectory_)) {
+    removeQuietly(join(directory, `${handle}.jsonl`));
+    try {
+      // The CLI also leaves a `memory` folder beside the transcript, so an
+      // emptied directory is not literally empty; what matters is that no
+      // other conversation is still stored there.
+      if (!readdirSync(directory).some((entry) => entry.endsWith(".jsonl")))
+        removeQuietly(directory);
+    } catch {
+      /* other sessions or already gone */
+    }
   }
 }

@@ -312,7 +312,7 @@
       controls = defaultControls(validated.manifest.widget.controls);
       ensureUi();
       if (replaced) view.clear();
-      launcher.hidden = false;
+      syncLauncher();
       applyManifest();
       // The page only finishes wiring its thread callbacks once register()
       // resolves, so the first read of its store waits for the next task.
@@ -333,8 +333,8 @@
         view.clear();
         view.setOptions({ controls: [], suggestions: [] });
       }
-      if (launcher) launcher.hidden = true;
       if (panel) panel.hidden = true;
+      syncLauncher();
       return true;
     }
     if (method === "chat.open") {
@@ -344,6 +344,7 @@
     }
     if (method === "chat.close") {
       if (panel) panel.hidden = true;
+      syncLauncher();
       return true;
     }
     if (method === "chat.getControls") return { ...controls };
@@ -499,6 +500,12 @@
 
   const WALLET_CHROME = `<label class="context-toggle compose-control" title="Share page context"><input type="checkbox" aria-label="Share page context"><span>@</span></label>`;
 
+  /**
+   * The launcher wears the extension's own icon (`src/icons/arjunah.svg`), inlined
+   * rather than loaded from the extension so a page can never read our id off an
+   * image request. The mark carries its own background, so the button is the icon.
+   */
+  const LAUNCHER_HTML = `<button class="launcher" hidden title="Open \u0905\u0930\u094D\u091C\u0941\u0928\u0903" aria-label="Open \u0905\u0930\u094D\u091C\u0941\u0928\u0903"><svg viewBox="0 0 128 128" width="54" height="54" aria-hidden="true" focusable="false"><defs><linearGradient id="arjunah-bg" x1="15" y1="9" x2="111" y2="121" gradientUnits="userSpaceOnUse"><stop stop-color="#172A72"/><stop offset="0.52" stop-color="#2358C9"/><stop offset="1" stop-color="#102153"/></linearGradient><linearGradient id="arjunah-cyan" x1="27" y1="29" x2="97" y2="99" gradientUnits="userSpaceOnUse"><stop stop-color="#72F4FF"/><stop offset="1" stop-color="#24B9F2"/></linearGradient><linearGradient id="arjunah-gold" x1="51" y1="91" x2="92" y2="38" gradientUnits="userSpaceOnUse"><stop stop-color="#FF9B39"/><stop offset="1" stop-color="#FFD268"/></linearGradient></defs><rect width="128" height="128" rx="29" fill="url(#arjunah-bg)"/><path d="M26 64C39 37 67 25 96 31C83 38 75 51 72 66C68 82 57 94 40 99C47 85 47 74 42 63C38 71 33 77 27 80" fill="none" stroke="url(#arjunah-cyan)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/><path d="M45 83L73 47" fill="none" stroke="url(#arjunah-gold)" stroke-width="6" stroke-linecap="round"/><path d="M69 44L91 37L82 58Z" fill="url(#arjunah-gold)"/><circle cx="28" cy="64" r="4.5" fill="#70F3FF"/><circle cx="40" cy="99" r="4.5" fill="#70F3FF"/><circle cx="96" cy="31" r="4.5" fill="#FFD268"/></svg></button>`;
   function ensureUi() {
     if (host) return;
     host = document.createElement("div");
@@ -515,12 +522,7 @@
     const style = document.createElement("style");
     style.textContent = R.STYLE;
     root.append(style);
-    root.append(
-      R.build(
-        document,
-        `<button class="launcher" hidden title="Open AI assistant" aria-label="Open AI assistant"><svg viewBox="0 0 128 128" width="30" height="30" aria-hidden="true"><path d="M32 30 C32 66 58 64 64 94" fill="none" stroke="currentColor" stroke-width="12" stroke-linecap="round"/><path d="M96 30 C96 66 70 64 64 94" fill="none" stroke="currentColor" stroke-width="12" stroke-linecap="round"/><circle cx="64" cy="98" r="10" fill="currentColor"/></svg></button>`,
-      ),
-    );
+    root.append(R.build(document, LAUNCHER_HTML));
     // The renderer owns the conversation; the extension keeps consent, the
     // provider pickers and usage, which have no meaning outside wallet mode.
     view = R.createChatView({ document, host: walletHost() });
@@ -561,7 +563,7 @@
         view.setBusy(false);
         view.addBubble("assistant", "Stopped.", { persist: false });
       },
-      close() {},
+      close: syncLauncher,
       reset() {
         cancelSession();
         conversationId = crypto.randomUUID();
@@ -926,13 +928,13 @@
     if (!statusLine) return;
     statusLine.textContent = "";
     const window_ = lastTurn?.contextWindow ?? settings?.model?.contextWindow;
-    const prompt = lastTurn?.promptTokens ?? 0;
-    const contextPercent = window_
-      ? Math.min(100, (prompt / window_) * 100)
-      : 0;
+    const contextKnown = Number.isSafeInteger(lastTurn?.contextTokens);
+    const prompt = contextKnown ? lastTurn.contextTokens : 0;
+    const contextPercent =
+      window_ && contextKnown ? Math.min(100, (prompt / window_) * 100) : 0;
     const contextSection = usageSection(
       "Context window",
-      window_
+      window_ && contextKnown
         ? `${compactNumber(prompt)} / ${compactNumber(window_)} (${Math.round(contextPercent)}%)`
         : "Not reported",
     );
@@ -944,18 +946,19 @@
     );
     const contextRows = document.createElement("div");
     contextRows.className = "usage-rows";
-    contextRows.append(
-      usageRow("Current prompt", compactNumber(prompt), "#3b82f6"),
-    );
-    if (lastTurn?.cachedTokens)
+    if (contextKnown)
+      contextRows.append(
+        usageRow("Current prompt", compactNumber(prompt), "#3b82f6"),
+      );
+    if (lastTurn?.contextCachedTokens)
       contextRows.append(
         usageRow(
           "Cached portion",
-          compactNumber(lastTurn.cachedTokens),
+          compactNumber(lastTurn.contextCachedTokens),
           "#10b981",
         ),
       );
-    if (window_)
+    if (window_ && contextKnown)
       contextRows.append(
         usageRow(
           "Free space",
@@ -1069,9 +1072,10 @@
     statusLine.append(quota);
 
     const glance = contextGlance;
-    glance.querySelector("strong").textContent = window_
-      ? `${compactNumber(prompt)} / ${compactNumber(window_)} (${Math.round(contextPercent)}%)`
-      : "Not reported";
+    glance.querySelector("strong").textContent =
+      window_ && contextKnown
+        ? `${compactNumber(prompt)} / ${compactNumber(window_)} (${Math.round(contextPercent)}%)`
+        : "Not reported";
     glance.querySelector(".context-track i").style.width = `${contextPercent}%`;
     const quotaPercent = Math.max(
       0,
@@ -1147,9 +1151,18 @@
     return `Resets in ${Math.ceil(hours / 24)} days`;
   }
 
+  /**
+   * The launcher and the panel are two ways into the same conversation, so only
+   * one is ever offered: with the panel open the bubble is dead weight over the
+   * page, and it comes back the moment the panel closes.
+   */
+  function syncLauncher() {
+    if (launcher) launcher.hidden = !registration || !panel?.hidden;
+  }
   function openPanel() {
     ensureUi();
     panel.hidden = false;
+    syncLauncher();
     applyManifest();
     if (registration?.manifest.threads) void view.refreshThreads();
     void refreshSettings();
@@ -1234,6 +1247,8 @@
           completionTokens:
             turn?.completionTokens || result.usage.completionTokens,
           cachedTokens: result.usage.cachedTokens ?? 0,
+          contextTokens: result.contextTokens ?? null,
+          contextCachedTokens: result.contextCachedTokens ?? null,
           reasoningTokens: result.usage.reasoningTokens ?? 0,
           contextWindow: result.contextWindow ?? null,
         };
@@ -1598,7 +1613,7 @@
         sendResponse({ ok: true, supported: Boolean(registration) });
       } else if (message.action === "toggle") {
         ensureUi();
-        panel.hidden ? openPanel() : (panel.hidden = true);
+        panel.hidden ? openPanel() : ((panel.hidden = true), syncLauncher());
         sendResponse({ ok: true, supported: Boolean(registration) });
       } else if (message.action === "status")
         sendResponse({

@@ -1,9 +1,17 @@
-import { existsSync, readFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+} from "node:fs";
+import { spawn } from "node:child_process";
 import { join } from "node:path";
 import {
   which,
   run,
-  spawnAgent,
+  cleanEnv,
+  describeCommand,
   jsonLines,
   usageFrom,
   summarizeFailure,
@@ -29,7 +37,7 @@ export const vendor = "OpenAI";
 export const supportsTools = true;
 export const supportsThreads = true;
 export const supportsReasoning = true;
-// `codex exec -i <FILE>` attaches images to the prompt (see `start`).
+// Codex app-server accepts local image paths in a turn's structured input.
 export const supportsVision = true;
 const CODEX_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const LINKS = [
@@ -182,7 +190,7 @@ export function parseCodexProbe(messages) {
       defaultReasoning: CODEX_EFFORTS.includes(model.defaultReasoningEffort)
         ? model.defaultReasoningEffort
         : null,
-      // Codex accepts images natively, but Arjunah's `codex exec` run path is text only.
+      // Codex app-server accepts images natively as localImage inputs.
       acceptsImages:
         Array.isArray(model.inputModalities) &&
         model.inputModalities.includes("image"),
@@ -456,6 +464,121 @@ export function parseCodexOutput(stdout, stderr, code, model) {
   };
 }
 
+/**
+ * Parses one app-server turn. Unlike `codex exec --json`, app-server exposes
+ * `tokenUsage.last`, the exact usage of the final upstream model request. The
+ * `usage` result remains the sum of every request in this turn for accounting.
+ */
+export function parseCodexAppServerMessages(messages, stderr, code, model) {
+  const turnResponse = messages.find(
+    (message) => String(message?.id) === "turn",
+  );
+  const turnId = turnResponse?.result?.turn?.id ?? null;
+  const threadResponse = messages.find(
+    (message) => String(message?.id) === "thread",
+  );
+  const threadId = threadResponse?.result?.thread?.id ?? null;
+  const completed = [...messages]
+    .reverse()
+    .find(
+      (message) =>
+        message?.method === "turn/completed" &&
+        (!turnId || message.params?.turn?.id === turnId),
+    );
+  const failed =
+    turnResponse?.error ??
+    threadResponse?.error ??
+    (completed?.params?.turn?.status === "failed"
+      ? completed.params.turn.error
+      : null);
+  const items = messages
+    .filter(
+      (message) =>
+        message?.method === "item/completed" &&
+        (!turnId || message.params?.turnId === turnId),
+    )
+    .map((message) => message.params?.item)
+    .filter(Boolean);
+  const agentMessages = items.filter((item) => item.type === "agentMessage");
+  if (failed || (!completed && code !== 0) || !agentMessages.length)
+    return {
+      isError: true,
+      errorMessage: String(
+        failed?.message ??
+          failed?.error?.message ??
+          summarizeFailure(stderr, `Codex exited with status ${code}.`),
+      ).slice(0, 300),
+    };
+
+  const usageEvents = messages.filter(
+    (message) =>
+      message?.method === "thread/tokenUsage/updated" &&
+      (!turnId || message.params?.turnId === turnId),
+  );
+  const uniqueUsage = [];
+  const seenTotals = new Set();
+  for (const event of usageEvents) {
+    const usage = event.params?.tokenUsage;
+    if (!usage?.last || !usage.total) continue;
+    const signature = JSON.stringify(usage.total);
+    if (seenTotals.has(signature)) continue;
+    seenTotals.add(signature);
+    uniqueUsage.push(usage);
+  }
+  const total = uniqueUsage.reduce(
+    (sum, item) => {
+      const last = item.last;
+      sum.input += Number(last.inputTokens) || 0;
+      sum.output += Number(last.outputTokens) || 0;
+      sum.cached += Number(last.cachedInputTokens) || 0;
+      sum.reasoning += Number(last.reasoningOutputTokens) || 0;
+      return sum;
+    },
+    { input: 0, output: 0, cached: 0, reasoning: 0 },
+  );
+  const finalUsage = uniqueUsage.at(-1) ?? null;
+  const finalRequest = finalUsage?.last ?? null;
+  const steps = items
+    .filter((item) => item.type === "commandExecution")
+    .slice(0, 32)
+    .map((item) => ({
+      type: "command",
+      command: String(item.command ?? "").slice(0, 500),
+      exitCode: Number.isInteger(item.exitCode) ? item.exitCode : null,
+      output: String(item.aggregatedOutput ?? "").slice(0, 2000),
+    }));
+  const reasoning = items
+    .filter((item) => item.type === "reasoning")
+    .flatMap((item) => [
+      ...(Array.isArray(item.summary) ? item.summary : []),
+      ...(Array.isArray(item.content) ? item.content : []),
+    ])
+    .map(String)
+    .filter(Boolean)
+    .join("\n\n")
+    .slice(0, 12_000);
+  return {
+    content: String(agentMessages.at(-1)?.text ?? ""),
+    usage: usageFrom(total.input, total.output, {
+      cached: total.cached,
+      reasoning: total.reasoning,
+    }),
+    contextTokens: Number.isSafeInteger(finalRequest?.inputTokens)
+      ? finalRequest.inputTokens
+      : null,
+    contextCachedTokens: Number.isSafeInteger(finalRequest?.cachedInputTokens)
+      ? finalRequest.cachedInputTokens
+      : null,
+    contextWindow: Number.isSafeInteger(finalUsage?.modelContextWindow)
+      ? finalUsage.modelContextWindow
+      : null,
+    model,
+    steps,
+    reasoning: reasoning || null,
+    thread: typeof threadId === "string" ? threadId : null,
+  };
+}
+
 // What each stage of a `codex exec` run means in plain words. Codex can spend
 // half a minute between launch and its first reasoning item, so every lifecycle
 // event it emits becomes a line the browser can show instead of a bare spinner.
@@ -532,9 +655,10 @@ function mergeCodexModels(cached, live) {
 }
 
 /**
- * `codex exec` reads its prompt from stdin but takes images as files, so each
- * attachment is written into the run's scratch directory (which the outer
- * sandbox allows) and passed with `-i`. Returns the argument fragment.
+ * app-server takes image attachments as local file paths, so each attachment
+ * is written into the run's scratch directory (which the outer sandbox allows).
+ * The alternating `-i`, path shape stays compatible with the legacy parser and
+ * lets `start` select the path entries without another file-writing helper.
  */
 export function imageArguments(images, directory) {
   const args = [];
@@ -569,33 +693,31 @@ export function start({
     onProgress?.({ type: "phase", text });
   };
   say("Preparing a sandboxed workspace for Codex…");
-  // A thread keeps its scratch directory alive across turns; Codex filters
-  // resumable sessions by working directory.
+  // app-server is Codex's supported integration surface and is the only public
+  // interface that reports the last request separately from cumulative usage.
+  // Give it an isolated CODEX_HOME so the user's rules, MCP servers, and config
+  // cannot enter a website-controlled run. Only the login is copied in.
   const scratch = sharedScratch ?? scratchDirectory("codex");
+  const sourceHome =
+    process.env.CODEX_HOME || join(process.env.HOME ?? "", ".codex");
+  const isolatedHome = join(scratch.directory, "codex-home");
+  mkdirSync(isolatedHome, { recursive: true, mode: 0o700 });
+  const isolatedAuth = join(isolatedHome, "auth.json");
+  if (!existsSync(isolatedAuth) && existsSync(join(sourceHome, "auth.json"))) {
+    copyFileSync(join(sourceHome, "auth.json"), isolatedAuth);
+    chmodSync(isolatedAuth, 0o600);
+  }
   const args = [
-    "exec",
-    "--json",
-    ...(thread ? [] : ["--ephemeral"]),
-    "--skip-git-repo-check",
-    "--ignore-user-config",
-    "--ignore-rules",
-    "--color",
-    "never",
-    "-s",
-    "read-only",
+    "app-server",
     "-c",
     'approval_policy="never"',
     "-c",
     'shell_environment_policy.inherit="none"',
     "-c",
     'model_reasoning_summary="detailed"',
-    "-C",
-    scratch.directory,
   ];
-  if (model && model !== "default") args.push("-m", model);
   const effort = effortOf(reasoning, CODEX_EFFORTS);
-  if (effort) args.push("-c", `model_reasoning_effort="${effort}"`);
-  const env = {};
+  const env = { CODEX_HOME: isolatedHome };
   if (mcp) {
     env.ARJUNAH_MCP_TOKEN = mcp.token;
     args.push(
@@ -619,17 +741,11 @@ export function start({
     images.slice(0, IMAGE_LIMITS.perPrompt),
     scratch.directory,
   );
-  // Resuming continues the saved thread; the prompt then travels on stdin.
-  // `-i` belongs to whichever subcommand parses it, so it follows `resume`.
-  if (thread?.handle) args.push("resume", ...imageArgs, thread.handle, "-");
-  else args.push(...imageArgs);
-  const codexHome =
-    process.env.CODEX_HOME || join(process.env.HOME ?? "", ".codex");
   const sandbox = outerSandbox({
     binary,
     args,
     scratch: scratch.directory,
-    allow: [codexHome],
+    allow: [],
   });
   // A resumed thread already carries the instructions from its first turn.
   const instructions = thread?.handle
@@ -637,9 +753,6 @@ export function start({
     : [systemPrompt, sandbox ? NO_SHELL_NOTE : null]
         .filter(Boolean)
         .join("\n\n");
-  const fullPrompt = instructions
-    ? `<system_instructions>\n${instructions}\n</system_instructions>\n\n${prompt}`
-    : prompt;
   if (mcp)
     say(
       `Handing Codex ${tools.length} approved browser tool${tools.length === 1 ? "" : "s"}…`,
@@ -647,34 +760,192 @@ export function start({
   say(
     thread?.handle
       ? "Resuming the saved Codex session…"
-      : "Launching the Codex CLI…",
+      : "Launching the Codex app server…",
   );
   onLog?.(
     "info",
-    `codex exec: model ${model ?? "default"}${effort ? `, effort ${effort}` : ""}${sandbox ? `, outer sandbox denying ${sandbox.denied} home entries` : ""}${thread?.handle ? ", resumed thread" : ""}`,
+    `codex app-server: model ${model ?? "default"}${effort ? `, effort ${effort}` : ""}${sandbox ? `, outer sandbox denying ${sandbox.denied} home entries` : ""}${thread?.handle ? ", resumed thread" : ""}`,
   );
-  return spawnAgent({
-    binary: sandbox?.binary ?? binary,
-    args: sandbox?.args ?? args,
-    onLog,
-    stdin: fullPrompt,
+  const child = spawn(sandbox?.binary ?? binary, sandbox?.args ?? args, {
+    env: cleanEnv(env),
     cwd: scratch.directory,
-    env,
-    onExit: sharedScratch ? undefined : scratch.cleanup,
-    onLine: (event) => {
-      if (
-        event?.type === "thread.started" &&
-        typeof event.thread_id === "string"
-      )
-        onThread?.(event.thread_id.slice(0, 80));
-      if (!onProgress) return;
-      const item = progressItem(event);
-      if (item) onProgress(item);
-    },
-    parse(stdout, stderr, code) {
-      return parseCodexOutput(stdout, stderr, code, model);
-    },
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
   });
+  onLog?.(
+    "debug",
+    `spawning ${describeCommand(sandbox?.binary ?? binary, sandbox?.args ?? args)}`,
+  );
+  const messages = [];
+  let stderr = "";
+  let buffer = "";
+  let settled = false;
+  let streamedOutput = false;
+  const write = (message) => {
+    if (!child.stdin.destroyed)
+      child.stdin.write(`${JSON.stringify(message)}\n`);
+  };
+  const finish = (resolve, result) => {
+    if (settled) return;
+    settled = true;
+    resolve(result);
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      /* already gone */
+    }
+  };
+  const output = new Promise((resolve, reject) => {
+    child.on("error", (error) => {
+      if (!sharedScratch) scratch.cleanup();
+      reject(
+        new Error(`Could not start the Codex app server: ${error.message}`),
+      );
+    });
+    child.on("close", (code) => {
+      if (!sharedScratch) scratch.cleanup();
+      if (!settled)
+        finish(
+          resolve,
+          parseCodexAppServerMessages(messages, stderr, code ?? 1, model),
+        );
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      if (stderr.length < 200_000) stderr += chunk;
+    });
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk;
+      let index;
+      while ((index = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, index).trim();
+        buffer = buffer.slice(index + 1);
+        if (!line.startsWith("{")) continue;
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (messages.length < 20_000) messages.push(message);
+        if (String(message.id) === "thread" && message.result?.thread?.id) {
+          const handle = String(message.result.thread.id).slice(0, 80);
+          onThread?.(handle);
+          const input = [
+            { type: "text", text: prompt, text_elements: [] },
+            ...imageArgs
+              .filter((_, position) => position % 2 === 1)
+              .map((path) => ({ type: "localImage", path })),
+          ];
+          write({
+            jsonrpc: "2.0",
+            id: "turn",
+            method: "turn/start",
+            params: {
+              threadId: handle,
+              input,
+              cwd: scratch.directory,
+              approvalPolicy: "never",
+              sandboxPolicy: { type: "readOnly", networkAccess: false },
+              ...(model && model !== "default" ? { model } : {}),
+              ...(effort ? { effort } : {}),
+              summary: "detailed",
+            },
+          });
+        }
+        if (message.method === "turn/started") {
+          onProgress?.({
+            type: "phase",
+            text: "Codex is working on the answer…",
+          });
+        }
+        if (message.method === "item/started") {
+          const type = message.params?.item?.type;
+          if (type === "reasoning")
+            onProgress?.({ type: "phase", text: "Codex is reasoning…" });
+          else if (type === "agentMessage")
+            onProgress?.({
+              type: "phase",
+              text: "Codex is writing the answer…",
+            });
+          else if (type === "mcpToolCall")
+            onProgress?.({
+              type: "phase",
+              text: "Codex is calling a browser tool…",
+            });
+        }
+        if (message.method === "item/agentMessage/delta") {
+          streamedOutput = true;
+          onProgress?.({
+            type: "output_delta",
+            text: String(message.params?.delta ?? "").slice(0, 120000),
+          });
+        }
+        if (message.method === "item/reasoning/summaryTextDelta")
+          onProgress?.({
+            type: "reasoning_delta",
+            text: String(message.params?.delta ?? "").slice(0, 4000),
+          });
+        if (
+          message.method === "item/completed" &&
+          message.params?.item?.type === "agentMessage" &&
+          !streamedOutput
+        )
+          onProgress?.({
+            type: "output_delta",
+            text: String(message.params.item.text ?? "").slice(0, 120000),
+          });
+        if (message.method === "turn/completed") {
+          onProgress?.({
+            type: "phase",
+            text: "Codex finished; collecting the answer…",
+          });
+          finish(
+            resolve,
+            parseCodexAppServerMessages(messages, stderr, 0, model),
+          );
+        }
+      }
+    });
+    write({
+      jsonrpc: "2.0",
+      id: "init",
+      method: "initialize",
+      params: {
+        clientInfo: {
+          name: "arjunah-desktop",
+          title: "अर्जुनः Desktop",
+          version: "1.0.0",
+        },
+        capabilities: { experimentalApi: true },
+      },
+    });
+    write({ jsonrpc: "2.0", method: "initialized" });
+    write({
+      jsonrpc: "2.0",
+      id: "thread",
+      method: thread?.handle ? "thread/resume" : "thread/start",
+      params: thread?.handle
+        ? {
+            threadId: thread.handle,
+            cwd: scratch.directory,
+            approvalPolicy: "never",
+            sandbox: "read-only",
+            excludeTurns: true,
+          }
+        : {
+            cwd: scratch.directory,
+            approvalPolicy: "never",
+            sandbox: "read-only",
+            ephemeral: false,
+            ...(model && model !== "default" ? { model } : {}),
+            ...(instructions ? { developerInstructions: instructions } : {}),
+          },
+    });
+  });
+  child.stdin.on("error", () => {});
+  return { child, output };
 }
 
 /** Deletes the saved Codex rollout for a finished thread. */

@@ -8,6 +8,7 @@ import puppeteer from "puppeteer";
 
 const fixture = await readFile(resolve("tests/fixtures/site.html"));
 const modelRequests = [];
+const zenRequests = [];
 const mcpMethods = [];
 const server = createServer(async (request, response) => {
   if (request.url === "/site.html") {
@@ -115,6 +116,66 @@ const server = createServer(async (request, response) => {
     );
     return;
   }
+  // OpenCode Zen stands beside the OpenAI mock on the same server. Each family
+  // must arrive on the route its wire format requires, never on /v1.
+  if (request.url === "/zen/v1/models") {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(
+      JSON.stringify({
+        data: [
+          { id: "gpt-5.6-luna" },
+          { id: "claude-sonnet-4-6" },
+          { id: "jev-1.13" },
+        ],
+      }),
+    );
+    return;
+  }
+  if (request.url === "/zen/v1/responses") {
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    zenRequests.push({
+      path: "/responses",
+      payload: JSON.parse(body),
+      authorization: request.headers.authorization,
+    });
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(
+      JSON.stringify({
+        id: "zen-responses-1",
+        status: "completed",
+        output: [
+          {
+            type: "message",
+            content: [{ type: "output_text", text: "Zen Responses answer." }],
+          },
+        ],
+        usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 },
+      }),
+    );
+    return;
+  }
+  if (request.url === "/zen/v1/messages") {
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    zenRequests.push({
+      path: "/messages",
+      payload: JSON.parse(body),
+      authorization: request.headers.authorization,
+      apiKey: request.headers["x-api-key"],
+      anthropicVersion: request.headers["anthropic-version"],
+    });
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(
+      JSON.stringify({
+        id: "zen-anthropic-1",
+        content: [{ type: "text", text: "Zen Anthropic answer." }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 5, output_tokens: 3 },
+      }),
+    );
+    return;
+  }
   if (request.url === "/mcp") {
     let body = "";
     for await (const chunk of request) body += chunk;
@@ -208,6 +269,32 @@ try {
     },
   );
   assert.equal(saveReply.ok, true, JSON.stringify(saveReply));
+
+  // The model fields are typable comboboxes, not <select>s (SPEC 8.2): the
+  // catalog filters as you type and ranks what is left.
+  await settings.waitForSelector("#model.combo");
+  await settings.$eval("#model .combo-input", (input) => {
+    input.focus();
+    input.value = "sol";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const ranked = await settings.$$eval(
+    "#model .combo-option span:first-child",
+    (nodes) => nodes.map((node) => node.textContent),
+  );
+  assert.deepEqual(ranked, ["gpt-5.6-sol"], JSON.stringify(ranked));
+  await settings.$eval("#model .combo-input", (input) =>
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    ),
+  );
+  assert.deepEqual(
+    await settings.$eval("#model", (node) => ({
+      value: node.value,
+      closed: node.querySelector(".combo-list").hidden,
+    })),
+    { value: "gpt-5.6-sol", closed: true },
+  );
 
   const page = await browser.newPage();
   page.on("pageerror", (error) => errors.push(`page: ${error.message}`));
@@ -320,6 +407,63 @@ try {
   assert.equal(context.title, "अर्जुनः test page");
   assert.match(context.text, /cobalt-orchid/);
   assert.equal("url" in context, false);
+
+  // The launcher and panel live in a closed shadow root, so they are read
+  // through CDP rather than from page script.
+  const pierced = async (className) => {
+    const session = await page.createCDPSession();
+    const { root } = await session.send("DOM.getDocument", {
+      depth: -1,
+      pierce: true,
+    });
+    await session.detach();
+    const attr = (node, name) => {
+      const list = node.attributes ?? [];
+      for (let index = 0; index < list.length; index += 2)
+        if (list[index] === name) return list[index + 1];
+      return null;
+    };
+    const find = (node) => {
+      const classes = (attr(node, "class") ?? "").split(/\s+/);
+      if (classes.includes(className)) return node;
+      for (const child of [
+        ...(node.children ?? []),
+        ...(node.shadowRoots ?? []),
+      ]) {
+        const hit = find(child);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    const node = find(root);
+    return node && { hidden: attr(node, "hidden") !== null, node };
+  };
+  const launcherState = async () => (await pierced("launcher"))?.hidden;
+  const panelState = async () => (await pierced("panel"))?.hidden;
+
+  // The bubble and the panel are two doors to one conversation: never both.
+  assert.deepEqual(
+    { launcher: await launcherState(), panel: await panelState() },
+    { launcher: false, panel: true },
+    "before opening, only the launcher is offered",
+  );
+  await page.evaluate(() => window.ai.arjunah.chat.open());
+  assert.deepEqual(
+    { launcher: await launcherState(), panel: await panelState() },
+    { launcher: true, panel: false },
+    "the launcher steps aside while the panel is open",
+  );
+  await page.evaluate(() => window.ai.arjunah.chat.close());
+  assert.deepEqual(
+    { launcher: await launcherState(), panel: await panelState() },
+    { launcher: false, panel: true },
+    "closing the panel brings the launcher back",
+  );
+
+  // The bubble wears the extension's own mark, not a stand-in glyph.
+  const launcherMarkup = JSON.stringify((await pierced("launcher")).node);
+  assert.match(launcherMarkup, /arjunah-bg/);
+  assert.match(launcherMarkup, /arjunah-gold/);
 
   await page.evaluate(() => window.ai.arjunah.chat.open());
   await page.keyboard.type("Please use the echo tool");
@@ -546,9 +690,184 @@ try {
   await page.keyboard.press("Enter");
   assert.equal(await page.evaluate(() => window.__denied), "USER_DENIED");
 
+  // An OpenCode Zen key coexists with the saved OpenAI key and routes each
+  // model family to its own native wire format through the real extension.
+  const zenSave = await settings.evaluate(
+    () =>
+      new Promise((resolveReply) =>
+        chrome.runtime.sendMessage(
+          {
+            kind: "arjunah",
+            method: "opencode.save",
+            // No model: the key alone must discover the catalog and pick one.
+            params: {
+              baseUrl: "https://opencode.ai/zen/v1",
+              apiKey: "zen-e2e-secret",
+            },
+          },
+          resolveReply,
+        ),
+      ),
+  );
+  assert.equal(zenSave.ok, true, JSON.stringify(zenSave));
+  assert.deepEqual(
+    zenSave.result.models,
+    ["gpt-5.6-luna", "claude-sonnet-4-6"],
+    "System One is not a conversational API and must stay out of the catalog",
+  );
+  assert.equal(
+    zenSave.result.model,
+    "gpt-5.6-luna",
+    "saving a key alone must settle on a usable default model",
+  );
+  // The settings picker is populated from that discovery, not typed by hand.
+  await settings.reload();
+  // The combobox is built after the page's own async reads, and a background
+  // tab gets no animation frames, so this polls on a timer rather than on rAF.
+  await settings.waitForFunction(
+    () =>
+      document.querySelector("#opencode-model .combo-input")?.disabled ===
+      false,
+    { polling: 100 },
+  );
+  // The combobox draws its rows only while open, so this opens it first.
+  await settings.$eval("#opencode-model .combo-input", (input) =>
+    input.dispatchEvent(new Event("click", { bubbles: true })),
+  );
+  assert.deepEqual(
+    await settings.$$eval("#opencode-model .combo-id", (nodes) =>
+      nodes.map((node) => node.textContent),
+    ),
+    ["gpt-5.6-luna", "claude-sonnet-4-6"],
+  );
+  assert.equal(
+    await settings.$eval("#opencode-model", (node) => node.value),
+    "gpt-5.6-luna",
+  );
+
+  const zenPage = await browser.newPage();
+  zenPage.on("pageerror", (error) => errors.push(`zen page: ${error.message}`));
+  await zenPage.goto(`http://127.0.0.1:${port}/site.html`);
+  await zenPage.evaluate(() => window.ready);
+  await zenPage.evaluate(() => {
+    window.__zenSession = window.ai.arjunah.enable();
+  });
+  await zenPage.waitForFunction(
+    () => document.activeElement?.id === "arjunah-extension",
+  );
+  await zenPage.keyboard.press("Enter");
+  await zenPage.evaluate(() => window.__zenSession);
+
+  // Zen proxies each family to its own vendor, which means that vendor's own
+  // credential header: Bearer for the OpenAI route, x-api-key for Anthropic's
+  // (see providerHeaders in lib/provider.js).
+  for (const [model, path, answer, credential] of [
+    [
+      "opencode/gpt-5.6-luna",
+      "/responses",
+      "Zen Responses answer.",
+      { authorization: "Bearer zen-e2e-secret", apiKey: undefined },
+    ],
+    [
+      "opencode/claude-sonnet-4-6",
+      "/messages",
+      "Zen Anthropic answer.",
+      { authorization: undefined, apiKey: "zen-e2e-secret" },
+    ],
+  ]) {
+    const selected = await settings.evaluate(
+      (id) =>
+        new Promise((resolveReply) =>
+          chrome.runtime.sendMessage(
+            {
+              kind: "arjunah",
+              method: "catalog.default",
+              params: { model: id },
+            },
+            resolveReply,
+          ),
+        ),
+      model,
+    );
+    assert.equal(selected.ok, true, JSON.stringify(selected));
+    assert.equal(
+      await zenPage.evaluate(
+        async () =>
+          (
+            await (
+              await window.__zenSession
+            ).models.generate({
+              messages: [{ role: "user", content: "hello zen" }],
+            })
+          ).message.content,
+      ),
+      answer,
+      `${model} must answer through ${path}`,
+    );
+    assert.equal(zenRequests.at(-1).path, path);
+    assert.equal(zenRequests.at(-1).authorization, credential.authorization);
+    assert.equal(zenRequests.at(-1).apiKey, credential.apiKey);
+  }
+  assert.equal(
+    zenRequests.at(-1).anthropicVersion,
+    "2023-06-01",
+    "the Anthropic route must carry its version header",
+  );
+  // Routing alone is not enough: each body must be in that family's own shape.
+  const [responsesRequest, anthropicRequest] = zenRequests;
+  assert.equal(responsesRequest.payload.model, "gpt-5.6-luna");
+  assert.ok(
+    responsesRequest.payload.input.some(
+      (item) =>
+        item.role === "user" &&
+        item.content.some((part) => part.text === "hello zen"),
+    ),
+    "the Responses route must send input items, not chat messages",
+  );
+  assert.equal(anthropicRequest.payload.model, "claude-sonnet-4-6");
+  assert.ok(
+    Number.isInteger(anthropicRequest.payload.max_tokens),
+    "Anthropic Messages requires max_tokens",
+  );
+  assert.ok(
+    anthropicRequest.payload.messages.some(
+      (item) =>
+        item.role === "user" &&
+        item.content.some((part) => part.text === "hello zen"),
+    ),
+    "the Anthropic route must send block content, not a bare string",
+  );
+  assert.equal(
+    modelRequests.some(
+      (item) => item.authorization === "Bearer zen-e2e-secret",
+    ),
+    false,
+    "the Zen key must never reach the OpenAI endpoint",
+  );
+  assert.equal(
+    zenRequests.some(
+      (item) =>
+        item.authorization === "Bearer e2e-secret" ||
+        item.apiKey === "e2e-secret",
+    ),
+    false,
+    "the OpenAI key must never reach the Zen endpoint, under either header",
+  );
+  assert.equal(
+    JSON.stringify(
+      await zenPage.evaluate(async () => [
+        window.ai?.arjunah,
+        await window.__zenSession,
+      ]),
+    ).includes("zen-e2e-secret"),
+    false,
+    "the Zen key must never be visible to the page",
+  );
+  await zenPage.close();
+
   assert.deepEqual(errors, []);
   console.log(
-    `Chrome E2E passed with extension ${extensionId} and ${modelRequests.length} provider requests.`,
+    `Chrome E2E passed with extension ${extensionId}, ${modelRequests.length} OpenAI and ${zenRequests.length} OpenCode Zen provider requests.`,
   );
 } finally {
   if (browser) await browser.close();

@@ -6,13 +6,13 @@
 
 **Think of it as a wallet for AI access: a site starts with the least access and asks for more, the visitor decides which provider and model answer, and the site never sees a credential, an account, or a quota.**
 
-- **Visitors** install the extension once and bring an OpenAI API key, or pair the desktop app to lend their Claude Code, Codex, or OpenCode subscription to websites.
+- **Visitors** install the extension once and bring an OpenAI or OpenCode Zen API key, or pair the desktop app to lend their Claude Code, Codex, or OpenCode subscription to websites.
 - **Websites** either publish an assistant contract and let the extension host the chat, or call `enable()` and get completions from the visitor's chosen model.
 - **Chats can show more than text.** A site tool can return an interactive card, report progress while it runs, and keep the conversation in the site's own store. The same chat widget is published as [`arjunah-widget`](packages/widget/README.md) for sites that want to run it against their own backend, without the extension and without any of the wallet guarantees.
 
 ## Install the extension
 
-Download the latest build from [GitHub releases](../../releases): `arjunah-chrome-<version>.zip` for Chrome, Brave, and Edge, or `arjunah-firefox-<version>.xpi` for Firefox. Unzip the Chrome build, open `chrome://extensions`, turn on Developer mode, choose **Load unpacked**, and select the folder. Then open the extension's settings and enter an OpenAI API key, or pair the desktop app below.
+Download the latest build from [GitHub releases](../../releases): `arjunah-chrome-<version>.zip` for Chrome, Brave, and Edge, or `arjunah-firefox-<version>.xpi` for Firefox. Unzip the Chrome build, open `chrome://extensions`, turn on Developer mode, choose **Load unpacked**, and select the folder. Then open the extension's settings and enter an OpenAI or OpenCode Zen API key, or pair the desktop app below.
 
 Step-by-step instructions, Firefox notes, and updating are in [docs/INSTALL.md](docs/INSTALL.md). This is a 1.0.0 alpha: store listings and signed builds come with the first stable release.
 

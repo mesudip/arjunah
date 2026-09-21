@@ -79,8 +79,22 @@ export function buildPrompt(messages) {
 /** Tool results that follow the final assistant tool_calls message, or null. */
 export function trailingToolResults(messages) {
   const results = [];
+  const imageFollowups = [];
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index];
+    // Section 7.4 represents an image returned by a tool as a user image
+    // message after the textual tool result. A subscription agent is still
+    // suspended inside its MCP call at this point, so keep recognizing the
+    // result and return the images through that open call instead of launching
+    // a second writer for the persisted agent thread.
+    if (
+      message.role === "user" &&
+      Array.isArray(message.images) &&
+      message.images.length
+    ) {
+      imageFollowups.unshift(message);
+      continue;
+    }
     if (message.role === "tool") {
       results.unshift({ id: message.tool_call_id, content: message.content });
       continue;
@@ -91,7 +105,21 @@ export function trailingToolResults(messages) {
       results.length
     ) {
       const ids = new Set(message.tool_calls.map((call) => call.id));
-      return results.every((item) => ids.has(item.id)) ? results : null;
+      if (!results.every((item) => ids.has(item.id))) return null;
+      if (imageFollowups.length) {
+        // Tool calls in one round are returned as one batch. Attach the
+        // provider-neutral follow-up images to the final result in that batch;
+        // their bounded labels still identify the originating tool.
+        const target = results.at(-1);
+        target.content = [
+          target.content,
+          ...imageFollowups.map((item) => item.content),
+        ]
+          .filter(Boolean)
+          .join("\n\n");
+        target.images = imageFollowups.flatMap((item) => item.images);
+      }
+      return results;
     }
     return null;
   }

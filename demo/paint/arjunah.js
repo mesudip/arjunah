@@ -9,24 +9,44 @@ import {
   WIDTH,
   fitPreviewSize,
   makeObject,
+  objectIdsForGroups,
   resolveValue,
   sceneSummary,
   summarizeObject,
 } from "./scene.js";
 
-const assistantPrompt = `You are the playful studio assistant inside अर्जुनः Paint: imaginative, witty, and a little mischievous, but never rude or distracting. Turn the user’s requests into real canvas edits with the provided tools; do not merely describe what you would draw. Inspect a non-empty canvas before changing it, and use look_at_canvas after substantial edits to verify the composition. Prefer percentage coordinates for whole-canvas layouts and pixels for fine details. Batch independent objects into the same tool round because tool rounds are limited. Make bold, legible compositions with harmonious colors and useful whitespace. Use list_objects before deleting, delete only IDs the user clearly asked to remove, and use eraser strokes only for spatial edits. Never claim a change succeeded unless the tool result confirms it. If a request is ambiguous, make a tasteful funny choice. After editing, reply in no more than three short sentences with a playful title or caption and a concise summary of what changed.`;
+const assistantPrompt = `You are the playful studio assistant inside अर्जुनः Paint: imaginative, witty, and a little mischievous, but never rude or distracting. Turn the user’s requests into real canvas edits with the provided tools; do not merely describe what you would draw. Inspect a non-empty canvas before changing it, and use look_at_canvas after substantial edits to verify the composition. Prefer percentage coordinates for whole-canvas layouts and pixels for fine details. Use true straight lines, curves, and rounded rectangles when they express the requested form better than many tiny strokes. Batch independent objects into the same tool round because tool rounds are limited. Give every multi-object visual element a short, unique snake_case group_name and reuse that exact name for all objects belonging to the element; this lets you replace or delete the element as a group later. Make bold, legible compositions with harmonious colors and useful whitespace. Use list_objects before deleting, delete only IDs or group_names the user clearly asked to remove, and prefer group_names for bulk corrections. Use eraser strokes only for spatial edits. Never claim a change succeeded unless the tool result confirms it. If a request is ambiguous, make a tasteful funny choice. After editing, reply in no more than three short sentences with a playful title or caption and a concise summary of what changed.`;
 
 const state = document.querySelector("#extension-state");
 const askButton = document.querySelector("#ask-ai");
 const unitSchema = { type: "string", enum: ["px", "percent"] };
 const numberSchema = { type: "number" };
+const groupNameSchema = {
+  type: "string",
+  minLength: 1,
+  maxLength: 48,
+  description:
+    "A short unique snake_case name shared by objects in one visual element.",
+};
 const colorSchema = {
   anyOf: [{ type: "string" }, { type: "null" }],
   description: "A #RRGGBB color, or null for no paint.",
 };
 
-function objectSchema(properties, required = Object.keys(properties)) {
+function objectSchema(
+  properties,
+  required = Object.keys(properties).filter((key) => key !== "group_name"),
+) {
   return { type: "object", properties, required, additionalProperties: false };
+}
+
+function groupName(value) {
+  if (value == null) return null;
+  if (!/^[a-z0-9][a-z0-9_]{0,47}$/.test(value))
+    throw new Error(
+      "group_name must be 1–48 lowercase letters, numbers, or underscores.",
+    );
+  return value;
 }
 
 function color(value, name, optional = false) {
@@ -76,8 +96,13 @@ function boundedSceneSummary(project, maxChars) {
   return result;
 }
 
-function add(kind, data, label) {
-  const object = makeObject(kind, data, "assistant");
+function add(kind, data, label, requestedGroupName = null) {
+  const name = groupName(requestedGroupName);
+  const object = makeObject(
+    kind,
+    { ...data, ...(name ? { groupName: name } : {}) },
+    "assistant",
+  );
   commitObjects([object], label);
   return resultFor([object]);
 }
@@ -86,7 +111,7 @@ const tools = [
   {
     name: "add_circle",
     description:
-      "Add one filled and/or outlined circle at resolved canvas coordinates.",
+      "Add one filled and/or outlined circle at resolved canvas coordinates. Circles may clip naturally at canvas edges.",
     inputSchema: objectSchema(
       {
         unit: unitSchema,
@@ -96,6 +121,7 @@ const tools = [
         fill: colorSchema,
         outline: colorSchema,
         outline_width: numberSchema,
+        group_name: groupNameSchema,
       },
       ["unit", "center_x", "center_y", "radius"],
     ),
@@ -109,13 +135,6 @@ const tools = [
         "size",
         "outline_width",
       );
-      if (
-        cx - radius < 0 ||
-        cx + radius > WIDTH ||
-        cy - radius < 0 ||
-        cy + radius > HEIGHT
-      )
-        throw new Error("The circle must fit inside the canvas.");
       const fill = color(args.fill, "fill", true);
       const outline = color(args.outline, "outline", true);
       if (!fill && !outline) throw new Error("Choose a fill or outline.");
@@ -123,6 +142,7 @@ const tools = [
         "circle",
         { cx, cy, rx: radius, ry: radius, fill, outline, outlineWidth },
         "Assistant added a circle",
+        args.group_name,
       );
     },
   },
@@ -139,6 +159,7 @@ const tools = [
         fill: colorSchema,
         outline: colorSchema,
         outline_width: numberSchema,
+        group_name: groupNameSchema,
       },
       ["unit", "x1", "y1", "x2", "y2"],
     ),
@@ -162,6 +183,7 @@ const tools = [
         "rectangle",
         { x1, y1, x2, y2, fill, outline, outlineWidth },
         "Assistant added a rectangle",
+        args.group_name,
       );
     },
   },
@@ -176,6 +198,7 @@ const tools = [
       color: { type: "string" },
       font_size: numberSchema,
       alignment: { type: "string", enum: ["left", "center", "right"] },
+      group_name: groupNameSchema,
     }),
     handler(args) {
       const x = resolve(args.x, args.unit, "x", "x");
@@ -199,6 +222,56 @@ const tools = [
           fontFamily: "Arial, sans-serif",
         },
         "Assistant added text",
+        args.group_name,
+      );
+    },
+  },
+  {
+    name: "add_rounded_rectangle",
+    description:
+      "Add one filled and/or outlined rounded rectangle from two corners and a corner radius.",
+    inputSchema: objectSchema(
+      {
+        unit: unitSchema,
+        x1: numberSchema,
+        y1: numberSchema,
+        x2: numberSchema,
+        y2: numberSchema,
+        corner_radius: numberSchema,
+        fill: colorSchema,
+        outline: colorSchema,
+        outline_width: numberSchema,
+        group_name: groupNameSchema,
+      },
+      ["unit", "x1", "y1", "x2", "y2", "corner_radius"],
+    ),
+    handler(args) {
+      const x1 = resolve(args.x1, args.unit, "x", "x1");
+      const y1 = resolve(args.y1, args.unit, "y", "y1");
+      const x2 = resolve(args.x2, args.unit, "x", "x2");
+      const y2 = resolve(args.y2, args.unit, "y", "y2");
+      if (x1 === x2 || y1 === y2)
+        throw new Error("Rounded rectangle corners must be distinct.");
+      const radius = resolve(
+        args.corner_radius,
+        args.unit,
+        "size",
+        "corner_radius",
+      );
+      const fill = color(args.fill, "fill", true);
+      const outline = color(args.outline, "outline", true);
+      if (!fill && !outline) throw new Error("Choose a fill or outline.");
+      const outlineWidth = resolve(
+        args.outline_width ?? 0,
+        args.unit,
+        "size",
+        "outline_width",
+      );
+      return add(
+        "rounded_rectangle",
+        { x1, y1, x2, y2, radius, fill, outline, outlineWidth },
+        "Assistant added a rounded rectangle",
+        args.group_name,
       );
     },
   },
@@ -217,6 +290,7 @@ const tools = [
       mode: { type: "string", enum: ["pencil", "brush", "eraser"] },
       color: { type: "string" },
       width: numberSchema,
+      group_name: groupNameSchema,
     }),
     handler(args) {
       const points = args.points.map((point, index) => ({
@@ -228,6 +302,70 @@ const tools = [
         "stroke",
         { mode: args.mode, points, color: color(args.color, "color"), width },
         "Assistant drew a stroke",
+        args.group_name,
+      );
+    },
+  },
+  {
+    name: "draw_curve",
+    description:
+      "Draw one smooth curve through 2–64 ordered points. Prefer this over many short strokes for arcs and flowing lines.",
+    inputSchema: objectSchema({
+      unit: unitSchema,
+      points: {
+        type: "array",
+        minItems: 2,
+        maxItems: 64,
+        items: objectSchema({ x: numberSchema, y: numberSchema }),
+      },
+      color: { type: "string" },
+      width: numberSchema,
+      group_name: groupNameSchema,
+    }),
+    handler(args) {
+      const points = args.points.map((point, index) => ({
+        x: resolve(point.x, args.unit, "x", `points[${index}].x`),
+        y: resolve(point.y, args.unit, "y", `points[${index}].y`),
+      }));
+      const width = resolve(args.width, args.unit, "size", "width", true);
+      return add(
+        "curve",
+        { points, color: color(args.color, "color"), width },
+        "Assistant drew a curve",
+        args.group_name,
+      );
+    },
+  },
+  {
+    name: "draw_line",
+    description: "Draw one straight line between two resolved canvas points.",
+    inputSchema: objectSchema({
+      unit: unitSchema,
+      x1: numberSchema,
+      y1: numberSchema,
+      x2: numberSchema,
+      y2: numberSchema,
+      color: { type: "string" },
+      width: numberSchema,
+      group_name: groupNameSchema,
+    }),
+    handler(args) {
+      const points = [
+        {
+          x: resolve(args.x1, args.unit, "x", "x1"),
+          y: resolve(args.y1, args.unit, "y", "y1"),
+        },
+        {
+          x: resolve(args.x2, args.unit, "x", "x2"),
+          y: resolve(args.y2, args.unit, "y", "y2"),
+        },
+      ];
+      const width = resolve(args.width, args.unit, "size", "width", true);
+      return add(
+        "line",
+        { points, color: color(args.color, "color"), width },
+        "Assistant drew a line",
+        args.group_name,
       );
     },
   },
@@ -241,6 +379,7 @@ const tools = [
       y: numberSchema,
       color: { type: "string" },
       tolerance: { type: "number", minimum: 0, maximum: 64 },
+      group_name: groupNameSchema,
     }),
     handler(args) {
       return add(
@@ -252,13 +391,14 @@ const tools = [
           tolerance: finite(args.tolerance, "tolerance", 0, 64),
         },
         "Assistant filled an area",
+        args.group_name,
       );
     },
   },
   {
     name: "list_objects",
     description:
-      "List compact object IDs, z-order, kinds, bounds, sources, and styles without image data.",
+      "List compact object IDs, z-order, kinds, bounds rounded to 0.01 px, sources, and styles without image data.",
     inputSchema: objectSchema({}),
     handler() {
       const project = getProject();
@@ -268,17 +408,36 @@ const tools = [
   {
     name: "delete_objects",
     description:
-      "Delete only the explicit stable object IDs supplied, reporting unknown IDs harmlessly.",
-    inputSchema: objectSchema({
-      ids: {
-        type: "array",
-        minItems: 1,
-        maxItems: 64,
-        items: { type: "string", minLength: 1, maxLength: 80 },
+      "Delete explicit stable object IDs and/or every object in named groups, reporting unknown targets harmlessly.",
+    inputSchema: objectSchema(
+      {
+        ids: {
+          type: "array",
+          minItems: 1,
+          maxItems: 64,
+          items: { type: "string", minLength: 1, maxLength: 80 },
+        },
+        group_names: {
+          type: "array",
+          minItems: 1,
+          maxItems: 32,
+          items: groupNameSchema,
+        },
       },
-    }),
+      [],
+    ),
     handler(args) {
-      return { ok: true, ...deleteObjects(args.ids) };
+      const ids = args.ids ?? [];
+      const names = (args.group_names ?? []).map(groupName);
+      if (!ids.length && !names.length)
+        throw new Error("Provide at least one id or group_name to delete.");
+      const groups = objectIdsForGroups(getProject(), names);
+      return {
+        ok: true,
+        ...deleteObjects([...ids, ...groups.ids]),
+        deletedGroups: groups.foundGroups,
+        missingGroups: groups.missingGroups,
+      };
     },
   },
   {
@@ -332,7 +491,7 @@ async function register() {
     await api.site.register({
       name: "अर्जुनः Paint studio assistant",
       description:
-        "A playful assistant that edits this retained-object canvas through eight narrow tools.",
+        "A playful assistant that edits this retained-object canvas through eleven narrow tools.",
       systemPrompt: assistantPrompt,
       tools,
       widget: {

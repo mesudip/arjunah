@@ -1,6 +1,16 @@
 import { OPENAI_BASE_URL, OPENAI_MODELS, openaiDisplayName } from "./openai.js";
+import {
+  OPENCODE_BASE_URL,
+  OPENCODE_DEFAULT_MODEL,
+  OPENCODE_PROVIDER_ID,
+  opencodeCapabilities,
+  opencodeDisplayName,
+  opencodeProtocol,
+  opencodeReasoningLevels,
+} from "./opencode.js";
 
 export const OPENAI_PROVIDER_ID = "openai";
+export { OPENCODE_PROVIDER_ID };
 export const DESKTOP_DOWN =
   "अर्जुनः Desktop is not running. Start it (npm run desktop) and try again.";
 export const DESKTOP_UNPAIRED =
@@ -30,11 +40,13 @@ export function modelIdFor(providerId, model) {
 }
 
 /** The global default selection (`active` storage) expressed as a model id. */
-export function activeModelId(active, openai) {
+export function activeModelId(active, openai, opencode) {
   if (active?.type === "desktop" && active.providerId && active.model)
     return modelIdFor(active.providerId, active.model);
   if (active?.type === "openai" && openai?.model)
     return modelIdFor(OPENAI_PROVIDER_ID, openai.model);
+  if (active?.type === "opencode" && opencode?.model)
+    return modelIdFor(OPENCODE_PROVIDER_ID, opencode.model);
   return null;
 }
 
@@ -45,6 +57,7 @@ export function activeModelId(active, openai) {
  */
 export function buildCatalog({
   openai,
+  opencode,
   desktop,
   active,
   usage = {},
@@ -89,6 +102,61 @@ export function buildCatalog({
         : [],
       defaultReasoning: null,
     })),
+  });
+  // Zen's catalog is discovered from the account's own key. Fall back to the
+  // preferred id only before a discovery has happened, so the picker never
+  // advertises a model this account may not actually be able to call.
+  const discovered = Array.isArray(opencode?.models) ? opencode.models : [];
+  const opencodeModels = [
+    ...new Set([
+      ...(opencode?.model ? [opencode.model] : []),
+      ...discovered,
+      ...(discovered.length ? [] : [OPENCODE_DEFAULT_MODEL]),
+    ]),
+  ].filter((model) => typeof model === "string" && opencodeProtocol(model));
+  providers.push({
+    id: OPENCODE_PROVIDER_ID,
+    name: "OpenCode Zen API",
+    vendor: "OpenCode",
+    kind: "api-key",
+    installed: true,
+    available: Boolean(opencode?.apiKey && opencode?.model),
+    reason: opencode?.apiKey ? null : "No API key saved in this browser.",
+    // Zen reports no tier of its own, so this says only what a completed
+    // request proved. Untested keys say so rather than claiming a tier.
+    account: opencode?.apiKey
+      ? opencode.tier === "paid"
+        ? "Paid (Go) key · stored in this browser"
+        : "API key stored in this browser · not yet tested"
+      : null,
+    plan: null,
+    quota: null,
+    supportsTools: true,
+    supportsVision: true,
+    supportsReasoning: true,
+    supportsThreads: false,
+    usage: usage[OPENCODE_PROVIDER_ID] ?? null,
+    defaultModel: opencode?.model
+      ? modelIdFor(OPENCODE_PROVIDER_ID, opencode.model)
+      : null,
+    // Zen returns its catalog in no useful order and it is long, so the picker
+    // groups it the way a reader scans it: by vendor, then by name.
+    models: opencodeModels
+      .map((model) => {
+        const capabilities = opencodeCapabilities(model);
+        return {
+          id: modelIdFor(OPENCODE_PROVIDER_ID, model),
+          model,
+          displayName: opencodeDisplayName(model),
+          capabilities,
+          contextWindow: null,
+          reasoningLevels: opencodeReasoningLevels(model),
+          defaultReasoning: null,
+        };
+      })
+      .sort((a, b) =>
+        a.displayName.localeCompare(b.displayName, "en", { numeric: true }),
+      ),
   });
   for (const provider of desktop?.providers ?? []) {
     if (!PROVIDER_ID.test(provider.id)) continue;
@@ -154,7 +222,7 @@ export function buildCatalog({
   }
   return {
     providers,
-    defaultModel: activeModelId(active, openai),
+    defaultModel: activeModelId(active, openai, opencode),
     desktop: {
       paired: Boolean(desktop?.token),
       running: Boolean(desktop?.token && desktopRunning),
@@ -198,11 +266,13 @@ export function activeForModel(id) {
   if (!parsed) return null;
   return parsed.providerId === OPENAI_PROVIDER_ID
     ? { type: "openai", model: parsed.model }
-    : { type: "desktop", providerId: parsed.providerId, model: parsed.model };
+    : parsed.providerId === OPENCODE_PROVIDER_ID
+      ? { type: "opencode", model: parsed.model }
+      : { type: "desktop", providerId: parsed.providerId, model: parsed.model };
 }
 
 /** The provider configuration that `generate()` needs for one model. */
-export function configForModel(catalog, id, { openai, desktop }) {
+export function configForModel(catalog, id, { openai, opencode, desktop }) {
   const found = findModel(catalog, id);
   if (!found || !found.provider.available) return null;
   const { provider, model } = found;
@@ -214,6 +284,20 @@ export function configForModel(catalog, id, { openai, desktop }) {
       baseUrl: openai.baseUrl ?? OPENAI_BASE_URL,
       apiKey: openai.apiKey,
       model: model.model,
+      displayName: model.displayName,
+      capabilities: model.capabilities,
+      contextWindow: model.contextWindow,
+      reasoningLevels: model.reasoningLevels,
+    };
+  if (provider.id === OPENCODE_PROVIDER_ID)
+    return {
+      kind: "opencode",
+      providerId: provider.id,
+      providerName: provider.name,
+      baseUrl: opencode.baseUrl ?? OPENCODE_BASE_URL,
+      apiKey: opencode.apiKey,
+      model: model.model,
+      protocol: opencodeProtocol(model.model),
       displayName: model.displayName,
       capabilities: model.capabilities,
       contextWindow: model.contextWindow,

@@ -147,8 +147,13 @@ try {
     await driver.findElement(By.id("base-url")).getProperty("value"),
     "https://api.openai.com/v1",
   );
-  await driver.findElement(By.id("model")).clear();
-  await driver.findElement(By.id("model")).sendKeys("test-model");
+  // The model field is a typable combobox (SPEC 8.2): the text box inside it is
+  // what takes the name, and blurring it commits what was typed.
+  const modelBox = await driver.findElement(By.css("#model .combo-input"));
+  await modelBox.clear();
+  // Tab rather than Escape: leaving the box keeps the typed name, whereas
+  // Escape abandons the search. Clicking away would hit the open list instead.
+  await modelBox.sendKeys("test-model", Key.TAB);
   await driver.findElement(By.id("api-key")).sendKeys("firefox-e2e-secret");
   await driver
     .findElement(By.css("#provider-form button[type=submit]"))

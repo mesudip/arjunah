@@ -12,6 +12,8 @@ import { zipSync } from "fflate";
 
 // Only this disposable test copy redirects provider traffic. The production
 // endpoint restriction, options UI, consent, and request adapter stay intact.
+// `mockBase` ends in `/v1`; OpenCode Zen traffic is redirected to `<base>/zen/v1`
+// beside it, so one mock server can stand in for both API-key providers.
 export async function mockProviderExtension(mockBase, firefox = false) {
   const root = await mkdtemp(join(tmpdir(), "arjunah-extension-test-"));
   const directory = join(root, "extension");
@@ -19,11 +21,14 @@ export async function mockProviderExtension(mockBase, firefox = false) {
     await cp(resolve("src"), directory, { recursive: true });
     const providerPath = join(directory, "lib/provider.js");
     const source = await readFile(providerPath, "utf8");
+    const zenBase = mockBase.replace(/\/v1$/, "/zen/v1");
     const transport = `const fetch = (url, init) => {
       const target = new URL(url);
-      if (target.origin !== 'https://api.openai.com' || !target.pathname.startsWith('/v1/'))
-        throw new Error('Unexpected provider destination in browser test.');
-      return globalThis.fetch(${JSON.stringify(mockBase)} + target.pathname.slice(3), init);
+      if (target.origin === 'https://api.openai.com' && target.pathname.startsWith('/v1/'))
+        return globalThis.fetch(${JSON.stringify(mockBase)} + target.pathname.slice(3), init);
+      if (target.origin === 'https://opencode.ai' && target.pathname.startsWith('/zen/v1/'))
+        return globalThis.fetch(${JSON.stringify(zenBase)} + target.pathname.slice(7), init);
+      throw new Error('Unexpected provider destination in browser test.');
     };\n`;
     await writeFile(providerPath, transport + source);
     let addonPath;
