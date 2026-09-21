@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { createDesktopApp, APP_VERSION } from "../lib/server.mjs";
+import { createDesktopApp, RELEASE_VERSION } from "../lib/server.mjs";
 import { Store } from "../lib/store.mjs";
 import { detectProviders } from "../lib/providers/index.mjs";
 import * as autostart from "../lib/autostart.mjs";
@@ -18,7 +18,7 @@ function describeConnection(item) {
 }
 
 if (command === "--version" || command === "-v") {
-  console.log(APP_VERSION);
+  console.log(RELEASE_VERSION);
   process.exit(0);
 }
 if (command === "providers") {
@@ -32,7 +32,7 @@ if (command === "providers") {
 if (command === "install") {
   // Registers the companion as a login program for this user and starts it now.
   const step = autostart.install({ dataDirectory: store.directory });
-  console.log(`अर्जुनः Desktop ${APP_VERSION} will start when you log in.`);
+  console.log(`अर्जुनः Desktop ${RELEASE_VERSION} will start when you log in.`);
   console.log(
     `Registered: ${step.path}${step.kind === "launchd" ? `\nLog: ${step.logPath}` : ""}`,
   );
@@ -49,7 +49,7 @@ if (command === "uninstall") {
 if (command === "status") {
   const installed = autostart.isInstalled({ dataDirectory: store.directory });
   const running = await autostart.isRunning(store.port);
-  console.log(`अर्जुनः Desktop ${APP_VERSION}`);
+  console.log(`अर्जुनः Desktop ${RELEASE_VERSION}`);
   console.log(`Starts at login: ${installed ? "yes" : "no"}`);
   console.log(
     running
@@ -86,7 +86,7 @@ try {
   process.exit(1);
 }
 const dashboard = `http://127.0.0.1:${address.port}/`;
-console.log(`अर्जुनः Desktop ${APP_VERSION}`);
+console.log(`अर्जुनः Desktop ${RELEASE_VERSION}`);
 console.log(`Dashboard: ${dashboard}`);
 console.log(
   `Pairing code: ${app.pairing.current().code} (also shown on the dashboard)`,

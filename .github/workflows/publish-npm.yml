@@ -92,6 +92,32 @@ jobs:
             exit 1
           fi
           echo "value=$selected" >> "$GITHUB_OUTPUT"
+      - name: Stamp the desktop release version from the tag
+        # npm packs from the working tree, so the tarball carries the tag's
+        # version even if the committed literal was left behind.
+        if: github.event_name == 'push'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node -e '
+            const { readFileSync, writeFileSync } = require("node:fs");
+            const file = "desktop/lib/server.mjs";
+            const version = process.argv[1].replace(/^v/, "");
+            const pattern = /^export const RELEASE_VERSION = ".*";$/m;
+            const source = readFileSync(file, "utf8");
+            if (!pattern.test(source)) {
+              console.error(`${file} has no RELEASE_VERSION literal to stamp.`);
+              process.exit(1);
+            }
+            writeFileSync(
+              file,
+              source.replace(
+                pattern,
+                `export const RELEASE_VERSION = "${version}";`,
+              ),
+            );
+            console.log(`Stamped RELEASE_VERSION = "${version}".`);
+          ' "$RELEASE_TAG"
       - name: Publish missing packages through npm OIDC
         env:
           DIST_TAG: ${{ steps.tag.outputs.value }}

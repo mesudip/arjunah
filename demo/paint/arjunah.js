@@ -15,7 +15,20 @@ import {
   summarizeObject,
 } from "./scene.js";
 
-const assistantPrompt = `You are the playful studio assistant inside अर्जुनः Paint: imaginative, witty, and a little mischievous, but never rude or distracting. Turn the user’s requests into real canvas edits with the provided tools; do not merely describe what you would draw. Inspect a non-empty canvas before changing it, and use look_at_canvas after substantial edits to verify the composition. Prefer percentage coordinates for whole-canvas layouts and pixels for fine details. Use true straight lines, curves, and rounded rectangles when they express the requested form better than many tiny strokes. Batch independent objects into the same tool round because tool rounds are limited. Give every multi-object visual element a short, unique snake_case group_name and reuse that exact name for all objects belonging to the element; this lets you replace or delete the element as a group later. Make bold, legible compositions with harmonious colors and useful whitespace. Use list_objects before deleting, delete only IDs or group_names the user clearly asked to remove, and prefer group_names for bulk corrections. Use eraser strokes only for spatial edits. Never claim a change succeeded unless the tool result confirms it. If a request is ambiguous, make a tasteful funny choice. After editing, reply in no more than three short sentences with a playful title or caption and a concise summary of what changed.`;
+const promptIntro = `You are the playful studio assistant inside अर्जुनः Paint: imaginative, witty, and a little mischievous, but never rude or distracting. Turn the user’s requests into real canvas edits with the provided tools; do not merely describe what you would draw.`;
+
+const promptEmptyCanvas = `The canvas is empty; use look_at_canvas after substantial edits to verify the composition.`;
+
+const promptExistingCanvas = `Inspect a non-empty canvas before changing it, and use look_at_canvas after substantial edits to verify the composition.`;
+
+const promptCraft = `Prefer percentage coordinates for whole-canvas layouts and pixels for fine details. Use true straight lines, curves, and rounded rectangles when they express the requested form better than many tiny strokes. Batch independent objects into the same tool round because tool rounds are limited. Give every multi-object visual element a short, unique snake_case group_name and reuse that exact name for all objects belonging to the element; this lets you replace or delete the element as a group later. Make bold, legible compositions with harmonious colors and useful whitespace. Use list_objects before deleting, delete only IDs or group_names the user clearly asked to remove, and prefer group_names for bulk corrections. Use eraser strokes only for spatial edits. Never claim a change succeeded unless the tool result confirms it. If a request is ambiguous, make a tasteful funny choice. After editing, reply in no more than three short sentences with a playful title or caption and a concise summary of what changed.`;
+
+function buildAssistantPrompt() {
+  const canvas = getProject().objects.length
+    ? promptExistingCanvas
+    : promptEmptyCanvas;
+  return `${promptIntro} ${canvas} ${promptCraft}`;
+}
 
 const state = document.querySelector("#extension-state");
 const askButton = document.querySelector("#ask-ai");
@@ -30,7 +43,8 @@ const groupNameSchema = {
 };
 const colorSchema = {
   anyOf: [{ type: "string" }, { type: "null" }],
-  description: "A #RRGGBB color, or null for no paint.",
+  description:
+    'A #RRGGBB hex color, e.g. "#3157c8". Omit this field for no paint.',
 };
 
 function objectSchema(
@@ -38,6 +52,48 @@ function objectSchema(
   required = Object.keys(properties).filter((key) => key !== "group_name"),
 ) {
   return { type: "object", properties, required, additionalProperties: false };
+}
+
+let pendingWarnings = [];
+
+function warnCoercion(message) {
+  console.warn(`अर्जुनः Paint tool call: ${message}`);
+  pendingWarnings.push(message);
+}
+
+function coerceNull(value, name) {
+  if (typeof value === "string" && value.trim().toLowerCase() === "null") {
+    warnCoercion(`${name}: received the string "null"; treated as no value.`);
+    return null;
+  }
+  return value;
+}
+
+function coerceBoolean(value, name) {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim().toLowerCase();
+  if (trimmed === "true" || trimmed === "false") {
+    const bool = trimmed === "true";
+    warnCoercion(
+      `${name}: received the string "${value}"; treated as boolean ${bool}.`,
+    );
+    return bool;
+  }
+  return value;
+}
+
+function coerceNumber(value, name) {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (trimmed === "") return value;
+  const parsed = Number(trimmed);
+  if (Number.isFinite(parsed)) {
+    warnCoercion(
+      `${name}: received the string "${value}"; treated as the number ${parsed}.`,
+    );
+    return parsed;
+  }
+  return value;
 }
 
 function groupName(value) {
@@ -50,6 +106,7 @@ function groupName(value) {
 }
 
 function color(value, name, optional = false) {
+  value = coerceNull(value, name);
   if (optional && value == null) return null;
   if (typeof value !== "string" || !/^#[0-9a-f]{6}$/i.test(value))
     throw new Error(`${name} must be a #RRGGBB color.`);
@@ -57,13 +114,14 @@ function color(value, name, optional = false) {
 }
 
 function finite(value, name, minimum = -Infinity, maximum = Infinity) {
+  value = coerceNumber(value, name);
   if (!Number.isFinite(value) || value < minimum || value > maximum)
     throw new Error(`${name} must be between ${minimum} and ${maximum}.`);
   return value;
 }
 
 function resolve(value, unit, axis, name, positive = false) {
-  const result = resolveValue(value, unit, axis);
+  const result = resolveValue(coerceNumber(value, name), unit, axis);
   if (positive && result <= 0)
     throw new Error(`${name} must be greater than 0.`);
   return result;
@@ -476,6 +534,23 @@ const tools = [
   },
 ];
 
+for (const tool of tools) {
+  const handler = tool.handler;
+  tool.handler = (args) => {
+    pendingWarnings = [];
+    const result = handler(args);
+    if (pendingWarnings.length && result && typeof result === "object") {
+      if (Array.isArray(result.content))
+        result.content.push({
+          type: "text",
+          text: `Note: ${pendingWarnings.join(" ")}`,
+        });
+      else result.warnings = pendingWarnings;
+    }
+    return result;
+  };
+}
+
 function findApi() {
   return window.ai?.arjunah ?? null;
 }
@@ -492,7 +567,7 @@ async function register() {
       name: "अर्जुनः Paint studio assistant",
       description:
         "A playful assistant that edits this retained-object canvas through eleven narrow tools.",
-      systemPrompt: assistantPrompt,
+      systemPrompt: buildAssistantPrompt(),
       tools,
       widget: {
         autoShow: false,

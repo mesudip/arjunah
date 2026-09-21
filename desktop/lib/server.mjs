@@ -31,7 +31,8 @@ import {
 import { enrichProviders, mapT3Providers } from "./t3/catalog.mjs";
 
 export const APP_NAME = "arjunah-desktop";
-export const APP_VERSION = "1.0.0";
+// Rewritten from the release tag at publish time; see .github/workflows/publish-npm.yml.
+export const RELEASE_VERSION = "1.0.0-alpha.6";
 export const PROTOCOL_VERSION = "1.0.0";
 // Matches the extension's own request ceiling (LIMITS.requestBytes), so a turn
 // carrying the maximum image payload is not cut off at this hop.
@@ -956,7 +957,7 @@ export function createDesktopApp({
             ? rpc.params.protocolVersion
             : "2025-03-26",
         capabilities: { tools: {} },
-        serverInfo: { name: APP_NAME, version: APP_VERSION },
+        serverInfo: { name: APP_NAME, version: RELEASE_VERSION },
       });
     if (
       rpc.method === "notifications/initialized" ||
@@ -1027,7 +1028,7 @@ export function createDesktopApp({
       const client = store.authenticate(bearer(request));
       return send(response, 200, {
         app: APP_NAME,
-        version: APP_VERSION,
+        version: RELEASE_VERSION,
         protocol: PROTOCOL_VERSION,
         device: store.data.deviceName,
         paired: Boolean(client),
@@ -1113,7 +1114,7 @@ export function createDesktopApp({
         return send(response, 200, {
           entries,
           latest: logs.seq,
-          version: APP_VERSION,
+          version: RELEASE_VERSION,
           device: store.data.deviceName,
         });
       }
@@ -1165,7 +1166,7 @@ export function createDesktopApp({
           void refreshProviderView().catch(() => {});
         return send(response, 200, {
           app: APP_NAME,
-          version: APP_VERSION,
+          version: RELEASE_VERSION,
           device: store.data.deviceName,
           port: server.address().port,
           pairing: pairing.current(),

@@ -2386,7 +2386,14 @@ async function invokeSiteTool(binding, name, args, invocationId) {
       "The site tool is no longer available.",
     );
   }
-  if (!response?.ok)
-    throw new BrokerError("TOOL_ERROR", "The site tool reported an error.");
+  if (!response?.ok) {
+    const detail = response?.error?.message;
+    throw new BrokerError(
+      response?.error?.code ?? "TOOL_ERROR",
+      typeof detail === "string" && detail.trim()
+        ? `The site tool reported an error: ${detail.trim().slice(0, 300)}`
+        : "The site tool reported an error.",
+    );
+  }
   return response.result;
 }

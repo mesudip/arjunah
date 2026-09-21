@@ -1648,11 +1648,27 @@
       return false;
     }
     if (message?.kind === "arjunah-tool") {
+      if (!matchesSession(message)) {
+        sendResponse({
+          ok: false,
+          error: {
+            code: "TOOL_ERROR",
+            message:
+              "The page's assistant registration is no longer the one this tool call was made against.",
+          },
+        });
+        return false;
+      }
       if (
-        !matchesSession(message) ||
         !registration?.manifest.tools.some((tool) => tool.name === message.name)
       ) {
-        sendResponse({ ok: false });
+        sendResponse({
+          ok: false,
+          error: {
+            code: "TOOL_ERROR",
+            message: "The site no longer offers a tool with this name.",
+          },
+        });
         return false;
       }
       const active = registration;
@@ -1692,7 +1708,14 @@
           sendResponse(
             registration === active && matchesSession(message)
               ? { ok: true, result }
-              : { ok: false },
+              : {
+                  ok: false,
+                  error: {
+                    code: "TOOL_ERROR",
+                    message:
+                      "The site replaced its assistant while this tool was running, so the result was discarded.",
+                  },
+                },
           ),
         )
         .catch((error) =>

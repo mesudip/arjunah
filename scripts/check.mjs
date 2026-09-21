@@ -141,11 +141,14 @@ if (!renderer.startsWith("/**") || !renderer.includes("var ArjunahRenderer ="))
     "The renderer must define ArjunahRenderer as a classic script.",
   );
 const desktopServer = readFileSync("desktop/lib/server.mjs", "utf8");
-if (
-  !desktopServer.includes(`APP_VERSION = "${VERSION}"`) ||
-  !desktopServer.includes(`PROTOCOL_VERSION = "${VERSION}"`)
-)
-  throw new Error("Desktop app and protocol versions drifted.");
+if (!desktopServer.includes(`PROTOCOL_VERSION = "${VERSION}"`))
+  throw new Error("Desktop protocol version drifted.");
+// The publish workflow restamps RELEASE_VERSION from the tag, but the committed
+// literal must already match so builds run from source report the truth.
+if (!desktopServer.includes(`RELEASE_VERSION = "${pkg.version}"`))
+  throw new Error(
+    `desktop/lib/server.mjs RELEASE_VERSION must be "${pkg.version}".`,
+  );
 // The widget package must publish the very renderer the extension loads.
 const widgetRenderer = "packages/widget/dist/renderer.js";
 try {
