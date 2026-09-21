@@ -127,7 +127,13 @@ jobs:
           verify_package() {
             package="$1"
             version="$2"
-            for attempt in {1..12}; do
+            # npm answers a publish with "your package is being processed and
+            # may take a few minutes to become available", and it means it:
+            # v1.0.0-alpha.5 published cleanly and then took past two minutes
+            # to appear, failing a 60-second budget and stranding the GitHub
+            # release behind a job that had already done its work. Ten minutes
+            # is the propagation delay npm actually documents.
+            for attempt in {1..40}; do
               published="$(npm view "$package@$version" version 2>/dev/null || true)"
               tags="$(npm view "$package" dist-tags --json 2>/dev/null || true)"
               tagged="$(node -e '
@@ -140,9 +146,9 @@ jobs:
                 echo "Verified $package@$version with dist-tag $DIST_TAG."
                 return
               fi
-              sleep 5
+              sleep 15
             done
-            echo "npm did not expose $package@$version at dist-tag $DIST_TAG after 60 seconds" >&2
+            echo "npm did not expose $package@$version at dist-tag $DIST_TAG after 10 minutes" >&2
             exit 1
           }
 
