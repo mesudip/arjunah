@@ -233,7 +233,14 @@ const server = createServer(async (request, response) => {
     // A backend that knows what its agent is doing says so; the renderer shows
     // it as the live turn label instead of a bare spinner (SPEC 14.3).
     sse(response, "agent.phase", { text: "Reserving the room…" });
-    if (state.turns === 2) await new Promise((wait) => setTimeout(wait, 400));
+    if (state.turns === 2) {
+      await new Promise((wait) => setTimeout(wait, 400));
+      // A quiet round says so instead of failing: the turn keeps running, the
+      // visitor keeps the stop control, and the next event takes the notice
+      // away again (SPEC 10).
+      sse(response, "model.stalled", { round: 0 });
+      await new Promise((wait) => setTimeout(wait, 600));
+    }
     sse(response, "message", {
       entry: {
         type: "message",
@@ -345,9 +352,24 @@ try {
     `[...root.querySelectorAll(".msg.user")].some((m) => m.textContent.includes("Book the Lisbon trip"))`,
     "the visible message action",
   );
+  // The wait notice: the turn is still live, still spinning, and the stop
+  // control is still there, because nothing was cancelled.
+  await waitFor(
+    `root.querySelector(".activity.live.stalled .workflow-title")?.textContent.startsWith("The model is taking longer than usual…")`,
+    "the stall notice as the live label",
+  );
+  assert.equal(
+    await shadow(`return root.querySelector(".stop").hidden;`),
+    false,
+  );
   await waitFor(
     `[...root.querySelectorAll(".msg.assistant")].some((m) => m.textContent.includes("Booked."))`,
     "the second answer",
+  );
+  // The answer supersedes the notice rather than leaving it on the transcript.
+  assert.equal(
+    await shadow(`return root.querySelectorAll(".stalled").length;`),
+    0,
   );
   assert.equal(state.userTurns.length, turnsBefore + 1);
   assert.equal(

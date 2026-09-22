@@ -12,7 +12,7 @@ clients. Providers: Codex (app-server protocol), Claude (Claude Agent SDK), Curs
 Build, OpenCode (`@opencode-ai/sdk`), Antigravity (ACP). Remote access is first class:
 LAN pairing, Tailscale HTTPS, SSH-launched servers, and the T3 Connect relay.
 
-Everything T3 does with an agent is a *coding-agent thread*: a project directory, a
+Everything T3 does with an agent is a _coding-agent thread_: a project directory, a
 permission mode (`approval-required` … `full-access`), a sandbox mode
 (`read-only` … `danger-full-access`), checkpoints, terminals, and the agent's full tool
 set. There is no request-level "plain completion" API; the internal `textGeneration`
@@ -21,16 +21,16 @@ T3's own MCP tools and the agent's built-in tools.
 
 ## What we can reuse, and how
 
-| Need in अर्जुनः                                   | In T3 Code                                                                                                              | Reuse                                                                                             |
-| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Model catalog with names, options, defaults     | `server.getConfig` → `providers[].models` (`slug`, `name`, `capabilities.optionDescriptors`: effort levels, context window choices, fast mode) | Read over RPC; map to अर्जुनः models (`desktop/lib/t3/catalog.mjs`)                                 |
-| Sign-in state and account                       | `providers[].auth` (`status`, `email`), `installed`, `version`                                                          | Read over RPC                                                                                     |
-| Subscription usage / quota                      | `providers[].usageLimits.windows` (`five_hour`, `seven_day`, … with `usedPercent`, `resetsAt`), reset credits           | Read over RPC → अर्जुनः `quota`                                                                     |
-| Live updates                                    | `subscribeServerConfig` stream (`providerStatuses`, `usageLimitSourcesUpdated`)                                          | Possible follow-up; today अर्जुनः polls with a 20 s cache                                           |
-| Provider sign-in from a UI                      | `provider.auth.start/complete`, `provider.install.*`                                                                    | Possible follow-up (needs `orchestration:operate`)                                                |
-| Model metadata without a server                 | `apps/server/src/provider/model-manifest.json`, fetched from `main` at runtime                                           | Could be fetched directly (MIT JSON); not done yet                                                 |
-| Running completions for websites                | Threads only, with agent tools                                                                                          | **Not reused.** अर्जुनः keeps its own tool-less, sandboxed CLI runs (SPEC 12.3)                     |
-| Library import                                  | `@t3tools/contracts`, `client-runtime` are workspace-private; only the bundled server is published                     | Not possible; we speak the wire protocol instead                                                  |
+| Need in अर्जुनः                             | In T3 Code                                                                                                                                     | Reuse                                                                           |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Model catalog with names, options, defaults | `server.getConfig` → `providers[].models` (`slug`, `name`, `capabilities.optionDescriptors`: effort levels, context window choices, fast mode) | Read over RPC; map to अर्जुनः models (`desktop/lib/t3/catalog.mjs`)             |
+| Sign-in state and account                   | `providers[].auth` (`status`, `email`), `installed`, `version`                                                                                 | Read over RPC                                                                   |
+| Subscription usage / quota                  | `providers[].usageLimits.windows` (`five_hour`, `seven_day`, … with `usedPercent`, `resetsAt`), reset credits                                  | Read over RPC → अर्जुनः `quota`                                                 |
+| Live updates                                | `subscribeServerConfig` stream (`providerStatuses`, `usageLimitSourcesUpdated`)                                                                | Possible follow-up; today अर्जुनः polls with a 20 s cache                       |
+| Provider sign-in from a UI                  | `provider.auth.start/complete`, `provider.install.*`                                                                                           | Possible follow-up (needs `orchestration:operate`)                              |
+| Model metadata without a server             | `apps/server/src/provider/model-manifest.json`, fetched from `main` at runtime                                                                 | Could be fetched directly (MIT JSON); not done yet                              |
+| Running completions for websites            | Threads only, with agent tools                                                                                                                 | **Not reused.** अर्जुनः keeps its own tool-less, sandboxed CLI runs (SPEC 12.3) |
+| Library import                              | `@t3tools/contracts`, `client-runtime` are workspace-private; only the bundled server is published                                             | Not possible; we speak the wire protocol instead                                |
 
 The wire surface we depend on is small and documented in T3's `packages/contracts`:
 
@@ -64,11 +64,11 @@ From a plain Node script (`desktop/lib/t3/client.mjs` is the productised version
 The facts T3 shows do not require a T3 server; T3 obtains them from the agents' own
 control interfaces, and अर्जुनः Desktop now uses the same techniques directly:
 
-| Fact | Claude Code | Codex |
-| --- | --- | --- |
-| Account, plan | `claude -p --input-format stream-json` control request `initialize` → `account { email, organization, subscriptionType }` | `codex app-server` JSON-RPC `account/read` → `{ type: "chatgpt", email, planType }` |
+| Fact          | Claude Code                                                                                                                                                                | Codex                                                                                                                                                                                  |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Account, plan | `claude -p --input-format stream-json` control request `initialize` → `account { email, organization, subscriptionType }`                                                  | `codex app-server` JSON-RPC `account/read` → `{ type: "chatgpt", email, planType }`                                                                                                    |
 | Model catalog | the same `initialize` response carries `models[]` (`value`, `displayName`, `resolvedModel`, `supportedEffortLevels`); `[1m]` variants run in the 1M window, others in 200k | `model/list` → `id`, `displayName`, `supportedReasoningEfforts`, `defaultReasoningEffort`, `inputModalities`, `isDefault`, `hidden`; context windows from `~/.codex/models_cache.json` |
-| Usage windows | control request `get_usage` (`skip_behaviors: true`) → `rate_limits.five_hour / seven_day / model_scoped[]` | `account/rateLimits/read` → `primary` (5 h) and `secondary` (weekly) windows plus the `individualLimit` spend cap |
+| Usage windows | control request `get_usage` (`skip_behaviors: true`) → `rate_limits.five_hour / seven_day / model_scoped[]`                                                                | `account/rateLimits/read` → `primary` (5 h) and `secondary` (weekly) windows plus the `individualLimit` spend cap                                                                      |
 
 For **OpenCode**, T3 asks `opencode serve` for `provider.list` (`connected` provider ids, models with limits, cost, and capabilities). अर्जुनः gets the same model metadata from `opencode models --verbose` and the connected set from OpenCode's own credential file (`~/.local/share/opencode/auth.json`, what `opencode auth list` prints): the provider card shows each upstream credential ("OpenCode Go (API key)"), free models are marked, retired models are dropped. OpenCode has no rolling allowance of its own, so no usage window is invented.
 

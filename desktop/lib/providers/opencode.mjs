@@ -142,6 +142,29 @@ export function describeOpenCodeCredentials(authJson) {
     }));
 }
 
+// A full detection may wait a minute for the catalog, but the light pass runs
+// while a browser holds an open read, so it must finish inside that read's
+// ceiling (see src/lib/desktop.js) rather than outlive it.
+const REFRESH_LIST_MS = 20_000;
+const LIST_TIMEOUT_S = 60;
+
+/** The light pass: re-list models only. See claude-code's `refresh`. */
+export async function refresh(previous) {
+  if (!previous?.binary || !previous.available) return null;
+  const listed = await run(previous.binary, ["models", "--verbose"], {
+    timeoutMs: REFRESH_LIST_MS,
+  });
+  // A killed listing leaves truncated stdout, and `parseModelList` will
+  // happily return the models it got — including one whose JSON block was cut
+  // off, with its metadata silently degraded. Caching that as the catalog can
+  // even move `defaultModel`. An incomplete answer is not an answer.
+  if (listed.timedOut || listed.error) return null;
+  const models = parseModelList(listed.stdout);
+  if (!models.length) return null;
+  modelCache = { at: Date.now(), models };
+  return { ...previous, models, defaultModel: models[0]?.id ?? null };
+}
+
 export async function detect(settings = {}) {
   const binary =
     settings.opencodePath ||
@@ -168,11 +191,17 @@ export async function detect(settings = {}) {
       }),
     };
   const version = await run(binary, ["--version"], { timeoutMs: 15_000 });
+  let listFailed = false;
   if (Date.now() - modelCache.at > 60_000) {
     const listed = await run(binary, ["models", "--verbose"], {
       timeoutMs: 60_000,
     });
-    modelCache = { at: Date.now(), models: parseModelList(listed.stdout) };
+    // Same reasoning as `refresh`: a truncated listing is not a catalog. Keep
+    // whatever was cached and report why, instead of publishing a short list
+    // that reads as "these are the models you have".
+    listFailed = Boolean(listed.timedOut || listed.error);
+    if (!listFailed)
+      modelCache = { at: Date.now(), models: parseModelList(listed.stdout) };
   }
   const models = modelCache.models;
   const providers = [...new Set(models.map((model) => model.id.split("/")[0]))];
@@ -211,9 +240,11 @@ export async function detect(settings = {}) {
     // OpenCode forwards to upstream providers and has no rolling allowance of
     // its own; upstream quotas are not exposed through its CLI.
     quota: null,
-    reason: models.length
-      ? null
-      : "OpenCode has no configured model providers. Run `opencode auth login` or configure a provider first.",
+    reason: listFailed
+      ? `OpenCode did not finish listing its models within ${LIST_TIMEOUT_S} seconds. It is probably fine; this computer was too busy to answer.`
+      : models.length
+        ? null
+        : "OpenCode has no configured model providers. Run `opencode auth login` or configure a provider first.",
     guidance: models.length
       ? null
       : guidance({

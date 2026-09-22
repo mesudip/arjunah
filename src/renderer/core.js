@@ -102,6 +102,7 @@ var ArjunahRenderer = (function () {
     .activity>summary::-webkit-details-marker{display:none}
     .workflow-indicator{position:relative;width:13px;height:13px;border:1.5px solid var(--line);border-radius:50%;flex:none;transition:border-color .2s ease,background .2s ease,transform .2s ease}
     .activity.live .workflow-indicator{border-color:color-mix(in srgb,var(--accent) 28%,var(--line));border-top-color:var(--accent);animation:spin .9s linear infinite}
+    .activity.stalled>summary{color:var(--ink)}
     .activity.done .workflow-indicator{border-color:var(--muted);background:var(--muted);transform:scale(.82)}
     .activity.done .workflow-indicator::after{content:"";position:absolute;left:3px;top:1px;width:4px;height:7px;border:solid var(--bg);border-width:0 1.5px 1.5px 0;transform:rotate(45deg)}
     .workflow-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.workflow-chevron{font-size:16px;line-height:1;transition:transform .2s ease}.activity[open] .workflow-chevron{transform:rotate(90deg)}
@@ -815,6 +816,13 @@ var ArjunahRenderer = (function () {
     let pendingInputPrompt = null;
     let busy = false;
     let composerBlocked = false;
+    // Set when the site allows exactly one model: there is nothing to pick, so
+    // the button must stay disabled across busy/idle transitions too.
+    let modelLocked = false;
+    // Set while a thinking-effort change is in flight to the host, so a
+    // catalog push arriving mid-round-trip cannot overwrite what the user
+    // just picked. Cleared as soon as the host settles the change.
+    let reasoningTouched = false;
     let activeThreadId = null;
     let threadSummaries = [];
     let currentTurn = null;
@@ -1100,6 +1108,7 @@ var ArjunahRenderer = (function () {
         outputText: "",
         outputRender: 0,
         reasoning: null,
+        stalledLabel: null,
       };
       if (displaying(threadId)) {
         refs.messages.querySelector(".welcome")?.remove();
@@ -1122,6 +1131,7 @@ var ArjunahRenderer = (function () {
       const turn = currentTurn;
       if (!turn) return null;
       clearInterval(turn.timer);
+      turn.node.classList.remove("stalled");
       if (turn.outputRender) cancelAnimationFrame(turn.outputRender);
       if (!keep) turn.outputNode?.remove();
       const seconds = ((Date.now() - turn.startedAt) / 1000).toFixed(1);
@@ -1196,7 +1206,33 @@ var ArjunahRenderer = (function () {
       const turn = currentTurn;
       if (!turn || (event.turnId && event.turnId !== turn.id)) return;
       const type = event.type;
+      // The wait notice (SPEC 10). Nothing was cancelled and nothing failed:
+      // the spinner keeps turning and the stop button stays, so the visitor
+      // decides whether to keep waiting. It is never a permanent label either
+      // — the next event of any kind is the model answering, which restores
+      // the line the turn had before.
+      if (type === "model.stalled") {
+        // Hardening, not a seen failure: the host clears its timer before the
+        // next round starts, so a late notice should not be possible. If one
+        // ever is, it must not repaint the round that replaced it.
+        if (
+          Number.isInteger(event.round) &&
+          Number.isInteger(turn.round) &&
+          event.round < turn.round
+        )
+          return;
+        if (turn.stalledLabel == null) turn.stalledLabel = turn.label ?? "";
+        turn.label = "The model is taking longer than usual…";
+        turn.node.classList.add("stalled");
+        return;
+      }
+      if (turn.stalledLabel != null) {
+        turn.label = turn.stalledLabel;
+        turn.stalledLabel = null;
+        turn.node.classList.remove("stalled");
+      }
       if (type === "model.start") {
+        if (Number.isInteger(event.round)) turn.round = event.round;
         const label = host.modelLabel?.(event.model) ?? event.model;
         turn.label = `${event.round ? "Continuing with" : "Asking"} ${label}…`;
       } else if (type === "model.end") {
@@ -1709,7 +1745,7 @@ var ArjunahRenderer = (function () {
       busy = value;
       refs.sendButton.hidden = value;
       refs.stopButton.hidden = !value;
-      refs.modelButton.disabled = value;
+      refs.modelButton.disabled = value || modelLocked;
       if (value) closeModelMenu();
       setComposerEditable(!value && !composerBlocked);
       host.busyChanged?.(value);
@@ -2118,7 +2154,12 @@ var ArjunahRenderer = (function () {
       return models.find((model) => model.id === id)?.reasoningLevels ?? [];
     }
 
-    function setModels(list, selected) {
+    /**
+     * `reasoning` is the host's saved effort for this site. It is applied only
+     * while the user has not chosen one here, so a state broadcast arriving
+     * mid-session cannot pull the control out from under them.
+     */
+    function setModels(list, selected, reasoning) {
       models = (Array.isArray(list) ? list : [])
         .map(normalizeModel)
         .filter(Boolean);
@@ -2128,6 +2169,8 @@ var ArjunahRenderer = (function () {
         : ids.has(selectedModel)
           ? selectedModel
           : ((models.find((model) => model.default) ?? models[0])?.id ?? null);
+      if (!reasoningTouched && typeof reasoning === "string")
+        reasoningEffort = reasoning;
       if (!levelsFor(selectedModel).includes(reasoningEffort))
         reasoningEffort = "";
       // The host re-pushes the catalog on every state broadcast, most of which
@@ -2304,15 +2347,27 @@ var ArjunahRenderer = (function () {
     function renderModelPicker() {
       // A redraw must not double as a dismissal: the user may be scrolling the
       // open menu while the host pushes an unrelated catalog update.
-      const wasOpen = models.length > 0 && !refs.modelMenu.hidden;
+      const wasOpen = models.length > 1 && !refs.modelMenu.hidden;
       const scrollTop = refs.modelList.scrollTop;
       modelState = modelFingerprint();
       refs.modelPicker.hidden = models.length === 0;
       if (!models.length) {
+        // The picker is hidden here, but leaving the flag stale would keep the
+        // button disabled once a catalog arrives while a turn is running.
+        modelLocked = false;
         closeModelMenu();
         refs.thinkSelect.hidden = true;
         return;
       }
+      // One model is not a choice. The button still names what is answering,
+      // but it does not pretend to open onto alternatives that do not exist —
+      // which is what the user asked for by allowing no provider to switch to.
+      modelLocked = models.length === 1;
+      refs.modelButton.disabled = modelLocked || busy;
+      refs.modelButton.title = modelLocked
+        ? "This site is set to one model"
+        : "Select model";
+      if (modelLocked) closeModelMenu();
       renderModelOptions();
       refs.modelMenu.hidden = !wasOpen;
       refs.modelButton.setAttribute("aria-expanded", String(wasOpen));
@@ -2373,6 +2428,7 @@ var ArjunahRenderer = (function () {
     async function chooseModel(model, reasoning) {
       const previous = { model: selectedModel, reasoning: reasoningEffort };
       if (model === previous.model && reasoning === previous.reasoning) return;
+      if (reasoning !== previous.reasoning) reasoningTouched = true;
       selectedModel = model;
       reasoningEffort = levelsFor(model).includes(reasoning) ? reasoning : "";
       renderModelPicker();
@@ -2382,9 +2438,15 @@ var ArjunahRenderer = (function () {
           reasoning: reasoningEffort || null,
         });
         if (answer === false) throw new Error("The host refused the switch.");
+        // The host has stored it, so the host's value is now the user's value
+        // and later pushes are authoritative again. Leaving the flag set made
+        // the first manual pick shadow every saved effort for the rest of the
+        // session, including another site's.
+        reasoningTouched = false;
       } catch {
         selectedModel = previous.model;
         reasoningEffort = previous.reasoning;
+        reasoningTouched = false;
         renderModelPicker();
       }
     }

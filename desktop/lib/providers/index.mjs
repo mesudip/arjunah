@@ -38,6 +38,14 @@ async function customPathProblem(adapter, settings) {
 export const adapters = [claudeCode, codex, opencode];
 const CACHE_MS = 20_000;
 let cache = { at: 0, key: "", providers: [] };
+// Two callers arriving together (a chat turn and a popup opening) used to start
+// two independent sweeps, because the cache is only written once a sweep ends.
+// On a loaded machine that doubled the spawns at the worst possible moment.
+let inFlight = null;
+// Bumped by `invalidateProviderCache`. A sweep that was already running cannot
+// be cancelled, so it checks this before writing: settings that changed while
+// it was out must not be overwritten by an answer gathered under the old ones.
+let generation = 0;
 
 function gate(adapter, info, settings) {
   if (adapter.id === "codex" && info.installed && !settings.experimentalCodex)
@@ -63,6 +71,63 @@ export async function detectProviders(settings = {}, { force = false } = {}) {
   const key = JSON.stringify(settings);
   if (!force && Date.now() - cache.at < CACHE_MS && cache.key === key)
     return cache.providers;
+  if (inFlight && inFlight.key === key) return inFlight.promise;
+  const promise = fullSweep(settings, key).finally(() => {
+    if (inFlight?.promise === promise) inFlight = null;
+  });
+  inFlight = { key, promise };
+  return promise;
+}
+
+/**
+ * The happy path: the CLIs are already known, so ask each one only for what
+ * moves — its model list and its plan usage. An adapter that cannot answer, or
+ * that was not available last time, is detected in full instead, which is how
+ * an uninstalled or signed-out tool is still noticed. Never spawns `which`,
+ * `--version`, or a sign-in check while the assumption holds.
+ */
+export async function refreshProviders(settings = {}) {
+  const key = JSON.stringify(settings);
+  if (cache.key !== key || !cache.providers.length)
+    return detectProviders(settings, { force: true });
+  const previous = new Map(cache.providers.map((item) => [item.id, item]));
+  const providers = await Promise.all(
+    adapters.map(async (adapter) => {
+      const before = previous.get(adapter.id);
+      // Nothing to re-ask of a tool that is not installed, not signed in, or
+      // switched off here: it has no model list or quota that can have moved.
+      // Only a provider that *was* working and now will not answer is news,
+      // and that is what earns a full detection.
+      if (!before) return null;
+      if (!before.available || typeof adapter.refresh !== "function")
+        return before;
+      try {
+        const next = await adapter.refresh(before, settings);
+        // `gate()` is what turns Codex off when the dashboard switch is off.
+        // Skipping it here let a light pass hand back an ungated provider and
+        // quietly re-enable it until the next full sweep.
+        return next
+          ? {
+              ...next,
+              ...gate(adapter, next, settings),
+              detectedAt: new Date().toISOString(),
+            }
+          : null;
+      } catch {
+        return null;
+      }
+    }),
+  );
+  // One adapter that could not confirm itself invalidates the light pass: the
+  // full sweep's answer is then authoritative for every provider in it.
+  if (providers.some((item) => item == null))
+    return detectProviders(settings, { force: true });
+  cache = { at: Date.now(), key, providers };
+  return providers;
+}
+
+async function fullSweep(settings, key) {
+  const startedAt = generation;
   const providers = await Promise.all(
     adapters.map(async (adapter) => {
       let info;
@@ -99,7 +164,7 @@ export async function detectProviders(settings = {}, { force = false } = {}) {
       };
     }),
   );
-  cache = { at: Date.now(), key, providers };
+  if (startedAt === generation) cache = { at: Date.now(), key, providers };
   return providers;
 }
 
@@ -109,4 +174,6 @@ export function adapterFor(providerId) {
 
 export function invalidateProviderCache() {
   cache = { at: 0, key: "", providers: [] };
+  inFlight = null;
+  generation++;
 }

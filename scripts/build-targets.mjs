@@ -9,7 +9,7 @@ import {
 import { basename, resolve, join } from "node:path";
 import { zipSync } from "fflate";
 
-// Archives carry the npm version, which includes the prerelease tag (1.0.0-alpha.2).
+// Archives carry the npm version, which includes the prerelease tag (1.0.0-beta.1).
 const RELEASE = JSON.parse(readFileSync("package.json", "utf8")).version;
 
 const root = resolve(".");

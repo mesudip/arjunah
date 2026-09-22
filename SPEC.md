@@ -1,6 +1,6 @@
 # अर्जुनः Protocol
 
-Version: **1.0.0-alpha**
+Version: **1.0.0-beta**
 
 Status: **Implemented draft with a bounded schema subset, tiered site access, extension-collected tool inputs, transcript cards, tool progress, site-owned threads, declared remote tools, an optional desktop companion, and a standalone renderer with its own model picker and entity mentions**
 License: MIT
@@ -457,7 +457,11 @@ The reference implementation uses `window.postMessage` because extension content
 
 Requests time out after 30 seconds, except `models.generate`, which times out after 180 seconds. Site tool invocations and extension-collected input prompts time out after 120 seconds. Navigation destroys pending requests. The bridge is transport, not authority: every privileged background method independently checks the stored origin grant.
 
-Hosted-chat progress (model start/end, tool start/end, usage, bounded `output.delta`, reasoning delta, `progress`, `card`, and `card.update` events, the same vocabulary as section 14.3) travels from the background to the content script over the extension's own messaging and never through the page bridge. Page-originated `reportProgress` calls and `threads` callback results cross the page bridge as bounded, invocation- or request-bound messages that the content script validates before use; `threads` callbacks are invoked through the bridge like tool handlers and time out after 30 seconds. Provider-specific streams are normalized before this hop; the content script does not parse provider wire formats.
+These two deadlines belong to different layers and do not contradict each other: 180 seconds is how long the page's own call waits, and a direct `models.generate` is abandoned at that point because nothing is left to receive it. A hosted chat has a visitor watching, so it is bounded by them rather than by a clock, as follows.
+
+A provider request carries a 30-second deadline, but a hosted generation round does not: a reasoning model can spend longer than that before its first token, and longer still with an image in the prompt, so a deadline covering the streamed body cannot tell a model that is thinking from a socket that is dead. A round is bounded by the visitor instead. After 20 seconds without any event the host SHOULD emit `model.stalled`, which says the model is slow and nothing else — the turn keeps running, the activity indicator keeps animating, and the stop control stays available. The notice is advisory and self-clearing: the next event of any type supersedes it.
+
+Hosted-chat progress (model start/end, tool start/end, usage, bounded `output.delta`, reasoning delta, `progress`, `model.stalled`, `card`, and `card.update` events, the same vocabulary as section 14.3) travels from the background to the content script over the extension's own messaging and never through the page bridge. Page-originated `reportProgress` calls and `threads` callback results cross the page bridge as bounded, invocation- or request-bound messages that the content script validates before use; `threads` callbacks are invoked through the bridge like tool handlers and time out after 30 seconds. Provider-specific streams are normalized before this hop; the content script does not parse provider wire formats.
 
 ## 11. Data retention and user controls
 
@@ -603,6 +607,7 @@ A turn is a `POST` that answers with `text/event-stream`. Each SSE event has `ev
 - `model.client { id, request }` (bridged mode, section 14.7): the backend asks the page for one completion; `request` is a section 5.3 `models.generate` request, the renderer runs it through the bridge, posts the result or error (section 14.4), and the same stream continues. A backend MUST NOT emit it on a turn whose body carried no `bridge`;
 - `progress { toolId, text }` (section 7.5);
 - `agent.phase { text }`: the stage the turn is in, at most 200 code points, shown as the live turn label and never stored (the same item a companion reports in section 12.3.1);
+- `model.stalled { round }` (section 10): the round has gone quiet and the model is still being waited on. It is not an error and does not end the turn; the renderer says so in the live label, keeps the indicator animating and the stop control available, and restores the previous label on the next event of any type;
 - `card { toolId, card }` and `card.update { cardId, card }` (section 7.4);
 - `error { code, message }` using the section 9 codes, which ends the turn.
 

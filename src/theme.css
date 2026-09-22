@@ -251,3 +251,52 @@ select {
 [hidden] {
   display: none !important;
 }
+
+/* Provider artwork, shared by the popup, the options page, and the widget's
+   model picker so one provider looks the same everywhere. See
+   lib/provider-icons.js and icons/providers/README.md. */
+.provider-mark {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  box-sizing: border-box;
+  border: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
+  border-radius: 8px;
+  background: #fff;
+}
+.provider-mark img {
+  display: block;
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
+}
+.provider-mark-badge {
+  position: absolute;
+  top: -5px;
+  right: -9px;
+  padding: 1px 2px;
+  border: 1px solid var(--bg);
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 7px;
+  font-weight: 800;
+  line-height: 1.1;
+}
+.provider-mark.sm {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+}
+.provider-mark.sm img {
+  width: 15px;
+  height: 15px;
+}
+.provider-mark.sm .provider-mark-badge {
+  top: -4px;
+  right: -8px;
+  font-size: 6px;
+}

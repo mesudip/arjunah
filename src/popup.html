@@ -40,13 +40,22 @@
         <div id="site-dashboard" hidden>
           <p id="assistant" class="assistant"></p>
           <label class="field">
-            <span>Model for this site</span>
-            <select id="site-model" aria-label="Model for this site"></select>
+            <span>Model this site opens with</span>
+            <select
+              id="site-model"
+              aria-label="Model this site opens with"
+            ></select>
           </label>
           <p id="fallback" class="small muted" hidden></p>
-          <div id="exposed" class="exposed" hidden>
-            <span class="eyebrow">Providers this site may list</span>
+          <div id="exposed" class="exposed">
+            <span class="eyebrow"
+              >Providers the assistant may switch between</span
+            >
             <div id="exposed-list"></div>
+            <p id="exposed-note" class="small muted"></p>
+            <button id="exposed-reset" class="btn btn-ghost btn-sm" hidden>
+              Allow every provider
+            </button>
           </div>
           <p id="context-fields" class="small muted"></p>
         </div>
@@ -75,6 +84,6 @@
       </section>
       <p id="note" role="status"></p>
     </main>
-    <script src="popup.js"></script>
+    <script type="module" src="popup.js"></script>
   </body>
 </html>

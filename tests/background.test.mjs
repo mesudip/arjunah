@@ -1385,6 +1385,124 @@ test("the site model follows the global default until pinned, and pinning cancel
   );
 });
 
+test("thinking effort is saved per site, sent every turn, and never cancels the turn in flight", async (t) => {
+  const b = await broker(t);
+  desktopMock(b, {
+    providers: [
+      {
+        id: "claude-code",
+        name: "Claude Code",
+        vendor: "Anthropic",
+        installed: true,
+        available: true,
+        supportsTools: true,
+        supportsReasoning: true,
+        account: "me@example.test",
+        models: [
+          {
+            id: "sonnet",
+            displayName: "Sonnet",
+            reasoningLevels: ["low", "medium", "high"],
+          },
+        ],
+        defaultModel: "sonnet",
+      },
+    ],
+  });
+  await b.ok("desktop.pair", { code: "123456" }, b.extension);
+  await b.approve(["chat.hosted", "models.generate"], {
+    model: "claude-code/sonnet",
+  });
+  assert.equal(
+    (await b.ok("hosted.settings")).model.reasoning,
+    null,
+    "no effort is chosen until the user picks one",
+  );
+  // The widget's thinking control sends the model it is already on plus the
+  // new effort; both are the site's saved choice from here on.
+  const set = await b.ok("hosted.model", {
+    model: "claude-code/sonnet",
+    reasoning: "high",
+  });
+  assert.equal(set.model.reasoning, "high");
+  assert.equal(
+    (await b.ok("hosted.settings")).model.reasoning,
+    "high",
+    "the effort survives a fresh read, which is what a page reload does",
+  );
+  // Re-sending the same model with a different effort must not read as a model
+  // change: that is what used to abort an answer already being written.
+  const turn = b.call("chat.complete", await b.prepare(manifest));
+  await b.ok("hosted.model", {
+    model: "claude-code/sonnet",
+    reasoning: "low",
+  });
+  const answered = await turn;
+  assert.ok(
+    !answered.error,
+    `changing effort mid-turn must not cancel it (${answered.error?.code})`,
+  );
+  assert.equal((await b.ok("hosted.settings")).model.reasoning, "low");
+  // An effort the answering model does not offer is not shown or sent.
+  await b.ok(
+    "site.update",
+    { origin: "https://site.test", model: "openai/allowed" },
+    b.extension,
+  );
+  assert.equal(
+    (await b.ok("hosted.settings")).model.reasoning,
+    null,
+    "a model without that level reports no effort",
+  );
+  assert.equal(
+    (
+      await b.call("hosted.model", {
+        model: "openai/allowed",
+        reasoning: "nope",
+      })
+    ).error.code,
+    "INVALID_REQUEST",
+  );
+});
+
+test("clearing a site model and resetting its provider list are expressible, not errors", async (t) => {
+  const b = await broker(t);
+  desktopMock(b);
+  await b.ok("desktop.pair", { code: "123456" }, b.extension);
+  await b.approve(["models.generate", "models.list", "models.catalog"], {
+    model: "claude-code/sonnet",
+  });
+  assert.equal((await b.ok("grant.query")).model, "claude-code/sonnet");
+  // The popup's "Follow the global default" row is `null`, and it must unpin
+  // rather than come back as "The chosen model is unavailable".
+  const unpinned = await b.ok(
+    "site.update",
+    { origin: "https://site.test", model: null },
+    b.extension,
+  );
+  assert.equal(unpinned.pinned, false, "a null model unpins the site");
+  // An empty allowlist is a real choice: allow nothing extra, not allow all.
+  const none = await b.ok(
+    "site.update",
+    { origin: "https://site.test", providers: [] },
+    b.extension,
+  );
+  assert.deepEqual(none.chosenProviders, []);
+  assert.deepEqual(
+    none.providers,
+    [],
+    "an empty allowlist exposes no provider to a level-2 page",
+  );
+  // And the popup's "Allow every provider" sends null, which clears it again.
+  const all = await b.ok(
+    "site.update",
+    { origin: "https://site.test", providers: null },
+    b.extension,
+  );
+  assert.equal(all.chosenProviders, null, "null restores every provider");
+  assert.ok(all.providers.length > 0);
+});
+
 test("widget controls reach the model only when disclosed, and tool handlers receive them", async (t) => {
   const b = await broker(t);
   const withControls = {

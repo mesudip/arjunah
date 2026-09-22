@@ -14,14 +14,14 @@
 
 Download the latest build from [GitHub releases](../../releases): `arjunah-chrome-<version>.zip` for Chrome, Brave, and Edge, or `arjunah-firefox-<version>.xpi` for Firefox. Unzip the Chrome build, open `chrome://extensions`, turn on Developer mode, choose **Load unpacked**, and select the folder. Then open the extension's settings and enter an OpenAI or OpenCode Zen API key, or pair the desktop app below.
 
-Step-by-step instructions, Firefox notes, and updating are in [docs/INSTALL.md](docs/INSTALL.md). This is a 1.0.0 alpha: store listings and signed builds come with the first stable release.
+Step-by-step instructions, Firefox notes, and updating are in [docs/INSTALL.md](docs/INSTALL.md). This is a 1.0.0 beta: store listings and signed builds come with the first stable release.
 
 ## Install the desktop app (optional)
 
 Lets websites use the subscriptions you are already signed in to, with no API key. Needs Node.js 22.22 or later on macOS, Linux, or Windows.
 
 ```sh
-npm install -g arjunah-desktop@alpha
+npm install -g arjunah-desktop@beta
 arjunah-desktop install
 ```
 
@@ -30,7 +30,7 @@ arjunah-desktop install
 ## For website developers
 
 ```sh
-npm install arjunah@alpha
+npm install arjunah@beta
 ```
 
 ```js

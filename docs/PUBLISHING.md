@@ -15,13 +15,18 @@ npm can attach a trusted publisher only after a package exists. A maintainer mus
 npm login --auth-type=web
 npm whoami
 npm run check
-npm publish --workspace arjunah --access public --tag alpha
-npm publish --workspace arjunah-desktop --access public --tag alpha
+npm publish --workspace arjunah --access public --tag beta
+npm publish --workspace arjunah-desktop --access public --tag beta
 ```
 
-These commands create `arjunah@1.0.0-alpha.1` and `arjunah-desktop@1.0.0-alpha.1` under the `alpha` dist-tag. npm package versions are immutable. If the first publish succeeds and the second fails, fix the second package and publish only that workspace; do not try to republish the first version.
+The dist-tag is the prerelease channel in the package version, which is what
+the release workflow derives for itself (`publish-npm.yml`): `1.0.0-beta.1`
+publishes to `beta`, `1.0.0-alpha.7` to `alpha`, and a plain `1.0.0` to
+`latest`. Publishing by hand, pass the same channel the version carries.
 
-On a package's first publication npm may also create a `latest` tag even when `--tag alpha` was supplied. Remove it while signed in interactively so plain installs do not resolve to the prerelease:
+npm package versions are immutable. If the first publish succeeds and the second fails, fix the second package and publish only that workspace; do not try to republish the first version.
+
+On a package's first publication npm may also create a `latest` tag even when a prerelease `--tag` was supplied. Remove it while signed in interactively so plain installs do not resolve to the prerelease:
 
 ```sh
 npm dist-tag rm arjunah latest
@@ -31,21 +36,21 @@ npm dist-tag rm arjunah-desktop latest
 Alpha users install with:
 
 ```sh
-npm install arjunah@alpha
-npm install --global arjunah-desktop@alpha
+npm install arjunah@beta
+npm install --global arjunah-desktop@beta
 ```
 
 ## Configure npm trusted publishers
 
 On npmjs.com, open **Settings → Trusted Publisher** for each package and add the same GitHub Actions publisher:
 
-| Field | Value |
-| --- | --- |
-| Organization or user | `mesudip` |
-| Repository | `arjunah` |
-| Workflow filename | `publish-npm.yml` |
-| Environment | leave blank |
-| Allowed action | allow direct `npm publish` |
+| Field                | Value                      |
+| -------------------- | -------------------------- |
+| Organization or user | `mesudip`                  |
+| Repository           | `arjunah`                  |
+| Workflow filename    | `publish-npm.yml`          |
+| Environment          | leave blank                |
+| Allowed action       | allow direct `npm publish` |
 
 Configure both `arjunah` and `arjunah-desktop`. The workflow filename is only the filename, not `.github/workflows/publish-npm.yml`. The repository fields in both package manifests already point to `https://github.com/mesudip/arjunah`.
 

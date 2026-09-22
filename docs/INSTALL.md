@@ -17,7 +17,7 @@ A Chrome Web Store listing is planned for the first stable release; until then t
 1. Download `arjunah-firefox-<version>.xpi` from the release.
 2. Open `about:debugging#/runtime/this-firefox`, choose **Load Temporary Add-on**, and pick the `.xpi`.
 
-The alpha build is unsigned, so Firefox removes it when it restarts and you load it again. Signed builds through Mozilla's add-on service are planned.
+The beta build is unsigned, so Firefox removes it when it restarts and you load it again. Signed builds through Mozilla's add-on service are planned.
 
 ### Configure a provider
 
@@ -34,7 +34,7 @@ Then try it: open a site that supports अर्जुनः, visit the [hosted 
 Requires [Node.js](https://nodejs.org) 22.22 or later on macOS, Linux, or Windows.
 
 ```sh
-npm install -g arjunah-desktop@alpha
+npm install -g arjunah-desktop@beta
 arjunah-desktop install
 ```
 

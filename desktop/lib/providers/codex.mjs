@@ -291,6 +291,20 @@ async function probeCodex(binary) {
   return result.messages.length ? parseCodexProbe(result.messages) : null;
 }
 
+/** The light pass: app-server probe only. See claude-code's `refresh`. */
+export async function refresh(previous) {
+  if (!previous?.binary || !previous.available) return null;
+  const probe = await probeCodex(previous.binary).catch(() => null);
+  if (!probe) return null;
+  const codexHome =
+    process.env.CODEX_HOME || join(process.env.HOME ?? "", ".codex");
+  return {
+    ...previous,
+    models: mergeCodexModels(readModels(codexHome), probe.models ?? []),
+    quota: probe.quota ?? previous.quota ?? null,
+  };
+}
+
 export async function detect(settings = {}) {
   const binary =
     settings.codexPath ||
@@ -331,6 +345,11 @@ export async function detect(settings = {}) {
       status.code === 0 &&
       /logged in/i.test(status.stdout + status.stderr),
   );
+  // A killed process exits without a status, which `run()` reports as code 0
+  // with empty output — indistinguishable from "not logged in" unless the
+  // deadline is checked. Saying "run codex login" to someone whose machine was
+  // merely busy is the misdiagnosis this flag exists to prevent.
+  const timedOut = Boolean(status?.timedOut || version.timedOut);
   const method = status
     ? (status.stdout + status.stderr)
         .match(/logged in using (.+)/i)?.[1]
@@ -371,22 +390,34 @@ export async function detect(settings = {}) {
     connection: link,
     reason: loggedIn
       ? null
-      : "Codex is installed but not signed in. Run `codex login` with your ChatGPT account.",
+      : timedOut
+        ? `Codex did not answer within ${status?.timedOut ? 20 : 15} seconds. It is probably still signed in; this computer was too busy to start it.`
+        : "Codex is installed but not signed in. Run `codex login` with your ChatGPT account.",
     guidance: loggedIn
       ? null
-      : guidance({
-          state: "signed-out",
-          summary: `Codex ${version.stdout.trim()} is installed at ${binary} but has no saved login.`,
-          steps: [
-            hasAuth
-              ? "A login file exists but Codex does not report it as valid. Run `codex login` again to refresh it."
-              : "Open a terminal and run `codex login`.",
-            "Finish the sign-in in the browser window that opens using your ChatGPT account.",
-            "Click Re-check. The row turns green once `codex login status` prints “Logged in”.",
-          ],
-          links: LINKS,
-          note: APP_NOTE,
-        }),
+      : timedOut
+        ? guidance({
+            state: "error",
+            summary: `\`${binary} ${status?.timedOut ? "login status" : "--version"}\` was still running when the check gave up.`,
+            steps: [
+              "Wait for whatever is loading this computer to finish, then click Re-check.",
+              "If it keeps timing out, run `codex login status` in a terminal and see how long it takes.",
+            ],
+            links: LINKS,
+          })
+        : guidance({
+            state: "signed-out",
+            summary: `Codex ${version.stdout.trim()} is installed at ${binary} but has no saved login.`,
+            steps: [
+              hasAuth
+                ? "A login file exists but Codex does not report it as valid. Run `codex login` again to refresh it."
+                : "Open a terminal and run `codex login`.",
+              "Finish the sign-in in the browser window that opens using your ChatGPT account.",
+              "Click Re-check. The row turns green once `codex login status` prints “Logged in”.",
+            ],
+            links: LINKS,
+            note: APP_NOTE,
+          }),
     models: mergeCodexModels(readModels(codexHome), probe?.models ?? []),
     defaultModel: "default",
     quota: probe?.quota ?? null,

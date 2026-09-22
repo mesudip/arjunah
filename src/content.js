@@ -7,13 +7,6 @@
   const pagePending = new Map();
   const IMAGE_TYPES = R.IMAGE_TYPES;
   const HISTORY_LIMIT = 40;
-  const PROVIDER_ICONS = Object.freeze({
-    openai: "icons/providers/openai.svg",
-    "claude-code": "icons/providers/claude.svg",
-    codex: "icons/providers/codex.png",
-    "opencode-api": "icons/providers/opencode.svg",
-    "opencode-cli": "icons/providers/opencode.svg",
-  });
   let registration = null,
     view = null,
     host,
@@ -29,6 +22,7 @@
   let alive = true;
   let settings = null; // hosted.settings result: site model, switchable models, usage
   let pendingModel = null; // model chosen in the header before any grant exists
+  let pendingReasoning = null; // and the effort chosen with it
   let controls = {};
   let session = { promptTokens: 0, completionTokens: 0, turns: 0 };
   let lastTurn = null;
@@ -327,6 +321,10 @@
         setTimeout(() => {
           if (registration?.id === validated.id) void view.refreshThreads();
         }, 0);
+      // Warm the wallet's answer now, while the panel is still shut. Waiting
+      // until openPanel() meant the model picker drew itself empty and filled
+      // in a second later, every single time the widget was opened.
+      void refreshSettings();
       if (registration.manifest.widget.autoShow) openPanel();
       return { id: validated.id, controls: { ...controls } };
     }
@@ -498,9 +496,13 @@
       registrationId: contract?.id,
       preparedId,
       ...(answer.model ? { model: answer.model } : {}),
+      // The consent sheet has no thinking control; this is the effort the user
+      // set in the widget header before the site had a grant to store it on.
+      ...(pendingReasoning ? { reasoning: pendingReasoning } : {}),
       ...(answer.providers ? { providers: answer.providers } : {}),
     });
     pendingModel = null;
+    pendingReasoning = null;
     void refreshSettings();
     return grant;
   }
@@ -591,18 +593,18 @@
       },
       modelLabel: (id) =>
         settings?.models?.find((model) => model.id === id)?.displayName ?? id,
-      modelIcon({ providerId }) {
-        const path = PROVIDER_ICONS[providerId];
-        if (!path) return null;
-        return {
-          src: chrome.runtime.getURL(path),
-          ...(providerId === "opencode-api" ? { badge: "[API]" } : {}),
-        };
-      },
+      // The wallet resolves provider artwork once, from the one table in
+      // lib/provider-icons.js, and ships it with the model list. A content
+      // script cannot import that module, and a second copy of the table here
+      // is exactly how the popup and the picker drift apart.
+      modelIcon: ({ id, providerId }) =>
+        settings?.models?.find(
+          (model) => model.id === id || model.providerId === providerId,
+        )?.icon ?? null,
       // The renderer drew the choice already; the wallet decides whether it
       // stands, and a false answer puts the previous model back (SPEC 8.2).
-      modelChanged({ model }) {
-        return switchModel(model);
+      modelChanged({ model, reasoning }) {
+        return switchModel(model, reasoning);
       },
       busyChanged() {
         renderSetup();
@@ -899,7 +901,13 @@
     const current = pendingModel ?? settings?.model?.id ?? null;
     // The catalog is the wallet's; the picker that draws it is the renderer's
     // (SPEC 8.2), so this hands over data and nothing else.
-    view.setModels(settings?.models ?? [], current);
+    view.setModels(
+      settings?.models ?? [],
+      current,
+      // Only the wallet knows the site's saved effort; the widget starts blank
+      // and would otherwise drop the setting on every reload.
+      pendingReasoning ?? settings?.model?.reasoning ?? null,
+    );
     const active = settings?.model;
     view.refs.sub.textContent = active
       ? `${active.providerName} · ${active.displayName}${active.fallback ? " (default)" : ""}`
@@ -915,17 +923,22 @@
     view.setAttachmentsEnabled(vision);
   }
 
-  async function switchModel(id) {
+  async function switchModel(id, reasoning) {
     if (!id) return false;
     if (!settings?.grant) {
       // No grant yet: remember the choice for the consent dialog.
       pendingModel = id;
+      pendingReasoning = reasoning ?? null;
       renderModelSelect();
       return true;
     }
     try {
-      settings = await runtime("hosted.model", { model: id });
+      settings = await runtime("hosted.model", {
+        model: id,
+        reasoning: reasoning || null,
+      });
       pendingModel = null;
+      pendingReasoning = null;
       renderModelSelect();
       renderStatus();
       return true;

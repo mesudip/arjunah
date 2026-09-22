@@ -1073,16 +1073,15 @@ test("live agent progress is recorded per turn and served to the paired browser"
   const all = await call("/api/progress/turn-1", { headers });
   assert.equal(all.body.done, true);
   // The run opens with phases, so a browser can say what the wait is for long
-  // before the agent produces anything (SPEC 12.3.1).
+  // before the agent produces anything (SPEC 12.3.1). Detection is not one of
+  // them: the provider was already detected at startup, so the turn starts the
+  // agent rather than re-interrogating the CLI first.
   assert.deepEqual(
     all.body.items.filter((item) => item.type === "phase"),
-    [
-      { type: "phase", text: "Checking Fake on this computer…" },
-      { type: "phase", text: "Starting Fake…" },
-    ],
+    [{ type: "phase", text: "Starting Fake…" }],
   );
-  const progress = await call("/api/progress/turn-1?after=3", { headers });
-  assert.equal(progress.body.total, 5);
+  const progress = await call("/api/progress/turn-1?after=2", { headers });
+  assert.equal(progress.body.total, 4);
   assert.equal(progress.body.items[0].phase, "end");
   assert.deepEqual(progress.body.items[1], {
     type: "output_delta",
@@ -1141,8 +1140,11 @@ test("text a browser already collected is never merged into, and the log explain
   assert.equal(logs.status, 200);
   assert.ok(logs.body.latest > 0);
   const messages = logs.body.entries.map((entry) => entry.message);
-  assert.ok(messages.some((message) => message.startsWith("Checking Fake")));
-  assert.ok(messages.some((message) => message.includes("detection finished")));
+  // A turn against an already-detected provider spends no time looking for it,
+  // so neither the first-run phase nor a slow-resolve note belongs in the log.
+  assert.ok(!messages.some((message) => message.includes("Looking for Fake")));
+  assert.ok(!messages.some((message) => message.includes("provider resolved")));
+  assert.ok(messages.some((message) => message.includes("Starting Fake")));
   assert.ok(
     logs.body.entries.every(
       (entry) =>

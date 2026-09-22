@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { VERSION, LIMITS } from "../src/lib/constants.js";
 
 const pkg = JSON.parse(readFileSync("package.json", "utf8"));
-// npm versions may carry a prerelease tag (1.0.0-alpha.2); the protocol version does not.
+// npm versions may carry a prerelease tag (1.0.0-beta.1); the protocol version does not.
 const release = (version) => String(version).split("-")[0];
 for (const path of [
   "package.json",
@@ -158,7 +158,7 @@ try {
 } catch (error) {
   if (error.code !== "ENOENT") throw error;
 }
-// SPEC.md's header carries the release channel (1.0.0-alpha) while every
+// SPEC.md's header carries the release channel (for example 1.0.0-beta) while every
 // runtime version string is the bare protocol version (1.0.0). AGENTS.md has
 // promised this was enforced for a while; now it is.
 const spec = readFileSync("SPEC.md", "utf8");

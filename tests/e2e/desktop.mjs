@@ -353,13 +353,20 @@ try {
     document.querySelector("#log-tab-desktop").click(),
   );
   await settings.waitForFunction(() =>
-    /Checking /.test(document.querySelector("#log-view").textContent),
+    /Starting /.test(document.querySelector("#log-view").textContent),
   );
   const desktopLog = await settings.$eval("#log-view", (el) => el.textContent);
   assert.match(
     desktopLog,
-    /detection finished in \d+ms/,
-    "the desktop log explains the wait before the agent starts",
+    new RegExp(`Starting ${liveName}`),
+    "the desktop log explains what the run is doing",
+  );
+  // Detection happened once at startup. A turn must not re-interrogate the
+  // CLI: neither the first-run phase nor a slow-resolve note may appear here.
+  assert.doesNotMatch(
+    desktopLog,
+    /provider resolved in \d+ms|Looking for /,
+    "a turn against an already-detected provider does not re-detect it",
   );
   assert.ok(
     !desktopLog.includes("Reply with the single word PONG"),

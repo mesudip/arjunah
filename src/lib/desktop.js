@@ -225,9 +225,13 @@ export async function desktopProviders(link, refresh = false) {
   const body = await desktopFetch(
     link,
     `/api/providers${refresh ? "?refresh=1" : ""}`,
-    {
-      timeoutMs: 120_000,
-    },
+    // A normal read is answered from startup detection or the light pass, but
+    // the light pass still probes each signed-in CLI, and `opencode models`
+    // alone is allowed 60s. Ten seconds would have failed the read on exactly
+    // the loaded machine this work is meant to help, so the ordinary ceiling
+    // sits above the slowest probe rather than below it. Only an explicit
+    // Re-check re-verifies installs and sign-ins, and only that may take long.
+    { timeoutMs: refresh ? 90_000 : 30_000 },
   );
   if (!Array.isArray(body.providers))
     throw new BrokerError(

@@ -1,8 +1,17 @@
 import { BrokerError } from "./errors.js";
 import { LIMITS } from "./constants.js";
 
-export function requestSignal(signal) {
-  const timeout = AbortSignal.timeout(LIMITS.timeoutMs);
+/**
+ * The signal a remote call runs under. The deadline covers the whole exchange,
+ * body included, so a streamed answer that outlives it dies mid-flight with
+ * bytes still arriving. Generation passes `null` for exactly that reason: a
+ * round is bounded by the visitor's stop button and by `LIMITS.stallNoticeMs`
+ * telling them the model is slow, not by a clock that cannot tell a hung
+ * socket from a model that is thinking.
+ */
+export function requestSignal(signal, timeoutMs = LIMITS.timeoutMs) {
+  if (timeoutMs == null) return signal ?? undefined;
+  const timeout = AbortSignal.timeout(timeoutMs);
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 

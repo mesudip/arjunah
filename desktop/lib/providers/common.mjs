@@ -71,26 +71,58 @@ export async function which(binary, extraPaths = []) {
   return null;
 }
 
+// execFile's own `timeout` sends one SIGTERM and never escalates, so a CLI that
+// traps the signal keeps the pipes open and the callback never fires. Detection
+// sits on the critical path of a chat turn, so the deadline has to be real:
+// SIGTERM, then SIGKILL, and a `timedOut` flag so the caller can say what
+// happened instead of mistaking empty output for a signed-out account.
+const KILL_GRACE_MS = 2000;
 export function run(binary, args, { env, cwd, timeoutMs = 20_000 } = {}) {
   return new Promise((resolve) => {
-    execFile(
+    let timedOut = false;
+    let killTimer = null;
+    const child = execFile(
       binary,
       args,
       {
         env: cleanEnv(env),
         cwd,
-        timeout: timeoutMs,
         maxBuffer: 4_000_000,
         windowsHide: true,
       },
-      (error, stdout, stderr) =>
+      (error, stdout, stderr) => {
+        clearTimeout(deadline);
+        clearTimeout(killTimer);
         resolve({
           code: error?.code ?? 0,
           stdout: String(stdout ?? ""),
           stderr: String(stderr ?? ""),
           error,
-        }),
+          timedOut,
+        });
+      },
     );
+    const deadline = setTimeout(() => {
+      // `timedOut` means the deadline fired, not that the child produced
+      // nothing: a slow success landing just over the line still returns its
+      // stdout with this flag set, so callers check the output first.
+      timedOut = true;
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        /* already gone */
+      }
+      killTimer = setTimeout(() => {
+        try {
+          if (child.exitCode == null && child.signalCode == null)
+            child.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+      }, KILL_GRACE_MS);
+      killTimer.unref?.();
+    }, timeoutMs);
+    deadline.unref?.();
   });
 }
 

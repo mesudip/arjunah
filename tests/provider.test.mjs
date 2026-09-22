@@ -1116,3 +1116,103 @@ test("desktop provider configurations dispatch to the paired desktop app with th
     globalThis.fetch = originalFetch;
   }
 });
+
+// A reasoning model routinely needs longer than the old 30s request deadline
+// before its first token, and the deadline covered the streamed body too, so a
+// round that was answering fine died mid-stream. Generation is unbounded now;
+// only metadata calls keep a clock.
+test("a generation round carries no deadline while model listing keeps one", async () => {
+  const originalFetch = globalThis.fetch;
+  const signals = [];
+  globalThis.fetch = async (url, init) => {
+    signals.push({ url: String(url), signal: init.signal });
+    return String(url).endsWith("/models")
+      ? new Response(JSON.stringify({ data: [{ id: "gpt-5.6-luna" }] }), {
+          headers: { "Content-Type": "application/json" },
+        })
+      : new Response(
+          `data: ${JSON.stringify({
+            type: "response.completed",
+            response: { id: "r", status: "completed", usage: {} },
+          })}\n\n`,
+          { headers: { "Content-Type": "text/event-stream" } },
+        );
+  };
+  const config = {
+    kind: "opencode",
+    providerId: "opencode",
+    providerName: "OpenCode Zen API",
+    protocol: "responses",
+    baseUrl: "https://opencode.ai/zen/v1",
+    model: "gpt-5.6-luna",
+    apiKey: "zen-key",
+    capabilities: { tools: true, vision: true, reasoning: true },
+  };
+  try {
+    await generate(
+      config,
+      { messages: [{ role: "user", content: "hi" }] },
+      null,
+      true,
+      { progress: { id: "p", onItem: () => {} } },
+    );
+    await listProviderModels(config, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  const round = signals.find((call) => call.url.endsWith("/responses"));
+  const models = signals.find((call) => call.url.endsWith("/models"));
+  assert.equal(round.signal, undefined);
+  assert.ok(models.signal instanceof AbortSignal);
+});
+
+// `providerResponse` returns as soon as the headers land, so anything the body
+// read throws escapes its wrapper. Unwrapped, a stop mid-stream reached the
+// page as a bare INTERNAL_ERROR that named nothing.
+for (const [protocol, path] of [
+  ["responses", "/responses"],
+  ["anthropic", "/messages"],
+  ["gemini", ":streamGenerateContent"],
+])
+  test(`${protocol}: an abort mid-stream is a broker error, not INTERNAL_ERROR`, async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      assert.ok(String(url).includes(path));
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('data: {"x":1}\n\n'));
+            controller.error(
+              new DOMException("The user aborted a request.", "AbortError"),
+            );
+          },
+        }),
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
+    };
+    try {
+      await generate(
+        {
+          kind: "opencode",
+          providerId: "opencode",
+          providerName: "OpenCode Zen API",
+          protocol,
+          baseUrl: "https://opencode.ai/zen/v1",
+          model:
+            protocol === "anthropic" ? "claude-sonnet-4-6" : "gpt-5.6-luna",
+          apiKey: "zen-key",
+          capabilities: { tools: true, vision: true, reasoning: true },
+        },
+        { messages: [{ role: "user", content: "hi" }] },
+        null,
+        true,
+        { progress: { id: "p", onItem: () => {} } },
+      );
+      assert.fail("the aborted stream should have thrown");
+    } catch (error) {
+      assert.equal(error.name, "AIError");
+      assert.equal(error.code, "TIMEOUT");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });

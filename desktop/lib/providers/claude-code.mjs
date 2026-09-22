@@ -250,6 +250,31 @@ async function probeClaude(binary) {
   return parseClaudeProbe(result.messages);
 }
 
+/**
+ * The happy path between full detections: the CLI is already known to be
+ * installed and signed in, so only the model list and the plan windows can
+ * have moved. One probe, no `which`, no `--version`, no `auth status`. A null
+ * answer means the assumption broke and the caller should detect in full.
+ */
+export async function refresh(previous) {
+  if (!previous?.binary || !previous.available) return null;
+  const probe = await probeClaude(previous.binary).catch(() => null);
+  if (!probe) return null;
+  const models = probe.models?.length
+    ? probe.models.map(
+        ({ description: _d, resolvedModel: _r, ...model }) => model,
+      )
+    : (previous.models ?? MODELS);
+  return {
+    ...previous,
+    models,
+    defaultModel: models.some((model) => model.id === "default")
+      ? "default"
+      : (models[0]?.id ?? "default"),
+    quota: probe.quota ?? previous.quota ?? null,
+  };
+}
+
 export async function detect(settings = {}) {
   const binary =
     settings.claudePath ||
@@ -284,7 +309,20 @@ export async function detect(settings = {}) {
   const versionLine = version.stdout.trim().split("\n")[0] || null;
   let reason = null;
   let guide = null;
-  if (!auth) {
+  if (!auth && (status.timedOut || version.timedOut)) {
+    // A deadline is not a sign-in problem. Saying so sends people to /login
+    // when the real cause is a loaded machine or a wedged process.
+    reason = `Claude Code did not answer within ${status.timedOut ? 20 : 15} seconds. It is probably still signed in; this computer was too busy to start it.`;
+    guide = guidance({
+      state: "error",
+      summary: `\`${binary} ${status.timedOut ? "auth status" : "--version"}\` was still running when the check gave up.`,
+      steps: [
+        "Wait for whatever is loading this computer to finish, then click Re-check.",
+        "If it keeps timing out, run `claude auth status` in a terminal and see how long it takes.",
+      ],
+      links: LINKS,
+    });
+  } else if (!auth) {
     reason = "Claude Code is installed but did not report its sign-in status.";
     guide = guidance({
       state: "error",

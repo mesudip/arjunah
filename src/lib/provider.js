@@ -59,12 +59,23 @@ async function refusalKind(response) {
   }
 }
 
-async function providerResponse(config, path, init, signal) {
+/**
+ * `deadline` is the whole-exchange timeout. Metadata calls keep the default;
+ * a generation round passes null so a slow model is waited on rather than cut
+ * off, and the visitor is told about the wait instead (SPEC 10).
+ */
+async function providerResponse(
+  config,
+  path,
+  init,
+  signal,
+  deadline = LIMITS.timeoutMs,
+) {
   try {
     const response = await fetch(endpoint(config.baseUrl, path), {
       ...init,
       headers: { ...providerHeaders(config), ...init.headers },
-      signal: requestSignal(signal),
+      signal: requestSignal(signal, deadline),
       redirect: "error",
       credentials: "omit",
     });
@@ -82,10 +93,16 @@ async function providerResponse(config, path, init, signal) {
   }
 }
 
-async function providerRequest(config, path, init, signal) {
+async function providerRequest(
+  config,
+  path,
+  init,
+  signal,
+  deadline = LIMITS.timeoutMs,
+) {
   try {
     return await readJson(
-      await providerResponse(config, path, init, signal),
+      await providerResponse(config, path, init, signal, deadline),
       LIMITS.providerResponseBytes,
       "PROVIDER_ERROR",
     );
@@ -457,13 +474,19 @@ export async function generate(
     try {
       return await streamedCompletion(
         config,
-        await providerResponse(config, "/chat/completions", init, signal),
+        await providerResponse(config, "/chat/completions", init, signal, null),
         options.progress.onItem,
       );
     } catch (error) {
       throw networkError(error, "PROVIDER_ERROR", "Provider");
     }
-  const body = await providerRequest(config, "/chat/completions", init, signal);
+  const body = await providerRequest(
+    config,
+    "/chat/completions",
+    init,
+    signal,
+    null,
+  );
   return completionResult(config, body, body?.choices?.[0]);
 }
 
@@ -735,15 +758,23 @@ async function anthropicGenerate(config, valid, signal, options) {
     },
     body: JSON.stringify(payload),
   };
+  // The catch is not decoration: `providerResponse` returns once the headers
+  // are in, so anything the body read throws — an abort while the stream is
+  // open above all — lands here rather than inside its own wrapper, and would
+  // otherwise reach the page as a bare INTERNAL_ERROR.
   if (payload.stream)
-    return streamedAnthropic(
-      config,
-      await providerResponse(config, "/messages", init, signal),
-      options.progress.onItem,
-    );
+    try {
+      return await streamedAnthropic(
+        config,
+        await providerResponse(config, "/messages", init, signal, null),
+        options.progress.onItem,
+      );
+    } catch (error) {
+      throw networkError(error, "PROVIDER_ERROR", "Provider");
+    }
   return anthropicResult(
     config,
-    await providerRequest(config, "/messages", init, signal),
+    await providerRequest(config, "/messages", init, signal, null),
   );
 }
 
@@ -975,14 +1006,18 @@ async function geminiGenerate(config, valid, signal, options) {
     body: JSON.stringify(payload),
   };
   if (stream)
-    return streamedGemini(
-      config,
-      await providerResponse(config, path, init, signal),
-      options.progress.onItem,
-    );
+    try {
+      return await streamedGemini(
+        config,
+        await providerResponse(config, path, init, signal, null),
+        options.progress.onItem,
+      );
+    } catch (error) {
+      throw networkError(error, "PROVIDER_ERROR", "Provider");
+    }
   return geminiResult(
     config,
-    await providerRequest(config, path, init, signal),
+    await providerRequest(config, path, init, signal, null),
   );
 }
 
@@ -1260,14 +1295,18 @@ async function responsesGenerate(config, valid, signal, options) {
     body: JSON.stringify(payload),
   };
   if (payload.stream)
-    return streamedResponses(
-      config,
-      await providerResponse(config, "/responses", init, signal),
-      options.progress.onItem,
-    );
+    try {
+      return await streamedResponses(
+        config,
+        await providerResponse(config, "/responses", init, signal, null),
+        options.progress.onItem,
+      );
+    } catch (error) {
+      throw networkError(error, "PROVIDER_ERROR", "Provider");
+    }
   return responsesResult(
     config,
-    await providerRequest(config, "/responses", init, signal),
+    await providerRequest(config, "/responses", init, signal, null),
   );
 }
 

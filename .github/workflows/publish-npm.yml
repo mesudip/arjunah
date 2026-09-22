@@ -11,12 +11,13 @@ on:
   workflow_dispatch:
     inputs:
       dist_tag:
-        description: npm dist-tag (alpha for pre-releases, latest for stable)
-        default: alpha
+        description: npm dist-tag (release channel for pre-releases, latest for stable)
+        default: beta
         required: true
         type: choice
         options:
           - alpha
+          - beta
           - latest
 
 jobs:
@@ -78,7 +79,8 @@ jobs:
         run: |
           version="$(node -p "require('./package.json').version")"
           if [[ "$version" == *-* ]]; then
-            expected="alpha"
+            expected="${version#*-}"
+            expected="${expected%%.*}"
           else
             expected="latest"
           fi

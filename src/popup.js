@@ -1,3 +1,5 @@
+import { providerMark } from "./lib/provider-icons.js";
+
 const $ = (selector) => document.querySelector(selector);
 const state = $("#state"),
   note = $("#note"),
@@ -5,6 +7,7 @@ const state = $("#state"),
   revokeSite = $("#revoke-site"),
   providerLabel = $("#provider-label"),
   siteModel = $("#site-model"),
+  reset = $("#exposed-reset"),
   defaultModel = $("#default-model");
 let activeTab = null;
 let origin = null;
@@ -146,12 +149,31 @@ function compact(n) {
       : String(value);
 }
 
-/** A grouped <select> of every available model; `selected` may be null. */
-function fillModelSelect(select, selected, { defaultMark = null } = {}) {
+/**
+ * A grouped <select> of every available model; `selected` may be null.
+ * `only` narrows it to a set of provider ids (the site's own allowlist).
+ *
+ * A select with nothing selected shows its first option, which reads as a
+ * choice nobody made. `placeholder` is the honest first row for that case.
+ */
+function fillModelSelect(
+  select,
+  selected,
+  { defaultMark = null, placeholder = null, only = null } = {},
+) {
   select.replaceChildren();
   let any = false;
+  let matched = false;
+  let placeholderOption = null;
+  if (placeholder) {
+    placeholderOption = document.createElement("option");
+    placeholderOption.value = "";
+    placeholderOption.textContent = placeholder;
+    select.append(placeholderOption);
+  }
   for (const provider of catalog?.providers ?? []) {
     if (!provider.available) continue;
+    if (only && !only.has(provider.id)) continue;
     const group = document.createElement("optgroup");
     group.label = provider.name;
     for (const model of provider.models) {
@@ -162,23 +184,34 @@ function fillModelSelect(select, selected, { defaultMark = null } = {}) {
           ? `${model.displayName} (default)`
           : model.displayName;
       option.selected = model.id === selected;
+      if (option.selected) matched = true;
       group.append(option);
       any = true;
     }
     select.append(group);
   }
+  // A pinned model whose provider is unavailable — or one the site's own
+  // allowlist excludes — matches no option. Without this the browser shows
+  // whatever is first and it reads as the current choice.
+  if (placeholderOption) placeholderOption.selected = !matched;
   if (!any) {
+    select.replaceChildren();
     const option = document.createElement("option");
-    option.textContent = "No provider available";
+    option.textContent = only
+      ? "No provider enabled for this site"
+      : "No provider available";
     select.append(option);
   }
   select.disabled = !any;
+  return any;
 }
 
 function renderProviders() {
   const list = $("#providers");
   list.replaceChildren();
-  fillModelSelect(defaultModel, catalog?.defaultModel ?? null);
+  fillModelSelect(defaultModel, catalog?.defaultModel ?? null, {
+    placeholder: "No default chosen",
+  });
   for (const provider of catalog?.providers ?? []) {
     const card = element("div", null, "provider");
     card.classList.toggle("available", provider.available);
@@ -189,9 +222,13 @@ function renderProviders() {
           catalog.defaultModel.startsWith(`${provider.id}/`),
       ),
     );
-    card.append(element("span", null, `dot ${provider.available ? "on" : ""}`));
+    const mark = providerMark(provider.id);
+    card.append(
+      mark ?? element("span", null, `dot ${provider.available ? "on" : ""}`),
+    );
     const name = element("div", null, "name");
     name.append(element("span", provider.name));
+    if (!provider.available) card.classList.add("off");
     if (provider.plan) name.append(element("span", provider.plan, "badge"));
     card.append(name);
     if (provider.available) {
@@ -287,11 +324,33 @@ function renderProviders() {
     alert.className = desktop.running ? "alert-row" : "warning-row";
     alert.append(element("span", problem));
   }
+  // Three different situations used to share one sentence, and the one it
+  // picked when a default was merely unset claimed nothing was configured at
+  // all — directly above a list of five working providers.
+  const usable = (catalog?.providers ?? []).filter(
+    (provider) => provider.available,
+  );
   providerLabel.textContent = catalog?.defaultModel
     ? `Sites you approve use ${catalog.label}.`
     : problem
       ? "Sites cannot use your subscriptions until this is fixed."
-      : "No provider configured yet. Open settings to add one.";
+      : usable.length
+        ? "No global default chosen yet. Pick one above; sites you approve will use it."
+        : "No provider configured yet. Open settings to add one.";
+}
+
+// Narrowing was one-way: unchecking wrote an explicit list and nothing ever
+// sent `providers: null` again, so the only way back to "all of them" was to
+// re-tick every box by hand — and a provider added later would stay hidden.
+reset.addEventListener("click", () => void update({ providers: null }));
+
+/** What the current allowlist means, in one line under the chips. */
+function describeAllowlist(allowed) {
+  $("#exposed-note").textContent = !allowed.size
+    ? "Locked to one model: the assistant answers with the model above, and its picker is disabled."
+    : allowed.size === 1
+      ? "The assistant may switch between this provider's models only."
+      : `The assistant may switch between ${allowed.size} providers' models.`;
 }
 
 function renderSite() {
@@ -343,42 +402,77 @@ function renderSite() {
     if (bits.length) assistant.append(element("span", bits.join(" · ")));
   }
   assistant.hidden = !registered;
+  // The allowlist is what the assistant may switch between; the model field is
+  // what it opens with. Both belong to every grant, not only a level-2 one:
+  // even a level-0 site drives the broker's own picker, and until now nothing
+  // in this popup could narrow that.
+  const exposed = $("#exposed");
+  exposed.hidden = !grant;
+  const allowed = grant
+    ? new Set(
+        site.chosenProviders ??
+          (catalog?.providers ?? [])
+            .filter((provider) => provider.available)
+            .map((provider) => provider.id),
+      )
+    : null;
   const modelField = siteModel.closest("label");
   modelField.hidden = !grant;
   if (grant) {
     fillModelSelect(siteModel, grant.model, {
       defaultMark: catalog?.defaultModel,
+      placeholder: "Follow the global default",
+      // `allowed` is authoritative even when empty: enabling no provider is a
+      // choice, and `null` here would quietly list every model instead.
+      only: site.chosenProviders ? allowed : null,
     });
     $("#fallback").hidden = !site.fallback;
     $("#fallback").textContent =
       "The model chosen for this site is unavailable; the global default answers instead.";
   } else $("#fallback").hidden = true;
-  const exposed = $("#exposed");
-  exposed.hidden = levelName !== "catalog";
-  if (levelName === "catalog") {
+  if (grant) {
     const box = $("#exposed-list");
     box.replaceChildren();
+    // A provider that is momentarily down still holds its place in the grant.
+    // Rendering only the available ones, then rebuilding the stored list from
+    // the rendered boxes, quietly dropped it the next time any chip was
+    // toggled. It is drawn disabled instead, so it is visible and preserved.
     for (const provider of catalog?.providers ?? []) {
-      if (!provider.available) continue;
+      if (!provider.available && !allowed.has(provider.id)) continue;
       const label = document.createElement("label");
+      if (!provider.available) label.className = "off";
       const check = document.createElement("input");
       check.type = "checkbox";
       check.value = provider.id;
-      check.checked =
-        site.chosenProviders == null ||
-        site.chosenProviders.includes(provider.id);
+      check.disabled = !provider.available;
+      check.title = provider.available
+        ? ""
+        : `${provider.name} is unavailable right now; its place in this site's list is kept.`;
+      check.checked = allowed.has(provider.id);
+      const mark = providerMark(provider.id);
+      if (mark) mark.classList.add("sm");
       check.addEventListener("change", async () => {
         const chosen = [...box.querySelectorAll("input:checked")].map(
           (input) => input.value,
         );
         // Keep the chips stable and interactive while ordered writes finish.
         // Rebuilding this whole section here made one click flash twice: once
-        // for the response and once for its storage-change broadcast.
+        // for the response and once for its storage-change broadcast. The two
+        // things that do depend on the choice are refreshed by hand instead,
+        // so they cannot sit stale until some later render.
+        describeAllowlist(new Set(chosen));
+        fillModelSelect(siteModel, site?.grant?.model ?? null, {
+          defaultMark: catalog?.defaultModel,
+          placeholder: "Follow the global default",
+          only: new Set(chosen),
+        });
         await update({ providers: chosen }, { render: false });
       });
-      label.append(check, provider.name);
+      label.append(check, ...(mark ? [mark] : []), provider.name);
       box.append(label);
     }
+    reset.hidden = !site.chosenProviders;
+    describeAllowlist(allowed);
   }
   const fields = $("#context-fields");
   fields.textContent = grant
@@ -415,7 +509,12 @@ function update(patch, { render = true } = {}) {
   siteUpdateQueue = operation.catch(() => undefined);
   return operation;
 }
-siteModel.addEventListener("change", () => update({ model: siteModel.value }));
+// The placeholder row is "unpin this site", which the broker spells `null`.
+// Sending the empty string instead reached findModel("") and came back as
+// "The chosen model is unavailable" — an error for choosing the default.
+siteModel.addEventListener("change", () =>
+  update({ model: siteModel.value || null }),
+);
 revokeSite.addEventListener("click", async () => {
   try {
     await runtime("grants.revoke", { origin });
@@ -427,6 +526,13 @@ revokeSite.addEventListener("click", async () => {
   }
 });
 defaultModel.addEventListener("change", async () => {
+  // "No default chosen" describes the current state; it is not an action.
+  // There is no operation that unsets the global default, and sending the
+  // empty string reached activeForModel("") as "Unknown provider selection".
+  if (!defaultModel.value) {
+    defaultModel.value = catalog?.defaultModel ?? "";
+    return;
+  }
   try {
     await runtime("catalog.default", { model: defaultModel.value });
     catalog = await runtime("catalog.get");

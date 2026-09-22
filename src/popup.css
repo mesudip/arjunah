@@ -81,7 +81,7 @@ main {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 9px;
+  padding: 3px 10px 3px 7px;
   border: 1px solid var(--line);
   border-radius: 999px;
   font-size: 12px;
@@ -96,6 +96,9 @@ main {
 #exposed-list input {
   margin: 0;
   accent-color: var(--accent);
+}
+#exposed-note:empty {
+  display: none;
 }
 .row {
   display: flex;
@@ -123,6 +126,16 @@ main {
 }
 .provider.available {
   background: var(--surface);
+}
+/* The mark stands in for the status dot, so it spans the card's rows and sits
+   with the provider name rather than floating against the tallest row. */
+.provider > .provider-mark {
+  grid-row: 1 / span 3;
+  align-self: start;
+}
+.provider.off > .provider-mark {
+  filter: grayscale(1);
+  opacity: 0.55;
 }
 .provider.default {
   border-color: var(--accent);

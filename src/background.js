@@ -5,6 +5,7 @@ import {
   ensureConfigured,
   providerLabel,
 } from "./lib/provider.js";
+import { providerIcon } from "./lib/provider-icons.js";
 import {
   buildCatalog,
   activeModelId,
@@ -666,9 +667,15 @@ async function handle(method, params, sender) {
   }
   if (method === "hosted.settings") return hostedSettings(origin);
   if (method === "hosted.model") {
-    // The user changed the model in the widget header (broker-owned UI).
+    // The user changed the model or the thinking effort in the widget header
+    // (broker-owned UI). Both are the site's saved choice, so both are stored.
     await requireCapabilities(origin, ["chat.hosted"]);
-    await updateSiteSettings(origin, { model: params.model });
+    await updateSiteSettings(origin, {
+      model: params.model,
+      ...(Object.hasOwn(params, "reasoning")
+        ? { reasoning: params.reasoning ?? null }
+        : {}),
+    });
     return hostedSettings(origin);
   }
   if (method === "models.list") {
@@ -695,6 +702,13 @@ async function handle(method, params, sender) {
   if (method === "models.generate") {
     return withTurn(pageBinding(sender, params), async (turn) => {
       turn.kind = "direct";
+      // The page gave up at this deadline, so finishing the round would spend
+      // the user's subscription on an answer with nowhere to go.
+      const orphaned = setTimeout(
+        () => turn.controller.abort(),
+        LIMITS.directGenerateMs,
+      );
+      turn.onSettled = () => clearTimeout(orphaned);
       const grant = await guard(turn, ["models.generate"]);
       const config = await resolveSiteConfig(grant, params.model);
       turn.providerId = config.catalogProviderId ?? config.providerId;
@@ -939,6 +953,9 @@ async function withTurn(binding, operation) {
     return await operation(turn);
   } finally {
     turns.delete(turn);
+    // A timer left running after the turn ends keeps this service worker
+    // alive for nothing, which is the opposite of what a deadline is for.
+    if (turn.onSettled) turn.onSettled();
   }
 }
 async function guard(turn, capabilities, resources) {
@@ -1132,6 +1149,22 @@ function exposedProviders(grant, catalog) {
     (provider) => provider.available && (!allowed || allowed.has(provider.id)),
   );
 }
+/**
+ * Providers the broker's own hosted picker offers for this site.
+ *
+ * Deliberately not `exposedProviders`: that answers "what may page code
+ * enumerate", which is a capability and stays gated by level. This answers
+ * "what did the user allow this site's assistant to switch between", which is
+ * the user's choice and applies at every level — a level-0 site never sees
+ * this list, it only limits the menu the wallet draws in its own widget.
+ * Narrowing only, so it can never widen what a level gate already decided.
+ */
+function pickableProviders(grant, catalog) {
+  const allowed = selectedProviderIds(grant);
+  return catalog.providers.filter(
+    (provider) => provider.available && (!allowed || allowed.has(provider.id)),
+  );
+}
 /** Provider configuration for a page request, enforcing the site's level. */
 async function resolveSiteConfig(grant, requested) {
   const catalog = await getCatalog();
@@ -1182,7 +1215,12 @@ function validOrigin(value) {
 /** Consent-dialog choices (SPEC 4.1): the user's site model and exposed providers. */
 async function validateSiteChoices(params, catalog) {
   const choices = {};
-  if (params.model != null) {
+  // An explicit `null` unpins, the way `providers: null` clears the allowlist.
+  // Without this the popup's "Follow the global default" row was accepted and
+  // then ignored, leaving the site pinned to the model it had.
+  if (Object.hasOwn(params, "model") && params.model === null)
+    choices.model = null;
+  else if (params.model != null) {
     const found = findModel(catalog, params.model);
     if (!found?.provider.available)
       throw new BrokerError(
@@ -1192,6 +1230,15 @@ async function validateSiteChoices(params, catalog) {
     // Choosing the global default means "follow the default", not a pin.
     choices.model =
       found.model.id === catalog.defaultModel ? null : found.model.id;
+  }
+  // Thinking effort is part of the site's model choice, not a per-turn whim:
+  // it used to live only in the widget's memory, so it quietly applied to
+  // every turn in a tab and then vanished on reload. `null` clears it back to
+  // the model's own default.
+  if (Object.hasOwn(params, "reasoning")) {
+    if (params.reasoning !== null && !EFFORTS.includes(params.reasoning))
+      throw new BrokerError("INVALID_REQUEST", "reasoning is invalid.");
+    choices.reasoning = params.reasoning;
   }
   if (params.providers != null) {
     if (
@@ -1213,6 +1260,7 @@ async function updateSiteSettings(origin, params) {
   const catalog = await getCatalog();
   const choices = await validateSiteChoices(params, catalog);
   if (params.providers === null) choices.providers = null;
+  let modelMoved = false;
   const result = await mutateGrants(async () => {
     const stored =
       (await chrome.storage.local.get(STORAGE.grants)).grants ?? {};
@@ -1221,16 +1269,32 @@ async function updateSiteSettings(origin, params) {
         "PERMISSION_REQUIRED",
         "This site has no grant to update.",
       );
-    stored[origin] = {
+    modelMoved =
+      Object.hasOwn(choices, "model") &&
+      (stored[origin].model ?? null) !== (choices.model ?? null);
+    const next = {
       ...stored[origin],
       ...choices,
       ...(Object.hasOwn(choices, "providers") ? { providerIdsVersion: 2 } : {}),
     };
+    // Normalise the effort against the model that will actually answer, here
+    // rather than only when read back. Storing an effort a model does not
+    // offer left a value nothing could clear: the popup never sends one, and
+    // the widget only ever sends levels the current model advertises.
+    if (next.reasoning) {
+      const answering = siteModel(next, catalog);
+      if (!(answering?.model.reasoningLevels ?? []).includes(next.reasoning))
+        next.reasoning = null;
+    }
+    stored[origin] = next;
     await chrome.storage.local.set({ [STORAGE.grants]: stored });
     return true;
   });
-  if (Object.hasOwn(choices, "model"))
-    invalidate((turn) => turn.binding.origin === origin);
+  // Only a model that actually moved cancels the turn in flight. The widget
+  // sends the model alongside a thinking-effort change, and re-sending the
+  // same one used to abort a running answer; effort itself never does, so a
+  // change made mid-turn applies to the next turn and leaves this one alone.
+  if (modelMoved) invalidate((turn) => turn.binding.origin === origin);
   else if (Object.hasOwn(choices, "providers")) {
     const allowed = selectedProviderIds({
       providers: choices.providers,
@@ -1281,20 +1345,27 @@ async function siteSummary(origin) {
         : [...selectedProviderIds(grant)],
   };
 }
+/**
+ * The effort saved for this site, kept only while the answering model still
+ * offers it. A model without that level would otherwise show a control set to
+ * something it cannot do, and send it on every turn.
+ */
+function storedReasoning(grant, model) {
+  const saved = grant?.reasoning ?? null;
+  return saved && (model?.reasoningLevels ?? []).includes(saved) ? saved : null;
+}
 /** What the hosted widget header shows: current model, switchable models, usage. */
 async function hostedSettings(origin) {
   const catalog = await getCatalog();
   const grant = await getGrant(origin);
   const site = siteModel(grant, catalog);
   const usage = await getUsage();
-  // A level-2 narrowing made in the popup also narrows this switcher, through
-  // the same helper the page-facing catalog uses, so the model currently
-  // answering is always one of the options. Levels 0 and 1 leave the user's own
-  // switcher alone: it is broker UI the page cannot read.
-  const visibleProviders =
-    levelOf(grant?.capabilities ?? []) === "catalog"
-      ? exposedProviders(grant, catalog)
-      : catalog.providers;
+  // The popup's per-site provider choice narrows this switcher at every level.
+  // It used to apply only at level 2, so a level-0 site's widget offered every
+  // model the browser knew and the popup had no control that touched it.
+  const visibleProviders = grant
+    ? pickableProviders(grant, catalog)
+    : catalog.providers;
   const pickerModels = visibleProviders
     .filter((provider) => provider.available)
     .flatMap((provider) =>
@@ -1322,6 +1393,9 @@ async function hostedSettings(origin) {
           reasoningLevels: site.model.reasoningLevels ?? [],
           defaultReasoning: site.model.defaultReasoning ?? null,
           threads: site.provider.supportsThreads === true,
+          // The site's saved thinking effort, so the widget restores the
+          // control instead of silently reverting to default on reload.
+          reasoning: storedReasoning(grant, site.model),
           plan: site.provider.plan,
           quota: site.provider.quota,
           fallback: site.fallback,
@@ -1333,6 +1407,9 @@ async function hostedSettings(origin) {
       displayName: model.displayName,
       providerId: provider.id,
       providerName: provider.name,
+      // Bundled artwork, resolved here so the widget and the popup read the
+      // same table. Never a remote URL: see icons/providers/README.md.
+      icon: providerIcon(provider.id),
       capabilities: model.capabilities,
       contextWindow: model.contextWindow ?? null,
       reasoningLevels: model.reasoningLevels ?? [],
@@ -1850,6 +1927,9 @@ function approveGrant(origin, request, resources, binding, params = {}) {
       model: Object.hasOwn(choices, "model")
         ? choices.model
         : (previous.model ?? null),
+      reasoning: Object.hasOwn(choices, "reasoning")
+        ? choices.reasoning
+        : (previous.reasoning ?? null),
       providers: Object.hasOwn(choices, "providers")
         ? choices.providers
         : (previous.providers ?? null),
@@ -2144,6 +2224,26 @@ async function hostedChat(
   // tokens already spent still count when a later round fails or is cancelled.
   let recorded = false;
   let lastResult = null;
+  // A round is not on a clock any more (see LIMITS.stallNoticeMs), so silence
+  // is reported rather than enforced: after a quiet stretch the visitor gets a
+  // line saying the model is slow and keeps the spinner and the stop button,
+  // and the notice clears itself as soon as anything arrives. Every sign of
+  // life re-arms it, so a round that stalls twice says so twice. Turn-scoped
+  // because the turn's own `finally` has to be able to disarm it.
+  let stallTimer = 0;
+  const armStall = (round) => {
+    clearTimeout(stallTimer);
+    stallTimer = 0;
+    if (!turn.progress) return;
+    stallTimer = setTimeout(() => {
+      // Re-armed rather than fired once: the notice is idempotent in the
+      // renderer, and repeating it is also what keeps this service worker
+      // from being suspended through a long silence, now that a round may
+      // legitimately outlast the idle timer.
+      emit(turn, { type: "model.stalled", round });
+      armStall(round);
+    }, LIMITS.stallNoticeMs);
+  };
   const settle = async (result) => {
     recorded = true;
     const completed = { ...result, usage: turnUsage };
@@ -2165,6 +2265,7 @@ async function hostedChat(
         `${turn.binding.origin}: round ${round} → ${config.catalogProviderId ?? config.providerId}/${config.model}${tools.length ? ` with ${tools.length} tool(s)` : ""}`,
       );
       let liveSteps = 0;
+      armStall(round);
       const result = await generate(
         config,
         {
@@ -2180,6 +2281,7 @@ async function hostedChat(
             ? {
                 id: `${turn.progress}-${round}`.slice(0, 100),
                 onItem: (step) => {
+                  armStall(round);
                   if (step.type === "command" && step.phase === "end")
                     liveSteps++;
                   if (step.type === "phase")
@@ -2210,6 +2312,8 @@ async function hostedChat(
             : null,
         },
       );
+      clearTimeout(stallTimer);
+      stallTimer = 0;
       await guard(turn, required, item.resources);
       lastResult = result;
       for (const key of Object.keys(turnUsage))
@@ -2419,6 +2523,7 @@ async function hostedChat(
         });
     }
   } finally {
+    clearTimeout(stallTimer);
     if (
       !recorded &&
       lastResult &&

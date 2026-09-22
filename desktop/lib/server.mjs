@@ -9,6 +9,7 @@ import { SessionRegistry } from "./sessions.mjs";
 import { LogBuffer } from "./logs.mjs";
 import {
   detectProviders,
+  refreshProviders,
   adapterFor,
   invalidateProviderCache,
 } from "./providers/index.mjs";
@@ -32,7 +33,7 @@ import { enrichProviders, mapT3Providers } from "./t3/catalog.mjs";
 
 export const APP_NAME = "arjunah-desktop";
 // Rewritten from the release tag at publish time; see .github/workflows/publish-npm.yml.
-export const RELEASE_VERSION = "1.0.0-alpha.7";
+export const RELEASE_VERSION = "1.0.0-beta.1";
 export const PROTOCOL_VERSION = "1.0.0";
 // Matches the extension's own request ceiling (LIMITS.requestBytes), so a turn
 // carrying the maximum image payload is not cut off at this hop.
@@ -108,6 +109,10 @@ export function createDesktopApp({
   log = () => {},
   adapters,
   detect = detectProviders,
+  // The light pass must agree with whatever detection is in use. A caller that
+  // supplies its own `detect` and no `refresh` gets one tier, not a mismatched
+  // pair reading a cache its detection never wrote.
+  refresh = detect === detectProviders ? refreshProviders : null,
   t3Fetch = fetchT3Providers,
 } = {}) {
   const pairing = new Pairing();
@@ -186,17 +191,33 @@ export function createDesktopApp({
   let eventRevision = 0;
   const eventClients = new Set();
   let providerView = [];
+  // The last full detection results, binary paths included, keyed by id.
+  const detected = new Map();
   let providerRefresh = null;
   let providerFingerprint = "";
   let providerTimer = null;
 
+  // Providers are detected once at startup and then pushed: `publish` fires
+  // whenever the view's fingerprint moves, so a connected browser learns about
+  // a change without asking. This used to be a forced full re-detection every
+  // 30 seconds, which meant eight CLI spawns a minute for the whole time any
+  // tab was open — the single largest source of load this app created, and the
+  // reason a chat turn could land on top of an in-flight sweep. What a browser
+  // now triggers on a new chat or an opened widget is the light pass
+  // (`refreshProviders`): model lists and plan usage, with a full detection
+  // only if that fails. An idle companion does no provider work at all.
+  // Ten minutes, and a full pass: the light one keeps models and quotas
+  // current but by design never re-asks a provider it already believes is
+  // unavailable, so a CLI signed into after startup would otherwise stay
+  // invisible until someone pressed Re-check. Once every ten minutes is a
+  // twentieth of the old rate and still notices on its own.
+  const PROVIDER_IDLE_MS = 10 * 60_000;
   function scheduleProviderMonitor() {
     clearTimeout(providerTimer);
     providerTimer = setTimeout(async () => {
-      if (eventClients.size)
-        await refreshProviderView({ force: true }).catch(() => {});
+      if (eventClients.size) await refreshProviderView().catch(() => {});
       scheduleProviderMonitor();
-    }, 30_000);
+    }, PROVIDER_IDLE_MS);
     providerTimer.unref?.();
   }
 
@@ -285,14 +306,24 @@ export function createDesktopApp({
   async function refreshProviderView({
     force = false,
     refreshModels = false,
+    light = false,
   } = {}) {
     if (providerRefresh) {
       if (!force && !refreshModels) return providerRefresh;
       await providerRefresh.catch(() => {});
-      return refreshProviderView({ force, refreshModels });
+      return refreshProviderView({ force, refreshModels, light });
     }
     providerRefresh = (async () => {
-      const providers = await detect(store.settings, { force });
+      const providers =
+        light && !force && refresh
+          ? await refresh(store.settings)
+          : await detect(store.settings, { force });
+      // The view is what a browser sees, with the binary path stripped. Keep
+      // the unredacted results too: that is what a chat turn starts from, and
+      // re-detecting to recover a path it already had is the whole cost this
+      // is here to avoid.
+      detected.clear();
+      for (const item of providers) detected.set(item.id, item);
       const next = await withT3(
         providers.map(({ binary: _binary, ...item }) => withLearned(item)),
         { force, refreshModels },
@@ -697,9 +728,29 @@ export function createDesktopApp({
     };
   }
 
+  /**
+   * What `generate` needs to start: the binary and the account state. This is
+   * the answer detection already produced, not a fresh scan — a chat turn must
+   * never wait on spawning CLIs. Only a provider missing from the current view
+   * (never detected, or added since) is worth detecting for. What keeps models
+   * and quotas current is the light pass a browser triggers on a new chat or an
+   * opened widget, and the one that follows a turn reporting new usage.
+   */
   async function providerInfo(providerId) {
-    const providers = await detect(store.settings);
-    return providers.find((item) => item.id === providerId) ?? null;
+    if (!providerView.length && !providerRefresh)
+      await refreshProviderView().catch(() => {});
+    else if (providerRefresh) await providerRefresh.catch(() => {});
+    const known = detected.get(providerId);
+    // Being asked to run a provider we believe is unavailable is the one moment
+    // re-detecting is worth its cost: the user has very likely just signed in
+    // and is retrying. The light pass deliberately never re-asks an unavailable
+    // provider, so without this the turn would keep failing until someone
+    // pressed Re-check. A provider that is working skips this entirely.
+    if (known?.available) return known;
+    const providers = await detect(store.settings, { force: true });
+    detected.clear();
+    for (const item of providers) detected.set(item.id, item);
+    return providers.find((item) => item.id === providerId) ?? known ?? null;
   }
 
   async function generate(body, client) {
@@ -735,16 +786,24 @@ export function createDesktopApp({
       );
       session.resume(results);
     } else {
-      // Detection can be slow the first time (a version check, a login check,
-      // and an account probe), and until now the browser saw only a spinner.
-      phase(live, providerId, `Checking ${adapter.name} on this computer…`);
+      // Normally this is a map lookup against the startup detection and the
+      // phase never shows. It only appears when this provider has never been
+      // detected, and then it says so rather than implying every turn pays it.
       const startedAt = Date.now();
+      const pending = !detected.has(providerId);
+      if (pending)
+        phase(
+          live,
+          providerId,
+          `Looking for ${adapter.name} on this computer for the first time…`,
+        );
       const info = await providerInfo(providerId);
-      note(
-        "debug",
-        providerId,
-        `detection finished in ${Date.now() - startedAt}ms (installed: ${Boolean(info?.installed)}, available: ${Boolean(info?.available)})`,
-      );
+      if (pending || Date.now() - startedAt > 50)
+        note(
+          "debug",
+          providerId,
+          `provider resolved in ${Date.now() - startedAt}ms (installed: ${Boolean(info?.installed)}, available: ${Boolean(info?.available)})`,
+        );
       if (!info?.installed)
         throw new HttpError(
           400,
@@ -907,7 +966,12 @@ export function createDesktopApp({
         event.contextWindow,
       );
     if (event.quota || Number.isInteger(event.contextWindow))
-      void refreshProviderView().catch(() => {});
+      // Claude and Codex report a context window on nearly every turn, so this
+      // fires constantly. A full detection here undid the whole point: once the
+      // 20s cache went cold (any turn longer than that) every answer was
+      // followed by `which`/`--version`/`auth status` for all three CLIs.
+      // `withLearned` still folds in what the turn just taught us.
+      void refreshProviderView({ light: true }).catch(() => {});
     return {
       ...base,
       model: event.model ? `${providerId}/${event.model}` : base.model,
@@ -1068,11 +1132,16 @@ export function createDesktopApp({
     }
     if (path === "/api/providers" && request.method === "GET") {
       requireClient(request);
+      // A browser asking normally — a new chat, a widget opening — gets the
+      // light pass: current models and quotas, no sign-in interrogation.
+      // `?refresh=1` is the explicit Re-check, and only that re-verifies what
+      // is installed and signed in.
       const force = url.searchParams.get("refresh") === "1";
       return send(response, 200, {
         providers: await refreshProviderView({
           force,
           refreshModels: force,
+          light: !force,
         }),
         t3: t3Status(),
       });

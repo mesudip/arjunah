@@ -1,6 +1,6 @@
 {
   "name": "arjunah",
-  "version": "1.0.0-alpha.7",
+  "version": "1.0.0-beta.1",
   "private": true,
   "type": "module",
   "description": "अर्जुनः (Arjunah): an open protocol, browser extension, TypeScript SDK, and desktop companion for user-controlled AI access on the web.",

@@ -47,6 +47,17 @@ export const LIMITS = Object.freeze({
   schemaBytes: 32_768,
   toolCalls: 32,
   timeoutMs: 30_000,
+  // A model that is still thinking is not a failed request, so a generation
+  // round has no deadline of its own. After this much silence the visitor is
+  // told about the wait and keeps the stop button; nothing is cancelled for
+  // them. Reasoning models routinely spend longer than this before the first
+  // token, and longer still once an image is in the prompt.
+  stallNoticeMs: 20_000,
+  // The page bridge rejects a direct `models.generate` at this point
+  // (src/page-api.js), so past it nobody is waiting for the answer. A hosted
+  // chat is different: it has a visitor, a stall notice, and a stop button, so
+  // it stays unbounded. This bounds only the direct call whose caller is gone.
+  directGenerateMs: 180_000,
   desktopTimeoutMs: 180_000,
   preparedMs: 300_000,
   contextText: 20_000,
