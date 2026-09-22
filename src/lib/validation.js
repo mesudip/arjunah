@@ -151,7 +151,7 @@ function validateContent(content, name, maxChars) {
   });
 }
 
-export function validateSiteToolResult(input, outputContent = []) {
+export function validateSiteToolResult(input, outputContent = [], cardIds) {
   if (!outputContent.length) return cloneJson(input, "tool result");
   if (
     !plainObject(input) ||
@@ -190,6 +190,12 @@ export function validateSiteToolResult(input, outputContent = []) {
   const card = cards.length
     ? validateCard(cards[0].card, "tool result card")
     : null;
+  // Card ids address cards for in-place updates, so a turn that reused one id
+  // would swap the wrong card; the spec requires them to be unique (7.4).
+  if (card?.id && cardIds) {
+    if (cardIds.has(card.id)) invalid("Card ids must be unique within a turn.");
+    cardIds.add(card.id);
+  }
   return {
     kind: "content",
     content: card ? [...content, { type: "card", card }] : content,

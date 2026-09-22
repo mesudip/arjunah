@@ -73,6 +73,14 @@ window.ready = installed.then(() => window.ai.arjunah.site.register({
 }));
 window.ready = window.ready.then((r) => { window.registered = true; return true; }, (e) => { window.registerError = String(e && e.message || e); return false; });
 window.storedEntries = () => (store.get("saved-1")?.entries ?? []).length;
+// A site store is untrusted data like any other: this plants a card the
+// section 7.4 validator must refuse when the thread is loaded.
+window.poisonStoredThread = (card) => {
+  store.get("saved-1").entries.push({
+    type: "activity", id: "poison", turnId: "poison",
+    steps: [{ id: "poison-step", name: "seatmap", source: "site", status: "ok", arguments: "{}", result: "{}", card }]
+  });
+};
 </script></body></html>`;
 
 const modelRequests = [];
@@ -246,15 +254,31 @@ try {
         ...(node.contentDocument ? [node.contentDocument] : []),
       ])
         stack.push(child);
+      // CDP flattens attributes as [name, value, name, value, ...].
+      const attributes = node.attributes ?? [];
+      const titled = attributes.some(
+        (value, index) =>
+          index % 2 === 0 &&
+          value === "title" &&
+          attributes[index + 1] === text,
+      );
       if (
         node.nodeName === "BUTTON" &&
-        (node.children ?? []).some(
+        ((node.children ?? []).some(
           (child) => child.nodeType === 3 && child.nodeValue === text,
-        )
+        ) ||
+          titled)
       )
         return node.nodeId;
     }
     return null;
+  };
+  const clickNode = async (nodeId) => {
+    const { object } = await cdp.send("DOM.resolveNode", { nodeId });
+    await cdp.send("Runtime.callFunctionOn", {
+      objectId: object.objectId,
+      functionDeclaration: "function () { this.click(); }",
+    });
   };
   const cardText = async () => {
     const { root } = await cdp.send("DOM.getDocument", {
@@ -266,11 +290,7 @@ try {
   assert.match(await cardText(), /One window seat is free\./);
   const holdButton = await findByText("Hold it");
   assert.ok(holdButton, "the card's local action button rendered");
-  const { object } = await cdp.send("DOM.resolveNode", { nodeId: holdButton });
-  await cdp.send("Runtime.callFunctionOn", {
-    objectId: object.objectId,
-    functionDeclaration: "function () { this.click(); }",
-  });
+  await clickNode(holdButton);
   const cardDeadline = Date.now() + 15000;
   for (;;) {
     if ((await page.evaluate(() => window.cardActions.length)) > 0) break;
@@ -294,6 +314,39 @@ try {
   }
   // A local action is not a model message: no new provider request happened.
   assert.equal(modelRequests.length, 2);
+
+  // A site-stored card is only drawn if it passes the same validator (7.4/7.6).
+  await page.evaluate(() =>
+    window.poisonStoredThread({
+      type: "card",
+      children: [{ type: "text", text: "POISON-MARKER", style: "evil" }],
+    }),
+  );
+  const conversations = await findByText("Conversations");
+  assert.ok(conversations, "the thread panel toggle rendered");
+  await clickNode(conversations);
+  await new Promise((done) => setTimeout(done, 300));
+  const savedThread = await findByText("Saved trip");
+  assert.ok(savedThread, "the saved thread rendered in the panel");
+  await clickNode(savedThread);
+  const loadDeadline = Date.now() + 15000;
+  for (;;) {
+    const loaded = await page.evaluate(() =>
+      window.threadCalls.includes("load:saved-1"),
+    );
+    if (loaded) break;
+    if (Date.now() > loadDeadline)
+      throw new Error("the saved thread was never loaded");
+    await new Promise((done) => setTimeout(done, 200));
+  }
+  await new Promise((done) => setTimeout(done, 300));
+  const loadedText = await cardText();
+  assert.match(loadedText, /Lisbon in May\./, "the valid entry replayed");
+  assert.doesNotMatch(
+    loadedText,
+    /POISON-MARKER/,
+    "an invalid stored card was not drawn",
+  );
   await cdp.detach();
 
   assert.deepEqual(errors, []);

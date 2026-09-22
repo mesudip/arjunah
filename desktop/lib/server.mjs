@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Store } from "./store.mjs";
@@ -475,6 +475,16 @@ export function createDesktopApp({
     const header = String(request.headers.authorization ?? "");
     return header.startsWith("Bearer ") ? header.slice(7).trim() : null;
   }
+  /** Fixed-length digest comparison, so a guess cannot be timed. */
+  function sameToken(presented, expected) {
+    const left = createHash("sha256")
+      .update(String(presented ?? ""))
+      .digest();
+    const right = createHash("sha256")
+      .update(String(expected ?? ""))
+      .digest();
+    return timingSafeEqual(left, right);
+  }
   function requireClient(request) {
     const client = store.authenticate(bearer(request));
     if (!client)
@@ -487,7 +497,7 @@ export function createDesktopApp({
   }
   function requireDashboard(request) {
     if (
-      request.headers["x-dashboard-token"] !== dashboardToken ||
+      !sameToken(request.headers["x-dashboard-token"], dashboardToken) ||
       (request.headers.origin != null &&
         request.headers.origin !== own(request))
     )
@@ -515,7 +525,7 @@ export function createDesktopApp({
       const dashboardPrefix = `${WS_PROTOCOL}.dashboard.`;
       if (
         protocol.startsWith(dashboardPrefix) &&
-        protocol.slice(dashboardPrefix.length) === dashboardToken &&
+        sameToken(protocol.slice(dashboardPrefix.length), dashboardToken) &&
         (origin == null || origin === own(request))
       )
         return { protocol, role: "dashboard", clientId: null };

@@ -1667,6 +1667,74 @@ test("hosted content tools send text normally and inject images only for vision 
   }
 });
 
+test("a second card reusing a live card id fails that tool call, not the turn", async (t) => {
+  const b = await broker(t);
+  const contentManifest = {
+    name: "Seats",
+    tools: [
+      {
+        name: "show",
+        outputContent: ["text", "card"],
+        inputSchema: { type: "object", additionalProperties: false },
+      },
+    ],
+  };
+  const content = {
+    kind: "content",
+    content: [
+      { type: "text", text: "Seat map." },
+      {
+        type: "card",
+        card: {
+          type: "card",
+          id: "seat",
+          children: [{ type: "text", text: "12A" }],
+        },
+      },
+    ],
+  };
+  b.hooks.tool = () => content;
+  b.hooks.fetch = async (_url, _init, payload) =>
+    payload.messages.some((item) => item.role === "tool")
+      ? Response.json({ choices: [{ message: { content: "done" } }] })
+      : Response.json({
+          choices: [
+            {
+              message: {
+                content: "",
+                tool_calls: [
+                  {
+                    id: "call-1",
+                    type: "function",
+                    function: { name: "site__show", arguments: "{}" },
+                  },
+                  {
+                    id: "call-2",
+                    type: "function",
+                    function: { name: "site__show", arguments: "{}" },
+                  },
+                ],
+              },
+            },
+          ],
+        });
+  const prepared = await b.prepare(contentManifest);
+  await b.ok("chat.complete", { ...prepared, turnId: "turn-1" });
+  const ends = b.events.filter((event) => event.type === "tool.end");
+  assert.equal(ends.length, 2);
+  assert.equal(ends[0].card.id, "seat");
+  assert.equal(ends[0].ok, true);
+  assert.equal(ends[1].card, undefined);
+  assert.equal(ends[1].ok, false);
+  assert.match(ends[1].result, /unique within a turn/);
+  // The model is told which call failed and still receives the valid card's text.
+  const toolMessages = b.requests
+    .at(-1)
+    .payload.messages.filter((message) => message.role === "tool");
+  assert.equal(toolMessages[0].content, "Seat map.");
+  assert.match(toolMessages[1].content, /unique within a turn/);
+});
+
 test("declared output modes change the assistant contract fingerprint", async (t) => {
   const b = await broker(t);
   const legacy = await b.register({

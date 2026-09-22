@@ -1,5 +1,13 @@
 # Project progress
 
+## 2026-09-22 — hardening batch
+
+- **Card ids are unique within a turn, as SPEC 7.4 already required.** The broker now tracks the ids a turn's cards have claimed and refuses a second card that reuses one. The refusal fails only that tool call: the model is told which call failed and why, the step is drawn as failed, and the earlier card and the rest of the turn stand. A card without an id has nothing to collide with and is untouched. Covered by a validator test and a background regression with two calls in one round.
+- **A site-owned thread store is untrusted on the way to the renderer too.** Stored activity cards used to cross the content bridge with a `typeof === "object"` check; content.js now puts every one through the same section 7.4 validator that guards tool results (`cards.validate`) and drops what it refuses, so a stored card the validator rejects is never drawn. Stored message images now get the direct tool path's per-message count (four) and base64 shape checks alongside the media-type and length bounds they already had. The hosted E2E plants an invalid card in the saved thread and asserts it never appears; the same assertion fails with the old passthrough.
+- **The dashboard token comparison is fixed-length.** Both the `x-dashboard-token` header check and the WebSocket dashboard-subprotocol check hash the presented and expected values to SHA-256 digests and compare them with `timingSafeEqual`, so neither path leaks position through timing. Pairing tokens were already matched by hash.
+- **The `ToolSession.flush()` batching race no longer exists.** It was recorded in the 2026-09-20 review as deliberately unfixed, and the 2026-09-20 latency work removed the 250 ms debounce that caused it: MCP calls surface immediately and sibling calls resume independently, with the desktop suite covering concurrent delivery, partial result matching, and independent resume. No code change; SECURITY.md no longer lists it.
+- **Verification.** `npm run check` passes: 185 unit/security tests (two new), zero-warning Firefox lint, static checks, and formatting. The full browser set passes unchanged: Chrome (9 OpenAI and 2 OpenCode Zen requests), Firefox, Chrome security, hosted surfaces (including the poisoned stored-card assertion), standalone widget, desktop fake-agent, and the idle-polling regression.
+
 ## 2026-09-22 — 1.0.0-beta.1
 
 - Promoted the unified v1 implementation to its first beta. Package versions, the Chrome display version, the desktop build identity, the specification channel, and the release workflow now agree on `1.0.0-beta.1`; runtime protocol identifiers remain `1.0.0`.

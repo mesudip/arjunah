@@ -224,6 +224,45 @@ test("card tool results need a declaration and a text fallback, and the model se
   );
 });
 
+test("card ids are unique within a turn", () => {
+  const declared = ["text", "card"];
+  const ids = new Set();
+  const result = (id) =>
+    validateSiteToolResult(
+      {
+        kind: "content",
+        content: [
+          { type: "text", text: "Seat map." },
+          {
+            type: "card",
+            card: { type: "card", id, children: [textNode("12A")] },
+          },
+        ],
+      },
+      declared,
+      ids,
+    );
+  assert.equal(result("seat").content.at(-1).card.id, "seat");
+  assert.throws(() => result("seat"), /unique within a turn/);
+  // A duplicate is rejected; a fresh id still passes, and a card without an id
+  // has nothing to collide with.
+  assert.equal(result("meal").content.at(-1).card.id, "meal");
+  assert.equal(
+    validateSiteToolResult(
+      {
+        kind: "content",
+        content: [
+          { type: "text", text: "No id." },
+          { type: "card", card: card(textNode("x")) },
+        ],
+      },
+      declared,
+      ids,
+    ).content.at(-1).card.id,
+    undefined,
+  );
+});
+
 test("outputContent accepts card only alongside text", () => {
   const manifest = (outputContent) => ({
     name: "Site",

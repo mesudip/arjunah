@@ -2176,6 +2176,9 @@ async function hostedChat(
     cachedTokens: 0,
     reasoningTokens: 0,
   };
+  // One id per card in this turn (SPEC 7.4), so a later card cannot claim a
+  // live id and make a card action update the wrong card.
+  const cardIds = new Set();
   ensureConfigured(config);
   const messages = [
     {
@@ -2450,7 +2453,7 @@ async function hostedChat(
                 );
           output =
             route.type === "site"
-              ? validateSiteToolResult(output, route.outputContent)
+              ? validateSiteToolResult(output, route.outputContent, cardIds)
               : cloneJson(output, "tool result");
         } catch (error) {
           if (

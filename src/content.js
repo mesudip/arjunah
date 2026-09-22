@@ -676,7 +676,12 @@
       throw aiError("INVALID_REQUEST", "The site returned an invalid list.");
     return value.slice(0, 100).map(threadSummary);
   }
-  function transcriptEntries(value) {
+  /** A card from the site's own store is re-validated before it is drawn. */
+  async function storedCard(card) {
+    if (!card || typeof card !== "object") return null;
+    return runtime("cards.validate", { card }).catch(() => null);
+  }
+  async function transcriptEntries(value) {
     if (!Array.isArray(value))
       throw aiError(
         "INVALID_REQUEST",
@@ -705,14 +710,10 @@
               : new Date().toISOString(),
         });
       } else if (entry.type === "activity" && Array.isArray(entry.steps)) {
-        out.push({
-          type: "activity",
-          id: THREAD_ID.test(String(entry.id ?? ""))
-            ? entry.id
-            : crypto.randomUUID(),
-          turnId: String(entry.turnId ?? "").slice(0, 100),
-          steps: entry.steps.slice(0, 32).flatMap((step) => {
+        const steps = await Promise.all(
+          entry.steps.slice(0, 32).map(async (step) => {
             if (!step || typeof step !== "object") return [];
+            const card = await storedCard(step.card);
             return [
               {
                 id: String(step.id ?? "").slice(0, 100),
@@ -725,12 +726,18 @@
                 status: step.status === "error" ? "error" : "ok",
                 arguments: String(step.arguments ?? "").slice(0, 2000),
                 result: String(step.result ?? "").slice(0, 2000),
-                ...(step.card && typeof step.card === "object"
-                  ? { card: step.card }
-                  : {}),
+                ...(card ? { card } : {}),
               },
             ];
           }),
+        );
+        out.push({
+          type: "activity",
+          id: THREAD_ID.test(String(entry.id ?? ""))
+            ? entry.id
+            : crypto.randomUUID(),
+          turnId: String(entry.turnId ?? "").slice(0, 100),
+          steps: steps.flat(),
         });
       }
     }
@@ -741,14 +748,17 @@
     if (!Array.isArray(content) || !content.length || content.length > 8)
       return null;
     const parts = [];
+    let images = 0;
     for (const part of content) {
       if (part?.type === "text" && typeof part.text === "string")
         parts.push({ type: "text", text: part.text.slice(0, 12000) });
       else if (
         part?.type === "image" &&
+        ++images <= 4 &&
         IMAGE_TYPES.includes(part.mediaType) &&
         typeof part.data === "string" &&
-        part.data.length <= 2000000
+        part.data.length <= 2000000 &&
+        /^[A-Za-z0-9+/]+={0,2}$/.test(part.data)
       )
         parts.push({
           type: "image",
