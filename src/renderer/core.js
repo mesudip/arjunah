@@ -23,6 +23,9 @@ var ArjunahRenderer = (function () {
     progressChars: 200,
     threadTitle: 120,
     outputChars: 120000,
+    // Live reasoning kept on screen per turn; the oldest chunks go first.
+    reasoningChars: 60000,
+    reasoningChunkWords: 50,
     attachments: 4,
     imageChars: 2000000,
     composerChars: 12000,
@@ -35,6 +38,37 @@ var ArjunahRenderer = (function () {
     userInputChars: 4096,
     userInputPrompts: 4,
   };
+  /**
+   * Splits streamed reasoning into display chunks of at most `max` words.
+   * `state.words` is how many words the open chunk already holds and
+   * `state.inWord` whether its text ends inside a word, so a word split across
+   * two deltas is counted once and never cut at a chunk boundary. Each piece
+   * either continues the open chunk or, with `fresh`, starts the next one.
+   */
+  function reasoningChunks(text, state, max = LIMITS.reasoningChunkWords) {
+    const pieces = [];
+    let words = state?.words ?? 0;
+    let inWord = state?.inWord ?? false;
+    let start = 0;
+    let fresh = false;
+    for (let index = 0; index < text.length; index++) {
+      const space = /\s/.test(text[index]);
+      if (!space && !inWord) {
+        if (words >= max) {
+          if (index > start)
+            pieces.push({ text: text.slice(start, index), fresh });
+          start = index;
+          fresh = true;
+          words = 0;
+        }
+        words++;
+      }
+      inWord = !space;
+    }
+    if (start < text.length) pieces.push({ text: text.slice(start), fresh });
+    return { pieces, words, inWord };
+  }
+
   /** Mention ids carry host keys such as `machine:12`, so they allow `.:-`. */
   const MENTION_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
 
@@ -1330,17 +1364,50 @@ var ArjunahRenderer = (function () {
         if (!displaying(turn.threadId)) return;
         let box = turn.reasoning;
         if (!box) {
-          box = doc.createElement("details");
-          box.className = "reason";
-          box.open = true;
-          const summary = doc.createElement("summary");
-          summary.textContent = `Reasoning (${event.provider ?? "agent"})`;
-          box.append(summary, doc.createElement("pre"));
-          turn.body.append(box);
+          box = {
+            node: doc.createElement("details"),
+            summary: doc.createElement("summary"),
+            pre: doc.createElement("pre"),
+            label: `Reasoning (${event.provider ?? "agent"})`,
+            chars: 0,
+            state: null,
+          };
+          box.node.className = "reason";
+          box.node.open = true;
+          box.summary.textContent = box.label;
+          box.node.append(box.summary, box.pre);
+          turn.body.append(box.node);
           turn.reasoning = box;
         }
-        const pre = box.querySelector("pre");
-        pre.textContent = `${pre.textContent}${type === "agent.reasoning" && pre.textContent ? "\n\n" : ""}${event.text}`;
+        let text = typeof event.text === "string" ? event.text : "";
+        // A whole summary is its own paragraph and starts a new chunk.
+        if (type === "agent.reasoning" && box.chars) {
+          text = `\n\n${text}`;
+          box.state = { words: LIMITS.reasoningChunkWords, inWord: false };
+        }
+        if (!text) return;
+        // Each chunk is one text node that later deltas extend in place, so a
+        // long stream is neither one node per token nor a rewrite of all the
+        // text so far on every token.
+        const split = reasoningChunks(text, box.state);
+        box.state = { words: split.words, inWord: split.inWord };
+        for (const piece of split.pieces) {
+          const last = box.pre.lastChild;
+          if (!piece.fresh && last) last.appendData(piece.text);
+          else box.pre.append(doc.createTextNode(piece.text));
+        }
+        box.chars += text.length;
+        let trimmed = false;
+        while (
+          box.chars > LIMITS.reasoningChars &&
+          box.pre.firstChild !== box.pre.lastChild
+        ) {
+          box.chars -= box.pre.firstChild.data.length;
+          box.pre.firstChild.remove();
+          trimmed = true;
+        }
+        if (trimmed)
+          box.summary.textContent = `${box.label} · earlier reasoning trimmed`;
         scroll();
       }
     }
@@ -2956,5 +3023,6 @@ var ArjunahRenderer = (function () {
     compactNumber,
     userInputMatches,
     flattenMentions,
+    reasoningChunks,
   };
 })();

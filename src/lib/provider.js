@@ -111,13 +111,22 @@ async function providerRequest(
   }
 }
 
-/** Complete `data:` payloads from a bounded server-sent event stream. */
+/**
+ * Complete `data:` payloads from a server-sent event stream. The stream has no
+ * size cap: its wire size runs far ahead of its text, since every token delta
+ * carries its own JSON envelope, and a round already ends at the visitor's
+ * stop button. What is held is bounded instead: one event at a time, each at
+ * most `providerEventBytes`, and the parsers keep only the text they need.
+ */
 async function* providerEvents(response) {
+  const tooLarge = () =>
+    new BrokerError("PROVIDER_ERROR", "A provider stream event was too large.");
   let buffer = "";
   let data = [];
+  let held = 0;
   for await (const chunk of responseChunks(
     response,
-    LIMITS.providerResponseBytes,
+    Infinity,
     "PROVIDER_ERROR",
   )) {
     buffer += chunk;
@@ -130,9 +139,14 @@ async function* providerEvents(response) {
       if (line === "") {
         if (data.length) yield data.join("\n");
         data = [];
-      } else if (line.startsWith("data:"))
+        held = 0;
+      } else if (line.startsWith("data:")) {
+        held += line.length;
+        if (held > LIMITS.providerEventBytes) throw tooLarge();
         data.push(line.slice(5).replace(/^ /, ""));
+      }
     }
+    if (held + buffer.length > LIMITS.providerEventBytes) throw tooLarge();
   }
   // Some OpenAI-compatible local servers omit the final blank line.
   if (buffer.startsWith("data:")) data.push(buffer.slice(5).replace(/^ /, ""));
@@ -141,6 +155,17 @@ async function* providerEvents(response) {
 
 function count(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+/**
+ * Streamed tool arguments past `resultBytes` are only ever rejected by
+ * `repairToolCalls`, so nothing beyond one character over the limit is kept:
+ * that is enough for the repair to report the call as oversized.
+ */
+function appendCapped(current, delta, limit = LIMITS.resultBytes + 1) {
+  return current.length >= limit
+    ? current
+    : `${current}${delta}`.slice(0, limit);
 }
 
 function completionResult(config, body, choice) {
@@ -324,9 +349,16 @@ async function streamedCompletion(config, response, onItem) {
       if (typeof part.id === "string") call.id = part.id;
       if (typeof part.type === "string") call.type = part.type;
       if (typeof part.function?.name === "string")
-        call.function.name += part.function.name;
+        call.function.name = appendCapped(
+          call.function.name,
+          part.function.name,
+          256,
+        );
       if (typeof part.function?.arguments === "string")
-        call.function.arguments += part.function.arguments;
+        call.function.arguments = appendCapped(
+          call.function.arguments,
+          part.function.arguments,
+        );
       calls.set(index, call);
     }
   }
@@ -583,7 +615,10 @@ function anthropicResult(config, body) {
         type: "function",
         function: {
           name: part.name,
-          arguments: JSON.stringify(part.input ?? {}),
+          arguments:
+            typeof part.arguments === "string"
+              ? part.arguments
+              : JSON.stringify(part.input ?? {}),
         },
       });
   }
@@ -690,7 +725,7 @@ async function streamedAnthropic(config, response, onItem) {
             "PROVIDER_ERROR",
             "The provider returned invalid streamed tool calls.",
           );
-        block._json = `${block._json ?? ""}${event.delta.partial_json}`;
+        block._json = appendCapped(block._json ?? "", event.delta.partial_json);
       }
       blocks.set(event.index, block);
     }
@@ -709,14 +744,16 @@ async function streamedAnthropic(config, response, onItem) {
     .sort(([a], [b]) => a - b)
     .map(([, block]) => {
       if (block.type !== "tool_use") return block;
-      let input = block.input ?? {};
-      if (block._json)
-        try {
-          input = JSON.parse(block._json);
-        } catch {
-          input = null;
-        }
-      return { ...block, input };
+      const { _json: json, ...rest } = block;
+      if (!json) return { ...rest, input: rest.input ?? {} };
+      // Arguments that do not parse, including ones cut at the size cap, go
+      // on as the text that arrived. Parsing them to `{}` would run the tool
+      // with no arguments instead of telling the model what went wrong.
+      try {
+        return { ...rest, input: JSON.parse(json) };
+      } catch {
+        return { ...rest, input: undefined, arguments: json };
+      }
     });
   return anthropicResult(config, {
     id,
@@ -913,7 +950,11 @@ async function streamedGemini(config, response, onItem) {
       config,
       await readJson(response, LIMITS.providerResponseBytes, "PROVIDER_ERROR"),
     );
-  const parts = [];
+  // Text is folded as it arrives; only function-call parts are kept whole,
+  // since their args and thought signatures go back to Gemini unchanged.
+  let content = "";
+  let reasoning = "";
+  const calls = [];
   let finishReason = null;
   let usageMetadata = {};
   let sawPayload = false;
@@ -939,16 +980,23 @@ async function streamedGemini(config, response, onItem) {
       finishReason = candidate.finishReason;
     if (event.usageMetadata) usageMetadata = event.usageMetadata;
     for (const part of candidate?.content?.parts ?? []) {
-      parts.push(part);
-      if (typeof part.text === "string" && part.text) {
-        try {
-          onItem({
-            type: part.thought === true ? "reasoning_delta" : "output_delta",
-            text: part.text,
-          });
-        } catch {
-          /* UI callbacks never break provider generation. */
-        }
+      if (part?.functionCall) {
+        if (calls.length <= LIMITS.toolCalls) calls.push(part);
+        continue;
+      }
+      if (typeof part?.text !== "string" || !part.text) continue;
+      const thought = part.thought === true;
+      const room = thought
+        ? LIMITS.reasoningChars - reasoning.length
+        : 120000 - content.length;
+      const text = part.text.slice(0, Math.max(0, room));
+      if (!text) continue;
+      if (thought) reasoning += text;
+      else content += text;
+      try {
+        onItem({ type: thought ? "reasoning_delta" : "output_delta", text });
+      } catch {
+        /* UI callbacks never break provider generation. */
       }
     }
   }
@@ -957,6 +1005,11 @@ async function streamedGemini(config, response, onItem) {
       "PROVIDER_ERROR",
       "The provider stream ended without a response.",
     );
+  const parts = [
+    ...(reasoning ? [{ text: reasoning, thought: true }] : []),
+    ...(content ? [{ text: content }] : []),
+    ...calls,
+  ];
   return geminiResult(config, {
     candidates: [
       { content: { role: "model", parts }, finishReason: finishReason },
@@ -1218,7 +1271,10 @@ async function streamedResponses(config, response, onItem) {
           "PROVIDER_ERROR",
           "The provider returned invalid streamed tool calls.",
         );
-      call.function.arguments += event.delta;
+      call.function.arguments = appendCapped(
+        call.function.arguments,
+        event.delta,
+      );
     }
     if (
       event.type === "response.output_item.done" &&

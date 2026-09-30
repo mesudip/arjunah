@@ -39,6 +39,7 @@ import {
 } from "./lib/desktop.js";
 import { callMcpTool, listMcpTools, clearMcpSessions } from "./lib/mcp.js";
 import { EFFORTS, LIMITS } from "./lib/constants.js";
+import { reasoningBatcher } from "./lib/reasoning.js";
 import { validateArguments } from "./lib/schema.js";
 import {
   validateAccessRequest,
@@ -2269,52 +2270,60 @@ async function hostedChat(
       );
       let liveSteps = 0;
       armStall(round);
-      const result = await generate(
-        config,
-        {
-          messages,
-          tools,
-          ...(options.reasoning ? { reasoning: options.reasoning } : {}),
-        },
-        turn.controller.signal,
-        true,
-        {
-          thread: options.conversationId ?? null,
-          progress: turn.progress
-            ? {
-                id: `${turn.progress}-${round}`.slice(0, 100),
-                onItem: (step) => {
-                  armStall(round);
-                  if (step.type === "command" && step.phase === "end")
-                    liveSteps++;
-                  if (step.type === "phase")
-                    logEvent(
-                      "debug",
-                      config.providerId ?? "desktop",
-                      step.text,
-                    );
-                  emit(turn, {
-                    ...step,
-                    type:
-                      step.type === "output_delta"
-                        ? "output.delta"
-                        : step.type === "reasoning_delta"
-                          ? "agent.reasoning.delta"
-                          : step.type === "reasoning"
-                            ? "agent.reasoning"
-                            : step.type === "thinking"
-                              ? "agent.thinking"
-                              : step.type === "phase"
-                                ? "agent.phase"
-                                : "agent.step",
-                    round,
-                    provider: config.providerName,
-                  });
-                },
-              }
-            : null,
-        },
+      const activity = reasoningBatcher((step) =>
+        emit(turn, {
+          ...step,
+          type:
+            step.type === "output_delta"
+              ? "output.delta"
+              : step.type === "reasoning_delta"
+                ? "agent.reasoning.delta"
+                : step.type === "reasoning"
+                  ? "agent.reasoning"
+                  : step.type === "thinking"
+                    ? "agent.thinking"
+                    : step.type === "phase"
+                      ? "agent.phase"
+                      : "agent.step",
+          round,
+          provider: config.providerName,
+        }),
       );
+      let result;
+      try {
+        result = await generate(
+          config,
+          {
+            messages,
+            tools,
+            ...(options.reasoning ? { reasoning: options.reasoning } : {}),
+          },
+          turn.controller.signal,
+          true,
+          {
+            thread: options.conversationId ?? null,
+            progress: turn.progress
+              ? {
+                  id: `${turn.progress}-${round}`.slice(0, 100),
+                  onItem: (step) => {
+                    armStall(round);
+                    if (step.type === "command" && step.phase === "end")
+                      liveSteps++;
+                    if (step.type === "phase")
+                      logEvent(
+                        "debug",
+                        config.providerId ?? "desktop",
+                        step.text,
+                      );
+                    activity.push(step);
+                  },
+                }
+              : null,
+          },
+        );
+      } finally {
+        activity.flush();
+      }
       clearTimeout(stallTimer);
       stallTimer = 0;
       await guard(turn, required, item.resources);

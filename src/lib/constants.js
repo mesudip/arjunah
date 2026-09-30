@@ -44,6 +44,14 @@ export const LIMITS = Object.freeze({
   imageChars: 2_000_000,
   requestBytes: 12_000_000,
   providerResponseBytes: 2_000_000,
+  // A streamed response has no total cap, since every token carries its own
+  // JSON envelope. Each event is parsed and dropped, so only one event is ever
+  // held at a time, and this bounds that one (a finished image can be large).
+  providerEventBytes: 8_000_000,
+  // Thinking arrives a token at a time. The background merges it for this long
+  // before one message crosses to the widget, instead of one per token.
+  reasoningBatchMs: 250,
+  reasoningBatchChars: 4_000,
   mcpResponseBytes: 1_000_000,
   schemaBytes: 32_768,
   toolCalls: 32,

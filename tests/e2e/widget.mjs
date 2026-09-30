@@ -234,6 +234,12 @@ const server = createServer(async (request, response) => {
     // it as the live turn label instead of a bare spinner (SPEC 14.3).
     sse(response, "agent.phase", { text: "Reserving the room…" });
     if (state.turns === 2) {
+      // Thinking streamed a token at a time is drawn in chunks of at most
+      // fifty words; the word split across two tokens is counted once.
+      for (let index = 0; index < 120; index++)
+        sse(response, "reasoning.delta", {
+          text: index === 7 ? " sp" : index === 8 ? "lit" : ` w${index}`,
+        });
       await new Promise((wait) => setTimeout(wait, 400));
       // A quiet round says so instead of failing: the turn keeps running, the
       // visitor keeps the stop control, and the next event takes the notice
@@ -351,6 +357,22 @@ try {
   await waitFor(
     `[...root.querySelectorAll(".msg.user")].some((m) => m.textContent.includes("Book the Lisbon trip"))`,
     "the visible message action",
+  );
+  await waitFor(
+    `root.querySelector(".activity.live details.reason pre")?.textContent.includes("w119")`,
+    "the streamed reasoning",
+  );
+  assert.deepEqual(
+    await shadow(
+      `return [...root.querySelector(".activity.live details.reason pre").childNodes].map((node) => node.data.split(/\\s+/).filter(Boolean).length);`,
+    ),
+    [50, 50, 19],
+  );
+  assert.match(
+    await shadow(
+      `return root.querySelector(".activity.live details.reason pre").textContent;`,
+    ),
+    / w6 split w9 /,
   );
   // The wait notice: the turn is still live, still spinning, and the stop
   // control is still there, because nothing was cancelled.

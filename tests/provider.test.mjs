@@ -95,6 +95,175 @@ test("provider adapter aggregates fragmented SSE and emits answer deltas", async
   ]);
 });
 
+test("provider stream has no size cap", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+  // ~3 MB of envelopes around a short answer: past the 2 MB single-body cap.
+  const padding = "x".repeat(300);
+  const delta = `data: ${JSON.stringify({ id: "long", pad: padding, choices: [{ delta: { content: "a" } }] })}\n\n`;
+  const encoder = new TextEncoder();
+  const events = 10_000;
+  globalThis.fetch = async () =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          for (let index = 0; index < events; index += 1)
+            controller.enqueue(encoder.encode(delta));
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`,
+            ),
+          );
+          controller.close();
+        },
+      }),
+      { headers: { "Content-Type": "text/event-stream" } },
+    );
+  const output = await generate(
+    { baseUrl: "https://api.openai.com/v1", model: "demo", apiKey: "key" },
+    { messages: [{ role: "user", content: "hi" }] },
+    undefined,
+    true,
+    { progress: { onItem() {} } },
+  );
+  assert.equal(output.message.content.length, events);
+
+  // One event past the single-body cap, like a completed event carrying a
+  // generated image, is not rejected either.
+  const big = "b".repeat(2_500_000);
+  globalThis.fetch = async () =>
+    new Response(
+      `data: ${JSON.stringify({ choices: [{ delta: { content: big }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`,
+      { headers: { "Content-Type": "text/event-stream" } },
+    );
+  const single = await generate(
+    { baseUrl: "https://api.openai.com/v1", model: "demo", apiKey: "key" },
+    { messages: [{ role: "user", content: "hi" }] },
+    undefined,
+    true,
+    { progress: { onItem() {} } },
+  );
+  assert.ok(single.message.content.length > 0);
+});
+
+test("provider stream holds one bounded event, not the whole stream", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+  const config = {
+    baseUrl: "https://api.openai.com/v1",
+    model: "demo",
+    apiKey: "key",
+  };
+  const request = { messages: [{ role: "user", content: "hi" }] };
+  // A line that never ends is refused once it passes the per-event cap
+  // instead of growing until the service worker runs out of memory.
+  globalThis.fetch = async () =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          const block = new TextEncoder().encode("x".repeat(1_000_000));
+          for (let index = 0; index < 9; index += 1) controller.enqueue(block);
+          controller.close();
+        },
+      }),
+      { headers: { "Content-Type": "text/event-stream" } },
+    );
+  await assert.rejects(
+    generate(config, request, undefined, true, { progress: { onItem() {} } }),
+    { code: "PROVIDER_ERROR", message: /too large/ },
+  );
+
+  // Streamed tool arguments stop growing just past the size repair accepts,
+  // and the call is reported to the model as oversized rather than run.
+  const piece = JSON.stringify({
+    choices: [
+      {
+        delta: {
+          tool_calls: [{ index: 0, function: { arguments: "a".repeat(8000) } }],
+        },
+      },
+    ],
+  });
+  globalThis.fetch = async () =>
+    new Response(
+      [
+        `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", type: "function", function: { name: "site__lookup", arguments: "" } }] } }] })}\n\n`,
+        ...Array.from({ length: 100 }, () => `data: ${piece}\n\n`),
+        `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls" }] })}\n\n`,
+        "data: [DONE]\n\n",
+      ].join(""),
+      { headers: { "Content-Type": "text/event-stream" } },
+    );
+  const oversized = await generate(
+    config,
+    {
+      ...request,
+      tools: [{ name: "site__lookup", inputSchema: { type: "object" } }],
+    },
+    undefined,
+    true,
+    { progress: { onItem() {} } },
+  );
+  assert.equal(oversized.message.toolCalls[0].arguments, "{}");
+  assert.match(oversized.rejectedToolCalls.get("c1"), /character limit/);
+});
+
+test("Anthropic arguments that do not parse reach the model as themselves", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+  globalThis.fetch = async () =>
+    new Response(
+      [
+        {
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "tool_use",
+            id: "cut",
+            name: "site__lookup",
+            input: {},
+          },
+        },
+        {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "input_json_delta", partial_json: '{"id":' },
+        },
+        { type: "message_delta", delta: { stop_reason: "tool_use" } },
+      ]
+        .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+        .join(""),
+      { headers: { "Content-Type": "text/event-stream" } },
+    );
+  const result = await generate(
+    {
+      kind: "opencode",
+      providerId: "opencode",
+      protocol: "anthropic",
+      baseUrl: "https://opencode.ai/zen/v1",
+      model: "claude-sonnet-4-6",
+      apiKey: "zen-key",
+      capabilities: { tools: true, vision: false, reasoning: true },
+    },
+    {
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ name: "site__lookup", inputSchema: { type: "object" } }],
+    },
+    undefined,
+    true,
+    { progress: { onItem() {} } },
+  );
+  // Parsing to `{}` would run the tool with no arguments; the broken text is
+  // what the tool loop reports as invalid instead.
+  assert.equal(result.message.toolCalls[0].arguments, '{"id":');
+});
+
 test("provider adapter assembles streamed tool-call arguments", async (t) => {
   const original = globalThis.fetch;
   t.after(() => {
