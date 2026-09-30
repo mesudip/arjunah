@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 const CODES = new Set([
   "INVALID_REQUEST",
   "NOT_SUPPORTED",

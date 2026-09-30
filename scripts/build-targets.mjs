@@ -22,6 +22,10 @@ function stage(name, manifestPath) {
   const destination = resolve(dist, `${name}-unpacked`);
   rmSync(destination, { recursive: true, force: true });
   cpSync(source, destination, { recursive: true });
+  // The extension is MPL-2.0 except the files it shares with arjunah-widget,
+  // which are MIT, so the archive carries both texts.
+  for (const license of ["LICENSE", "LICENSE-MIT"])
+    cpSync(resolve(root, license), resolve(destination, license));
   if (manifestPath)
     writeFileSync(
       resolve(destination, "manifest.json"),

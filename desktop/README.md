@@ -27,4 +27,4 @@ What it does and does not do:
 
 Provider states and how to fix them, T3 Code as a model catalog, and the rest of the desktop documentation live in the repository's `docs/DESKTOP.md`; installing the extension itself is in `docs/INSTALL.md`. Everything a person sees says अर्जुनः; code and packages use `arjunah`.
 
-License: MIT.
+License: MPL-2.0. Using it unmodified carries no obligations; changes to its files must be published under the same license.

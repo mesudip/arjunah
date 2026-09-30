@@ -7,7 +7,7 @@
     "url": "git+https://github.com/mesudip/arjunah.git",
     "directory": "desktop"
   },
-  "license": "MIT",
+  "license": "MPL-2.0",
   "type": "module",
   "bin": {
     "arjunah-desktop": "bin/arjunah-desktop.mjs"

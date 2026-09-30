@@ -1,5 +1,6 @@
 /**
  * अर्जुनः renderer core (SPEC 8.1).
+ * SPDX-License-Identifier: MIT
  *
  * This is the chat surface itself: transcript, activity feed, transcript cards,
  * tool progress, the thread panel and the composer. It is deliberately free of

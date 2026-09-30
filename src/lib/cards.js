@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { BrokerError } from "./errors.js";
 import { LIMITS } from "./constants.js";
 

@@ -40,7 +40,7 @@
     "selenium-webdriver": "^4.35.0",
     "typescript": "^5.9.0"
   },
-  "license": "MIT",
+  "license": "MPL-2.0",
   "engines": {
     "node": ">=22.22.0"
   },

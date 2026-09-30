@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { BrokerError } from "./errors.js";
 
 // Deliberately bounded JSON Schema subset; unsupported assertions are rejected,

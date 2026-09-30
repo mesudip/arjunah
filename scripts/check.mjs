@@ -149,6 +149,22 @@ if (!desktopServer.includes(`RELEASE_VERSION = "${pkg.version}"`))
   throw new Error(
     `desktop/lib/server.mjs RELEASE_VERSION must be "${pkg.version}".`,
   );
+// arjunah-widget is MIT, but it is built from extension sources, which are
+// MPL-2.0 by default. Every file it copies must be marked MIT.
+for (const path of [
+  "src/renderer/core.js",
+  ...["cards", "errors", "constants", "schema"].map((f) => `src/lib/${f}.js`),
+])
+  if (!readFileSync(path, "utf8").includes("SPDX-License-Identifier: MIT"))
+    throw new Error(`${path} ships in arjunah-widget and must stay MIT.`);
+for (const [path, license] of [
+  ["package.json", "MPL-2.0"],
+  ["desktop/package.json", "MPL-2.0"],
+  ["packages/sdk/package.json", "MIT"],
+  ["packages/widget/package.json", "MIT"],
+])
+  if (JSON.parse(readFileSync(path, "utf8")).license !== license)
+    throw new Error(`${path} license must be ${license}.`);
 // The widget package must publish the very renderer the extension loads.
 const widgetRenderer = "packages/widget/dist/renderer.js";
 try {
