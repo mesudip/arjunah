@@ -1,5 +1,10 @@
 # Project progress
 
+## 2026-09-30 — 1.0.0-beta.1 released
+
+- Tagged `v1.0.0-beta.1` at `d7e1ec1`, which carries the MPL-2.0 relicensing of the extension and desktop companion and the streamed-thinking change below. The publish job uploaded both packages at 13:06 UTC with provenance under the `beta` dist-tag; npm exposed the versions at 13:37 and the tag at 13:45, past the workflow's 10-minute verification, so the first run failed with the GitHub release skipped. Rerunning the failed jobs skipped the already-published versions, verified both, and created the pre-release with `arjunah-chrome-v1.0.0-beta.1.zip` and `arjunah-firefox-v1.0.0-beta.1.xpi`.
+- npm `latest` still points at `1.0.0-alpha.1` on both packages; moving it needs a maintainer login.
+
 ## 2026-09-30 — streamed thinking merged into chunks; stream memory bounded per event
 
 - **A long answer no longer fails at 2 MB.** Every streamed token carries its own JSON envelope, so a reasoning model's wire size passed the 2,000,000-byte response cap long before its text did. Streams now have no total cap. What is held is bounded instead: the SSE parser keeps one event at a time and refuses one over `providerEventBytes` (8,000,000), which also stops a line that never ends. Answer and reasoning text keep their existing limits.
