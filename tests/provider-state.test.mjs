@@ -633,6 +633,158 @@ test("revoking one site from settings, or all of them, deletes their state", asy
   assert.equal(b.providerState.records.size, 0);
 });
 
+test("settings report stored state from index keys and clearing it rotates the install key", async (t) => {
+  const b = await zen(t);
+  b.sessions.set(2, { origin: "https://other.test", session: "session-2" });
+  const otherSender = b.sender("https://other.test", 2);
+  await b.approve(
+    ["models.list", "models.generate", "models.catalog"],
+    {},
+    otherSender,
+  );
+  const ids = [];
+  const firsts = [];
+  for (const sender of [b.sender(), otherSender]) {
+    anthropicTurn(b);
+    const id = await conversation(b, sender);
+    ids.push(id);
+    firsts.push(
+      await b.ok(
+        "models.generate",
+        { model: MODELS.anthropic, conversationId: id, messages: [ask], tools },
+        sender,
+      ),
+    );
+  }
+  // A one-off completion's state is keyed by its document, not by an id.
+  anthropicTurn(b);
+  const oneOff = await b.ok("models.generate", {
+    model: MODELS.anthropic,
+    messages: [ask],
+    tools,
+  });
+  assert.equal(b.providerState.records.size, 3);
+  const sizes = [...b.providerState.records.values()].map(
+    (record) => record.bytes,
+  );
+  const report = await b.ok("grants.storedState", {}, b.extension);
+  assert.equal(report.entries, 3);
+  assert.equal(
+    report.bytes,
+    sizes.reduce((sum, bytes) => sum + bytes, 0),
+  );
+  assert.equal(report.origins["https://site.test"].entries, 2);
+  assert.equal(report.origins["https://other.test"].entries, 1);
+  assert.equal(report.threads, 0);
+  assert.equal(
+    JSON.stringify(report).includes(SIGNATURE),
+    false,
+    "the report never carries stored state",
+  );
+
+  // Settings only: neither a page nor the popup may read or clear it.
+  for (const method of ["grants.storedState", "grants.clearState"]) {
+    assert.equal(
+      (await b.call(method, {})).error.code,
+      "PERMISSION_REQUIRED",
+      `${method} from a page`,
+    );
+    assert.equal(
+      (
+        await b.call(
+          method,
+          {},
+          {
+            url: "chrome-extension://test/popup.html",
+          },
+        )
+      ).error.code,
+      "PERMISSION_REQUIRED",
+      `${method} from the popup`,
+    );
+    assert.equal(
+      (
+        await b.call(
+          method,
+          {},
+          {
+            url: "https://site.test/options.html",
+            frameId: 0,
+            tab: { id: 1, url: "https://site.test/options.html" },
+          },
+        )
+      ).error.code,
+      "PERMISSION_REQUIRED",
+      `${method} from a page named like the options page`,
+    );
+  }
+  assert.equal(
+    b.providerState.records.size,
+    3,
+    "refused calls cleared nothing",
+  );
+
+  const key = b.store.installKey;
+  const cleared = await b.ok("grants.clearState", {}, b.extension);
+  assert.deepEqual(cleared.cleared, {
+    entries: 3,
+    bytes: report.bytes,
+    threads: 0,
+  });
+  assert.equal(cleared.entries, 0);
+  assert.equal(b.providerState.records.size, 0);
+  assert.match(b.store.installKey, /^[A-Za-z0-9_-]{43}$/);
+  assert.notEqual(b.store.installKey, key, "the install key was rotated");
+  // Grants and provider keys are untouched.
+  assert.ok(b.store.grants["https://site.test"]);
+  assert.ok(b.store.grants["https://other.test"]);
+  assert.equal(b.store.opencode.apiKey, "zen-secret");
+
+  // Every id minted before is refused, for every use, on every origin.
+  const sent = b.requests.length;
+  for (const [index, sender] of [b.sender(), otherSender].entries()) {
+    for (const method of ["conversations.open", "conversations.release"])
+      assert.equal(
+        (await b.call(method, { id: ids[index] }, sender)).error.code,
+        "INVALID_REQUEST",
+        `${method} after clearing`,
+      );
+    assert.equal(
+      (
+        await b.call(
+          "models.generate",
+          {
+            model: MODELS.anthropic,
+            conversationId: ids[index],
+            messages: continued(firsts[index]),
+            tools,
+          },
+          sender,
+        )
+      ).error.code,
+      "INVALID_REQUEST",
+    );
+  }
+  assert.equal(b.requests.length, sent, "no provider request for an old id");
+  // A new conversation works, and the one-off's next round has no state.
+  const fresh = await conversation(b);
+  assert.notEqual(fresh, ids[0]);
+  assert.deepEqual(await b.ok("conversations.open", { id: fresh }), {
+    id: fresh,
+  });
+  const second = await b.ok("models.generate", {
+    model: MODELS.anthropic,
+    messages: continued(oneOff),
+    tools,
+  });
+  assert.equal(second.providerState, "none");
+  // A restarted worker reads the new key, not the old one.
+  await import(`../src/background.js?restart=${crypto.randomUUID()}`);
+  assert.deepEqual(await b.ok("conversations.open", { id: fresh }), {
+    id: fresh,
+  });
+});
+
 test("a one-off completion uses the document as its conversation, which ends with the document", async (t) => {
   const b = await zen(t);
   anthropicTurn(b);
@@ -827,6 +979,38 @@ test("a round aborted by revocation stores nothing", async (t) => {
   assert.equal((await pending).error.code, "PERMISSION_REQUIRED");
   await settle();
   assert.equal(b.providerState.records.size, 0);
+});
+
+test("a round in flight when settings clear stored state ends and stores nothing", async (t) => {
+  const b = await zen(t);
+  const id = await conversation(b);
+  let release;
+  b.hooks.fetch = async () => {
+    await new Promise((resolve) => {
+      release = resolve;
+    });
+    return Response.json({
+      content: [
+        THINKING,
+        { type: "tool_use", id: "toolu_1", name: "get_weather", input: {} },
+      ],
+      stop_reason: "tool_use",
+    });
+  };
+  const pending = b.call("models.generate", {
+    model: MODELS.anthropic,
+    conversationId: id,
+    messages: [ask],
+    tools,
+  });
+  while (!release) await settle();
+  await b.ok("grants.clearState", {}, b.extension);
+  release();
+  assert.equal((await pending).error.code, "PERMISSION_REQUIRED");
+  await settle();
+  assert.equal(b.providerState.records.size, 0);
+  // The grant itself survives: a new conversation works at once.
+  assert.match(await conversation(b), /^[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{22}$/);
 });
 
 test("the hosted loop replays the same state between its own rounds", async (t) => {

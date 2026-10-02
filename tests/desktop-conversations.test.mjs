@@ -182,6 +182,45 @@ test("disable() and revoking end only that origin's threads; revoking all ends e
   assert.deepEqual(state.ended, [myThread, theirThread, myThread]);
 });
 
+test("clearing stored conversation state ends every recorded thread and re-keys thread ids", async (t) => {
+  const { b, state } = await setup(t);
+  b.sessions.set(2, { origin: OTHER, session: "session-2" });
+  await b.approve(["models.list", "models.generate"], {}, b.sender(OTHER, 2));
+  const mine = await b.ok("conversations.create");
+  const theirs = await b.ok("conversations.create", {}, b.sender(OTHER, 2));
+  await b.ok("models.generate", { ...turn("a"), conversationId: mine.id });
+  await b.ok(
+    "models.generate",
+    { ...turn("b"), conversationId: theirs.id },
+    b.sender(OTHER, 2),
+  );
+  const threads = state.generates.map((body) => body.threadId);
+  assert.equal((await b.ok("grants.storedState", {}, b.extension)).threads, 2);
+
+  const result = await b.ok("grants.clearState", {}, b.extension);
+  assert.equal(result.cleared.threads, 2);
+  assert.equal(result.threads, 0, "no thread is recorded any more");
+  await settle();
+  assert.deepEqual([...state.ended].sort(), [...threads].sort());
+
+  // The old ids are refused, and a new conversation's thread is derived
+  // from the new key, so it can never resume an old agent session.
+  assert.equal(
+    (await b.call("models.generate", { ...turn("c"), conversationId: mine.id }))
+      .error.code,
+    "INVALID_REQUEST",
+  );
+  const fresh = await b.ok("conversations.create");
+  await b.ok("models.generate", { ...turn("d"), conversationId: fresh.id });
+  const next = state.generates.at(-1).threadId;
+  assert.equal(next, await expectedThread(b, "https://site.test", fresh.id));
+  assert.equal(threads.includes(next), false);
+  // Revoking afterwards ends only the thread recorded since.
+  await b.ok("grants.clear", {}, b.extension);
+  await settle();
+  assert.deepEqual(state.ended.slice(2), [next]);
+});
+
 test("an agent without thread support runs every round fresh", async (t) => {
   const { b, state } = await setup(t, { supportsThreads: false });
   const { id } = await b.ok("conversations.create");

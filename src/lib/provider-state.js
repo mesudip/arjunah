@@ -189,6 +189,29 @@ export function createProviderStateStore({ backend, now = Date.now } = {}) {
     clearAll() {
       return serial(() => backend.clear(), false);
     },
+    /**
+     * What is kept, for the settings page (SPEC 11.2): entries and bytes in
+     * total and per origin, after the expiry sweep, read from index keys only
+     * so no stored state is loaded to count it.
+     */
+    summary() {
+      return serial(
+        async () => {
+          await sweep(true);
+          const origins = {};
+          let bytes = 0;
+          const all = await backend.allEntries();
+          for (const entry of all) {
+            bytes += entry.bytes;
+            const own = (origins[entry.key[0]] ??= { entries: 0, bytes: 0 });
+            own.entries++;
+            own.bytes += entry.bytes;
+          }
+          return { entries: all.length, bytes, origins };
+        },
+        { entries: 0, bytes: 0, origins: {} },
+      );
+    },
     /** The startup sweep, which does not wait for the access throttle. */
     sweep() {
       return serial(() => sweep(true), false);

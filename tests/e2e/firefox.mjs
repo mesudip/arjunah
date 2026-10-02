@@ -1,15 +1,10 @@
 import { mockProviderExtension } from "../helpers/browser-extension.mjs";
+import { launchFirefox, waitForExtensionOptions } from "../helpers/firefox.mjs";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
-import { Builder, Browser, By, Key, until } from "selenium-webdriver";
-import firefox from "selenium-webdriver/firefox.js";
-import {
-  getInstalledBrowsers,
-  detectBrowserPlatform,
-} from "@puppeteer/browsers";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { By, Key, until } from "selenium-webdriver";
 
 const fixture = readFileSync(resolve("tests/fixtures/site.html"));
 const modelRequests = [];
@@ -172,7 +167,6 @@ const server = createServer(async (request, response) => {
 });
 await new Promise((ready) => server.listen(0, "127.0.0.1", ready));
 const port = server.address().port;
-const firefoxPath = await findFirefox();
 const testExtension = await mockProviderExtension(
   `http://127.0.0.1:${port}/v1`,
   true,
@@ -181,16 +175,9 @@ const addonPath = testExtension.addonPath;
 let driver;
 
 try {
-  const options = new firefox.Options()
-    .setBinary(firefoxPath)
-    .addArguments("-headless");
-  options.setPreference("browser.tabs.warnOnClose", false);
-  options.setPreference("browser.shell.checkDefaultBrowser", false);
-  driver = await new Builder()
-    .forBrowser(Browser.FIREFOX)
-    .setFirefoxOptions(options)
-    .build();
-  const addonId = await driver.installAddon(addonPath, true);
+  const launched = await launchFirefox(addonPath);
+  driver = launched.driver;
+  const { addonId, firefoxPath } = launched;
   assert.equal(addonId, "arjunah@open-web.dev");
 
   const optionsHandle = await waitForExtensionOptions(driver);
@@ -343,10 +330,23 @@ try {
   const settingsTab = (await driver.getAllWindowHandles()).find(
     (handle) => !handlesBefore.includes(handle),
   );
+  const settingsSurface = settingsTab ? "options page" : "toolbar popup";
   if (settingsTab) {
     const pageHandle = await driver.getWindowHandle();
     await driver.switchTo().window(settingsTab);
-    assert.match(await driver.getCurrentUrl(), /options\.html#grants$/);
+    // The options page lands on the asking site's row, outlined.
+    const asking = `http://localhost:${port}`;
+    assert.equal(
+      new URL(await driver.getCurrentUrl()).hash,
+      `#grants:${encodeURIComponent(asking)}`,
+    );
+    await driver.wait(
+      async () =>
+        (await driver.executeScript(
+          "return [...document.querySelectorAll('.grant.asked')].map(r=>r.dataset.origin).join()",
+        )) === asking,
+      10000,
+    );
     await driver.close();
     await driver.switchTo().window(pageHandle);
   }
@@ -560,47 +560,13 @@ try {
   assert.equal(modelRequests.length, beforeNavigation);
 
   console.log(
-    `Firefox E2E passed with ${addonId} on ${firefoxPath} and ${modelRequests.length} provider requests.`,
+    `Firefox E2E passed with ${addonId} on ${firefoxPath} and ${modelRequests.length} provider requests; openSettings() opened the ${settingsSurface}.`,
   );
 } finally {
   if (driver) await driver.quit();
   await testExtension.cleanup();
   server.closeAllConnections();
   await new Promise((closed) => server.close(closed));
-}
-
-async function findFirefox() {
-  if (process.env.FIREFOX_PATH) {
-    if (existsSync(process.env.FIREFOX_PATH)) return process.env.FIREFOX_PATH;
-    throw new Error("FIREFOX_PATH does not exist.");
-  }
-  const cacheDir =
-    process.env.PUPPETEER_CACHE_DIR ?? join(homedir(), ".cache", "puppeteer");
-  const installed = await getInstalledBrowsers({ cacheDir });
-  const candidates = installed.filter(
-    (item) =>
-      item.browser === "firefox" &&
-      item.platform === detectBrowserPlatform() &&
-      existsSync(item.executablePath),
-  );
-  candidates.sort((a, b) =>
-    b.buildId.localeCompare(a.buildId, undefined, { numeric: true }),
-  );
-  if (candidates.length) return candidates[0].executablePath;
-  throw new Error(
-    "Firefox was not found. Run: npx puppeteer browsers install firefox@stable, or set FIREFOX_PATH.",
-  );
-}
-
-async function waitForExtensionOptions(activeDriver) {
-  return activeDriver.wait(async () => {
-    for (const handle of await activeDriver.getAllWindowHandles()) {
-      await activeDriver.switchTo().window(handle);
-      if ((await activeDriver.getCurrentUrl()).startsWith("moz-extension://"))
-        return handle;
-    }
-    return false;
-  }, 10000);
 }
 
 async function start(activeDriver, name, expression) {

@@ -13,6 +13,10 @@ the extension host the chat (level 0), or it enables access and calls the model
 the visitor chose (level 1 or 2). The visitor approves every access request in an
 extension-owned dialog, per exact origin (scheme://host:port).
 
+Levels say only how far the visitor's model reaches. Who runs the conversation
+(the extension, your server, or your page) and who draws it (the extension or
+your page) is a separate choice: see "The five modes" below.
+
 ## Install
 
 ```sh
@@ -158,10 +162,14 @@ keeps one document-memory conversation, as before, and the page never sees it.
 
 ## Without the extension
 
-The same widget is published as arjunah-widget, mounted against your own backend.
-Your server then owns inference, tools, and threads, and there is no wallet: no
-consent, no visitor-chosen model, and your backend sees everything typed. The
-package README and SPEC section 14 have the event stream and routes.
+The same widget is published as arjunah-widget, mounted against your own backend
+(a server, or a page function with backend: { fetch }). Your loop then owns
+inference, tools, and threads, and there is no wallet: no consent, no
+visitor-chosen model, and your backend sees everything typed. The one exception
+is bridged mode (bridge: { arjunah: true }), where the widget relays your loop's
+completions to the visitor's model through an ordinary level 1 or 2 session; see
+mode 4 below. The package README and SPEC section 14 have the event stream and
+routes.
 
 ```sh
 npm install arjunah-widget
@@ -256,9 +264,10 @@ loop: {
 Mount the `arjunah-widget` package against your backend. With `bridge:
 { arjunah: true }` the widget holds a level 1 session and relays `model.client`
 to the visitor's model; without it your backend answers with its own model. See
-SPEC 14 and 14.7 and the package README. A page that relays its server's
-prompts with its own UI says so when it enables access, and consent then shows
-the server wording instead of today's:
+SPEC 14 and 14.7 and the package README. The widget declares the composer for
+you (`"server"` behind `baseUrl`, `"webapp"` behind `fetch`). A page that
+relays its server's prompts with its own UI says so when it enables access, and
+consent then shows the server wording instead of the default page wording:
 
 ```js
 const ai = await window.ai.arjunah.enable({ composer: "server" });
@@ -270,7 +279,10 @@ consent says, and asking again with a different one prompts again.
 ### Mode 5: your page composes and draws
 
 Call `enable()` and `models.generate` (or `models.stream`) from your own UI,
-as in Flows above.
+as in Flows above, or mount `arjunah-widget` with `backend: { fetch }` so its
+renderer draws a loop your page runs, adding `bridge: { arjunah: true }` to
+answer that loop with the visitor's model (the package README's "In-page
+backend").
 
 ## models.generate request and result
 
@@ -437,8 +449,9 @@ says the state is kept.
 On a desktop subscription agent a conversation also keeps the agent's own
 session between turns, so each turn sends the agent only the messages it has
 not seen. release() ends that session too (so does disable()); otherwise the
-companion ends it after ten idle minutes. Plain models.generate always starts a
-fresh agent run.
+companion ends it after ten idle minutes. Plain models.generate keeps no agent
+session between turns: each new turn starts a fresh agent run, and only a tool
+round answered within two minutes resumes the run that asked for it.
 
 ## Errors
 

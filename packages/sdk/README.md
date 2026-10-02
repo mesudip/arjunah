@@ -26,7 +26,8 @@ await registerSite({
 });
 
 // Level 1: your own model calls. enable() asks for level 1 by default and
-// resolves to the session that carries models, providers, context, permissions.
+// resolves to the session that carries models, conversations, providers,
+// context, and permissions.
 try {
   const ai = await enable();
   const { message } = await ai.models.generate({
@@ -43,12 +44,13 @@ What the package exports:
 
 - `getArjunah()`, `isInstalled()`, `waitForArjunah({ timeoutMs })`: find the injected API; the wait covers pages whose script ran before injection and rejects with code `NOT_INSTALLED` after 3 seconds by default.
 - `isEnabled()`, `enable(request?)`, `disable()`: the wallet-style access flow.
+- `openSettings()` (from a click or key handler only) and `onGrantChange(listener)`: open the extension's view of your site, and learn when the visitor changes your grant or site model.
 - `registerSite(manifest)`, `openChat()`: the level 0 surface.
-- `isAIError(error)`, `PROTOCOL_VERSION`, `READY_EVENT`, `CONFLICT_EVENT`.
+- `isAIError(error)`, `PROTOCOL_VERSION`, `READY_EVENT`, `CONFLICT_EVENT`, `GRANT_CHANGE_EVENT`.
 - Every request and result type (`AISiteManifest`, `AIGenerateRequest`, `AIGrant`, `AISession`, and so on), with the protocol's limits in the doc comments.
 
 The package has no runtime dependencies and no model code; the extension is the source of truth. If you only want the types for a page that uses `window.ai.arjunah` directly, install it as a dev dependency.
 
-Integration guide, request bounds, error codes, and traps: `docs/INTEGRATION.md` in the repository. Normative protocol: `SPEC.md` there. Hand `llms.txt` at the repository root to an AI coding assistant to give it the reading order. Everything a person sees says अर्जुनः; code and packages use `arjunah`.
+Integration guide, request bounds, error codes, tool loops with conversations and round streaming, the five ways to split the conversation between the extension, your server, and your page, and traps: `docs/INTEGRATION.md` in the repository. Normative protocol: `SPEC.md` there. Hand `llms.txt` at the repository root to an AI coding assistant to give it the reading order. Everything a person sees says अर्जुनः; code and packages use `arjunah`.
 
 License: MIT.

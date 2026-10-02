@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { broker } from "./helpers/broker.mjs";
+import { grantsHash, originFromHash } from "../src/lib/settings-link.js";
 
 const OTHER = "https://other.test";
 
@@ -217,12 +218,21 @@ test("openSettings opens the popup where allowed, else the options page, at most
   };
   const sender = { ...b.sender(), tab: { ...b.sender().tab, windowId: 3 } };
   assert.equal(await b.ok("ui.openSettings", {}, sender), true);
+  // The options page lands on the asking site's row; the origin is the
+  // sender's, and the page only ever learns `true`.
   assert.deepEqual(opened, [
     [
       "tab",
-      { url: "chrome-extension://test/options.html#grants", windowId: 3 },
+      {
+        url: "chrome-extension://test/options.html#grants:https%3A%2F%2Fsite.test",
+        windowId: 3,
+      },
     ],
   ]);
+  assert.equal(
+    originFromHash(new URL(opened[0][1].url).hash),
+    "https://site.test",
+  );
   // A second click within the second opens nothing more.
   assert.equal(await b.ok("ui.openSettings", {}, sender), true);
   assert.equal(opened.length, 1);
@@ -241,9 +251,19 @@ test("openSettings opens the popup where allowed, else the options page, at most
   chrome.action.openPopup = async () => {
     throw new Error("Not allowed");
   };
+  // A page asking for another site's row cannot: params are ignored.
   const third = { ...sender, tab: { ...sender.tab, id: 4 } };
-  assert.equal(await b.ok("ui.openSettings", {}, third), true);
-  assert.equal(opened.at(-1)[0], "tab");
+  assert.equal(
+    await b.ok("ui.openSettings", { origin: "https://evil.test" }, third),
+    true,
+  );
+  assert.deepEqual(opened.at(-1), [
+    "tab",
+    {
+      url: "chrome-extension://test/options.html#grants:https%3A%2F%2Fsite.test",
+      windowId: 3,
+    },
+  ]);
   // Settings pages and frames are not pages that may ask.
   assert.equal(
     (await b.call("ui.openSettings", {}, { ...sender, frameId: 1 })).error.code,
@@ -264,4 +284,26 @@ test("the content script refuses openSettings without a user gesture before reac
     block.indexOf("PERMISSION_REQUIRED") <
       block.indexOf('runtime("ui.openSettings")'),
   );
+});
+
+test("the options page reads only one exact http(s) origin from a #grants: address", () => {
+  for (const origin of [
+    "https://site.test",
+    "http://127.0.0.1:8080",
+    "https://xn--80ak6aa92e.com",
+  ])
+    assert.equal(originFromHash(grantsHash(origin)), origin);
+  for (const hash of [
+    "",
+    "#grants",
+    "#grants:",
+    "#grants:https%3A%2F%2Fsite.test%2Fpath",
+    "#grants:javascript%3Aalert(1)",
+    "#grants:moz-extension%3A%2F%2Fabc",
+    "#grants:%E0%A4%A",
+    "#grants:https%3A%2F%2FSITE.test",
+    "#other:https%3A%2F%2Fsite.test",
+    null,
+  ])
+    assert.equal(originFromHash(hash), null, String(hash));
 });

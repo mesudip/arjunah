@@ -2,17 +2,34 @@
  * Wallet-mode end-to-end for SPEC section 15: the hosted external loop (modes
  * 2 and 3, a page-registered `loop.fetch` backed by an in-page fake loop),
  * the site's own models answering a mode 1 assistant with no provider
- * configured (15.2), and a mode 1 `requiresApproval` tool the visitor denies
- * (7.8). Everything runs in a real browser with the real extension and a
- * mock provider.
+ * configured (15.2), a mode 1 `requiresApproval` tool the visitor denies
+ * (7.8), and provider-state continuity (5.4) between a loop's own rounds,
+ * kept in the extension's IndexedDB, reported and cleared by the settings
+ * page (11.2). Everything runs in a real browser with the real extension and
+ * a mock provider.
+ *
+ * `node tests/e2e/hosted-loop.mjs` runs Chrome (Puppeteer); `--firefox` runs
+ * the same scenarios in Firefox over the WebDriver harness of firefox.mjs.
+ * Only the browser plumbing differs: Firefox's WebDriver refuses scripts in
+ * extension pages, so its settings steps work the options page's own
+ * controls, and it reads the closed panel through WebDriver's shadow-root
+ * access instead of CDP.
  */
 import { mockProviderExtension } from "../helpers/browser-extension.mjs";
+import { launchFirefox, waitForExtensionOptions } from "../helpers/firefox.mjs";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import puppeteer from "puppeteer";
+import { By, Key } from "selenium-webdriver";
+
+const FIREFOX = process.argv.includes("--firefox");
+const BROWSER = FIREFOX ? "Firefox" : "Chrome";
+// Gemini's signature on a function call, which the visitor's next round must
+// carry back (SPEC 5.4); the page never sees it.
+const GEMINI_SIGNATURE = "CiQBloop-state-signature==";
 
 const READY = `const installed = window.ai?.arjunah
   ? Promise.resolve()
@@ -28,6 +45,7 @@ ${READY}
 const composer = new URLSearchParams(location.search).get("composer") || "server";
 window.loopLog = [];
 window.toolRuns = 0;
+window.stateTurns = 0;
 const waiting = new Map();
 const answered = new Map();
 function answer(route, body) {
@@ -46,6 +64,58 @@ async function runTurn(controller, threadId, body) {
   const send = (type, data) =>
     controller.enqueue(encoder.encode("event: " + type + "\\ndata: " + JSON.stringify(data) + "\\n\\n"));
   const text = typeof body.content === "string" ? body.content : "";
+  if (text.startsWith("state ")) {
+    // SPEC 5.4 through the loop: round 1 asks for a tool; round 2 waits until
+    // the test lets it go, and names the conversation round 1 was answered
+    // under, as a server that stored it with its thread would.
+    const n = ++window.stateTurns;
+    send("turn.start", { turnId: "turn-state-" + n, threadId });
+    const tools = [{
+      name: "get_weather",
+      description: "Weather for a city.",
+      inputSchema: { type: "object", properties: { city: { type: "string" } }, additionalProperties: false },
+    }];
+    const ask = [{ role: "system", content: "LOOP state" }, { role: "user", content: text }];
+    send("model.client", { id: "s1-" + n, request: { messages: ask, tools } });
+    const first = await waitFor("model-results", "s1-" + n);
+    window.stateFirst = first;
+    await new Promise((done) => { window.continueState = done; });
+    const calls = first.result?.message?.toolCalls ?? [];
+    send("model.client", {
+      id: "s2-" + n,
+      ...(first.conversation ? { conversation: first.conversation } : {}),
+      request: {
+        tools,
+        messages: [
+          ...ask,
+          {
+            role: "assistant",
+            content: first.result?.message?.content ?? "",
+            toolCalls: calls.map((call) => ({
+              id: call.id,
+              type: "function",
+              function: { name: call.name, arguments: call.arguments },
+            })),
+          },
+          ...calls.map((call) => ({ role: "tool", toolCallId: call.id, content: '{"tempC":21}' })),
+        ],
+      },
+    });
+    const second = await waitFor("model-results", "s2-" + n);
+    window.stateSecond = second;
+    send("message", {
+      entry: {
+        type: "message",
+        id: "e-state-" + n,
+        role: "assistant",
+        content: "State says: " + (second.result?.message?.content ?? second.error?.code) + " / " + (second.result?.providerState ?? "no result"),
+        createdAt: new Date().toISOString(),
+      },
+    });
+    send("turn.end", { turnId: "turn-state-" + n });
+    controller.close();
+    return;
+  }
   send("turn.start", { turnId: "turn-1", threadId });
   if (text === "slow please") {
     // A round the visitor revokes while it runs: the loop learns of it as a
@@ -178,6 +248,13 @@ window.ready = installed.then(() => window.ai.arjunah.site.register({
 </script></body></html>`;
 
 const modelRequests = [];
+const geminiRequests = [];
+const sse = (response, events) => {
+  response.writeHead(200, { "Content-Type": "text/event-stream" });
+  for (const event of events)
+    response.write(`data: ${JSON.stringify(event)}\n\n`);
+  response.end();
+};
 const server = createServer(async (request, response) => {
   const path = request.url.split("?")[0];
   const page = {
@@ -188,6 +265,74 @@ const server = createServer(async (request, response) => {
   if (page) {
     response.writeHead(200, { "Content-Type": "text/html" });
     return response.end(page);
+  }
+  // OpenCode Zen beside the OpenAI mock: one Gemini model, which keeps a
+  // signature per function call (SPEC 5.4). Loop rounds always stream.
+  if (path === "/zen/v1/models") {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    return response.end(JSON.stringify({ data: [{ id: "gemini-3.1-pro" }] }));
+  }
+  if (path === "/zen/v1/models/gemini-3.1-pro:streamGenerateContent") {
+    let raw = "";
+    for await (const chunk of request) raw += chunk;
+    const payload = JSON.parse(raw);
+    geminiRequests.push(payload);
+    const continuing = payload.contents.some((content) =>
+      content.parts.some((part) => part.functionResponse),
+    );
+    const usage = {
+      promptTokenCount: 9,
+      candidatesTokenCount: 3,
+      totalTokenCount: 12,
+    };
+    return sse(
+      response,
+      continuing
+        ? [
+            {
+              candidates: [
+                {
+                  content: { role: "model", parts: [{ text: "It is 21C." }] },
+                  finishReason: "STOP",
+                },
+              ],
+              usageMetadata: usage,
+            },
+          ]
+        : [
+            {
+              candidates: [
+                {
+                  content: {
+                    role: "model",
+                    parts: [{ text: "Checking the weather.", thought: true }],
+                  },
+                },
+              ],
+            },
+            {
+              candidates: [
+                {
+                  content: {
+                    role: "model",
+                    parts: [
+                      {
+                        thoughtSignature: GEMINI_SIGNATURE,
+                        functionCall: {
+                          id: "g_state",
+                          name: "get_weather",
+                          args: { city: "Kathmandu" },
+                        },
+                      },
+                    ],
+                  },
+                  finishReason: "STOP",
+                },
+              ],
+              usageMetadata: usage,
+            },
+          ],
+    );
   }
   if (path === "/v1/models") {
     response.writeHead(200, { "Content-Type": "application/json" });
@@ -254,17 +399,10 @@ const server = createServer(async (request, response) => {
 });
 await new Promise((done) => server.listen(0, "127.0.0.1", done));
 const port = server.address().port;
-const mock = await mockProviderExtension(`http://127.0.0.1:${port}/v1`);
-const profile = await mkdtemp(join(tmpdir(), "arjunah-loop-profile-"));
-const browser = await puppeteer.launch({
-  headless: true,
-  userDataDir: profile,
-  args: [
-    "--no-sandbox",
-    `--disable-extensions-except=${mock.directory}`,
-    `--load-extension=${mock.directory}`,
-  ],
-});
+const mock = await mockProviderExtension(
+  `http://127.0.0.1:${port}/v1`,
+  FIREFOX,
+);
 
 const errors = [];
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -278,6 +416,8 @@ async function until(check, label, timeout = 30000) {
     await sleep(200);
   }
 }
+// What the summary line of the settings page reads before its first answer.
+const CHECKING = "Checking…";
 
 /** The panel is a closed shadow root; CDP's pierced DOM reaches it. */
 function shadowTools(cdp) {
@@ -321,122 +461,415 @@ function shadowTools(cdp) {
   };
 }
 
-async function openSite(url) {
-  const page = await browser.newPage();
-  page.on("pageerror", (error) => errors.push(`page: ${error.message}`));
-  page.on("console", (message) => {
-    if (message.type() === "error" && !message.text().includes("404"))
-      errors.push(`console: ${message.text()}`);
+/**
+ * Chrome over Puppeteer. Settings calls go straight to the background from
+ * the options page, except the stored-state control, which is clicked.
+ */
+async function chromeBrowser() {
+  const profile = await mkdtemp(join(tmpdir(), "arjunah-loop-profile-"));
+  const browser = await puppeteer.launch({
+    headless: true,
+    userDataDir: profile,
+    args: [
+      "--no-sandbox",
+      `--disable-extensions-except=${mock.directory}`,
+      `--load-extension=${mock.directory}`,
+    ],
   });
-  await page.goto(url);
-  const registered = await page.evaluate(() => window.ready);
-  assert.equal(
-    registered,
-    true,
-    `registration failed: ${await page.evaluate(() => window.registerError)}`,
-  );
-  await page.evaluate(() => window.ai.arjunah.chat.open());
-  await sleep(400);
-  const cdp = await page.createCDPSession();
-  return { page, cdp, dom: shadowTools(cdp) };
+  const close = async () => {
+    await browser.close();
+    await rm(profile, { recursive: true, force: true });
+  };
+  try {
+    const target = await browser.waitForTarget(
+      (item) => item.type() === "service_worker",
+      { timeout: 20000 },
+    );
+    const extensionId = new URL(target.url()).host;
+    const settings = await browser.newPage();
+    await settings.goto(`chrome-extension://${extensionId}/options.html`);
+    const call = async (method, params) => {
+      const reply = await settings.evaluate(
+        (method, params) =>
+          new Promise((done) =>
+            chrome.runtime.sendMessage(
+              { kind: "arjunah", method, params },
+              done,
+            ),
+          ),
+        method,
+        params,
+      );
+      assert.equal(reply.ok, true, JSON.stringify(reply));
+      return reply.result;
+    };
+    // The user works the settings page in front: a background tab gets no
+    // frames, and a click there never lands.
+    const front = async () => {
+      await settings.bringToFront();
+    };
+    return {
+      close,
+      async saveOpenAI() {
+        await call("provider.save", {
+          baseUrl: "https://api.openai.com/v1",
+          model: "gpt-test-model",
+          apiKey: "e2e-secret",
+        });
+      },
+      async saveZen() {
+        return (
+          await call("opencode.save", {
+            baseUrl: "https://opencode.ai/zen/v1",
+            apiKey: "zen-e2e-secret",
+          })
+        ).models;
+      },
+      async useDefault(model) {
+        await call("catalog.default", { model });
+      },
+      async storedSummary(pattern) {
+        await front();
+        await settings.reload();
+        await settings.waitForFunction(
+          (source) =>
+            new RegExp(source).test(
+              document.querySelector("#stored-state-summary")?.textContent ??
+                "",
+            ),
+          { polling: 100 },
+          pattern.source,
+        );
+        return settings.$eval(
+          "#stored-state-summary",
+          (node) => node.textContent,
+        );
+      },
+      async clearStoredState() {
+        await front();
+        await settings.click("#clear-state");
+        await settings.waitForFunction(
+          () => !document.querySelector("#clear-state-confirm").hidden,
+          { polling: 100 },
+        );
+        await settings.click("#clear-state-yes");
+        await settings.waitForFunction(
+          () =>
+            /^Cleared /.test(
+              document.querySelector("#state-status")?.textContent ?? "",
+            ),
+          { polling: 100 },
+        );
+        return settings.$eval("#state-status", (node) => node.textContent);
+      },
+      async openSite(url) {
+        const page = await browser.newPage();
+        page.on("pageerror", (error) => errors.push(`page: ${error.message}`));
+        page.on("console", (message) => {
+          if (message.type() === "error" && !message.text().includes("404"))
+            errors.push(`console: ${message.text()}`);
+        });
+        await page.goto(url);
+        const evaluate = (expression) => page.evaluate(expression);
+        const registered = await evaluate("window.ready");
+        assert.equal(
+          registered,
+          true,
+          `registration failed: ${await evaluate("window.registerError")}`,
+        );
+        await evaluate("window.ai.arjunah.chat.open()");
+        await sleep(400);
+        const cdp = await page.createCDPSession();
+        const dom = shadowTools(cdp);
+        return {
+          evaluate,
+          type: (text) => page.keyboard.type(text),
+          enter: () => page.keyboard.press("Enter"),
+          text: () => dom.text(),
+          // Each pierced read renumbers the nodes, so the button is looked
+          // up right before it is clicked.
+          async click(label) {
+            await dom.click(await dom.button(label));
+          },
+          async focus() {
+            await page.bringToFront();
+            await evaluate("window.ai.arjunah.chat.open()");
+            await sleep(300);
+          },
+          async close() {
+            await cdp.detach();
+            await page.close();
+          },
+        };
+      },
+    };
+  } catch (error) {
+    await close();
+    throw error;
+  }
 }
 
+/**
+ * Firefox over the WebDriver harness of firefox.mjs. Its WebDriver will not
+ * run a script in an extension page ("not supported for privileged browsing
+ * contexts"), so every settings step works the options page's own controls.
+ */
+async function firefoxBrowser() {
+  const { driver } = await launchFirefox(mock.addonPath);
+  const close = () => driver.quit();
+  try {
+    const settingsHandle = await waitForExtensionOptions(driver);
+    const toSettings = () => driver.switchTo().window(settingsHandle);
+    const text = async (id) =>
+      driver.findElement(By.id(id)).getProperty("textContent");
+    const waitText = (id, pattern, label) =>
+      until(async () => pattern.test(await text(id)), label, 20000);
+    return {
+      close,
+      async saveOpenAI() {
+        await toSettings();
+        // The model field is a typable combobox; Tab commits what was typed.
+        const modelBox = await driver.findElement(
+          By.css("#model .combo-input"),
+        );
+        await modelBox.clear();
+        await modelBox.sendKeys("gpt-test-model", Key.TAB);
+        await driver.findElement(By.id("api-key")).sendKeys("e2e-secret");
+        await driver
+          .findElement(By.css("#provider-form button[type=submit]"))
+          .click();
+        await waitText("provider-status", /OpenAI key saved/, "the OpenAI key");
+      },
+      async saveZen() {
+        await toSettings();
+        await driver
+          .findElement(By.id("opencode-api-key"))
+          .sendKeys("zen-e2e-secret");
+        await driver
+          .findElement(By.css("#opencode-form button[type=submit]"))
+          .click();
+        await waitText("opencode-status", /^Saved\./, "the Zen key");
+        const meta = await driver
+          .findElement(
+            By.xpath(
+              "//div[contains(concat(' ',normalize-space(@class),' '),' provider ')][.//strong[text()='OpenCode Zen API key']]//div[contains(@class,'meta')]",
+            ),
+          )
+          .getProperty("textContent");
+        return /(\d+) models?$/.exec(meta)?.[1] === "1"
+          ? ["gemini-3.1-pro"]
+          : meta;
+      },
+      async useDefault(model) {
+        assert.equal(model, "opencode-api/gemini-3.1-pro");
+        await toSettings();
+        // Zen's only model is selected on its card; this makes it the
+        // default. The cards redraw on every state change, so the button is
+        // found again on each try.
+        await until(
+          async () => {
+            try {
+              const use = await driver.findElement(
+                By.xpath(
+                  "//div[contains(concat(' ',normalize-space(@class),' '),' provider ')][.//strong[text()='OpenCode Zen API key']]//button[normalize-space(text())='Use as default']",
+                ),
+              );
+              if (!(await use.isEnabled())) return false;
+              await use.click();
+              return true;
+            } catch {
+              return false;
+            }
+          },
+          "the Zen card's default button",
+          20000,
+        );
+        await waitText("active-status", /^Websites now use/, "the new default");
+      },
+      // Extension pages cannot be reloaded over WebDriver, so this relies on
+      // the options page reading the state again when its tab comes back.
+      async storedSummary(pattern) {
+        await toSettings();
+        await until(
+          async () =>
+            pattern.test(
+              await text("stored-state-summary").catch(() => CHECKING),
+            ),
+          `a stored-state summary matching ${pattern}`,
+          20000,
+        );
+        return text("stored-state-summary");
+      },
+      async clearStoredState() {
+        await toSettings();
+        await driver.findElement(By.id("clear-state")).click();
+        // isDisplayed() is a script, which an extension page refuses.
+        await until(
+          async () =>
+            (await driver
+              .findElement(By.id("clear-state-confirm"))
+              .getProperty("hidden")) === false,
+          "the confirmation",
+          10000,
+        );
+        await driver.findElement(By.id("clear-state-yes")).click();
+        await waitText("state-status", /^Cleared /, "the clear to finish");
+        return text("state-status");
+      },
+      async openSite(url) {
+        await driver.switchTo().newWindow("tab");
+        const handle = await driver.getWindowHandle();
+        await driver.get(url);
+        const evaluate = async (expression) => {
+          await driver.switchTo().window(handle);
+          const reply = await driver.executeAsyncScript(
+            `const done = arguments[arguments.length - 1];
+             Promise.resolve(${expression}).then(
+               (value) => done({ ok: true, value: value ?? null }),
+               (error) => done({ ok: false, error: String(error?.message ?? error) }),
+             );`,
+          );
+          if (!reply.ok) throw new Error(reply.error);
+          return reply.value;
+        };
+        const registered = await evaluate("window.ready");
+        assert.equal(
+          registered,
+          true,
+          `registration failed: ${await evaluate("window.registerError")}`,
+        );
+        await evaluate("window.ai.arjunah.chat.open()");
+        await sleep(400);
+        const root = async () => {
+          await driver.switchTo().window(handle);
+          return (
+            await driver.findElement(By.id("arjunah-extension"))
+          ).getShadowRoot();
+        };
+        return {
+          evaluate,
+          async type(value) {
+            await driver.switchTo().window(handle);
+            await driver.actions().sendKeys(value).perform();
+          },
+          async enter() {
+            await driver.switchTo().window(handle);
+            await driver.actions().sendKeys(Key.ENTER).perform();
+          },
+          // WebDriver hands back elements of a closed root, but not the root
+          // itself, so its text is read from inside through getRootNode().
+          async text() {
+            const [first] = await (await root()).findElements(By.css("*"));
+            return first
+              ? driver.executeScript(
+                  "return arguments[0].getRootNode().textContent",
+                  first,
+                )
+              : "";
+          },
+          async click(label) {
+            for (const button of await (
+              await root()
+            ).findElements(By.css("button")))
+              if ((await button.getProperty("textContent")).trim() === label)
+                return button.click();
+            throw new Error(`no ${label} button in the panel`);
+          },
+          async focus() {
+            await evaluate("window.ai.arjunah.chat.open()");
+            await sleep(300);
+          },
+          async close() {
+            await driver.switchTo().window(handle);
+            await driver.close();
+            await toSettings();
+          },
+        };
+      },
+    };
+  } catch (error) {
+    await close();
+    throw error;
+  }
+}
+
+const browser = FIREFOX ? await firefoxBrowser() : await chromeBrowser();
 const results = [];
 try {
-  const target = await browser.waitForTarget(
-    (item) => item.type() === "service_worker",
-    { timeout: 20000 },
-  );
-  const extensionId = new URL(target.url()).host;
-  const settings = await browser.newPage();
-  await settings.goto(`chrome-extension://${extensionId}/options.html`);
-
   // (b) Mode 1, the site's own models only, and no provider configured: the
   // page's generate answers, including a tool round, and consent says the
   // visitor's AI is not used.
   {
-    const { page, cdp, dom } = await openSite(
+    const site = await browser.openSite(
       `http://localhost:${port}/site-models.html`,
     );
-    await page.keyboard.type("how many in stock?");
-    await page.keyboard.press("Enter");
+    await site.type("how many in stock?");
+    await site.enter();
     await until(
-      async () => /Your AI is not used/.test(await dom.text()),
+      async () => /Your AI is not used/.test(await site.text()),
       "the site-model consent sheet",
     );
-    const consent = await dom.text();
+    const consent = await site.text();
     assert.match(consent, /This site's own model \(Shop model\) answers/);
     assert.doesNotMatch(consent, /No provider is configured yet/);
-    await page.keyboard.press("Enter");
+    await site.enter();
+    // CDP's pierced tree is JSON, where the quotes come escaped.
     await until(
       async () =>
-        /From the shop model: \{\\+"stock\\+":7\}/.test(await dom.text()),
+        /From the shop model: \{\\*"stock\\*":7\}/.test(await site.text()),
       "the site model's answer",
     );
-    const requests = await page.evaluate(() => window.siteRequests);
+    const requests = await site.evaluate("window.siteRequests");
     assert.equal(requests.length, 2, "one round per tool step");
     assert.deepEqual(
       requests[0].tools.map((tool) => tool.name),
       ["site__lookup"],
     );
-    assert.equal(await page.evaluate(() => window.lookups), 1);
+    assert.equal(await site.evaluate("window.lookups"), 1);
     assert.equal(modelRequests.length, 0, "no provider was contacted");
-    await cdp.detach();
-    await page.close();
+    await site.close();
     results.push("site models answered without a provider (2 rounds)");
   }
 
-  const saved = await settings.evaluate(
-    (config) =>
-      new Promise((done) =>
-        chrome.runtime.sendMessage(
-          { kind: "arjunah", method: "provider.save", params: config },
-          done,
-        ),
-      ),
-    {
-      baseUrl: "https://api.openai.com/v1",
-      model: "gpt-test-model",
-      apiKey: "e2e-secret",
-    },
-  );
-  assert.equal(saved.ok, true, JSON.stringify(saved));
+  await browser.saveOpenAI();
 
   // (a) Modes 2 and 3 on one origin: the second composer asks again.
   for (const composer of ["server", "webapp"]) {
     const before = modelRequests.length;
-    const { page, cdp, dom } = await openSite(
+    const site = await browser.openSite(
       `http://127.0.0.1:${port}/loop.html?composer=${composer}`,
     );
-    await page.keyboard.type("plan my trip");
-    await page.keyboard.press("Enter");
+    await site.type("plan my trip");
+    await site.enter();
     const line =
       composer === "server"
         ? /This site's server writes the prompts/
         : /This site's page writes the prompts/;
-    await until(async () => line.test(await dom.text()), `${composer} consent`);
-    const consent = await dom.text();
+    await until(
+      async () => line.test(await site.text()),
+      `${composer} consent`,
+    );
+    const consent = await site.text();
     assert.doesNotMatch(consent, /Full site instructions/);
     assert.match(consent, /Site tool: page_info/);
     assert.match(consent, /Level 1 · Completion/);
-    await page.keyboard.press("Enter");
+    await site.enter();
     // The renderer's prompt names the asking origin; the page source cannot
-    // contain that line. Each pierced read renumbers the nodes, so the button
-    // is looked up right before it is clicked.
+    // contain that line.
     await until(
       async () =>
-        (await dom.text()).includes(`Asked by http://127.0.0.1:${port}`),
+        (await site.text()).includes(`Asked by http://127.0.0.1:${port}`),
       "the loop's approval prompt",
     );
-    await dom.click(await dom.button("Approve"));
+    await site.click("Approve");
     await until(
       async () =>
         /Loop says: Hello from the visitor model \/ approved true/.test(
-          await dom.text(),
+          await site.text(),
         ),
       "the loop's message",
     );
-    const log = await page.evaluate(() => window.loopLog);
+    const log = await site.evaluate("window.loopLog");
     const turn = log.find((item) => /\/turns$/.test(item.path));
     assert.equal(turn.method, "POST");
     if (composer === "webapp") {
@@ -482,13 +915,13 @@ try {
       id: "c1",
       result: { title: "Loop desk" },
     });
-    assert.equal(await page.evaluate(() => window.toolRuns), 1);
+    assert.equal(await site.evaluate("window.toolRuns"), 1);
     const approvalPost = log.find((item) => /approvals$/.test(item.path));
     assert.deepEqual(approvalPost.body, { id: "a1", approved: true });
     const loopRequests = modelRequests.slice(before);
     assert.equal(loopRequests.length, 1, "one provider round for the loop");
     assert.equal(loopRequests[0].messages[0].content, "LOOP system prompt");
-    const panel = await dom.text();
+    const panel = await site.text();
     assert.match(
       panel,
       new RegExp(
@@ -500,26 +933,25 @@ try {
       /e2e-secret/,
       "the credential never reaches the loop",
     );
-    await cdp.detach();
-    await page.close();
+    await site.close();
     results.push(`mode ${composer === "server" ? 2 : 3} loop turn`);
   }
 
   // Revoking the site while a loop's completion runs ends that completion
   // with a section 9 error the loop receives, and nothing else.
   {
-    const { page, cdp, dom } = await openSite(
+    const site = await browser.openSite(
       `http://127.0.0.1:${port}/loop.html?composer=server`,
     );
-    await page.keyboard.type("slow please");
-    await page.keyboard.press("Enter");
+    await site.type("slow please");
+    await site.enter();
     // The grant's composer is now "webapp", so the server's loop asks again.
     await until(
       async () =>
-        /This site's server writes the prompts/.test(await dom.text()),
+        /This site's server writes the prompts/.test(await site.text()),
       "consent after the composer changed",
     );
-    await page.keyboard.press("Enter");
+    await site.enter();
     await until(
       () =>
         modelRequests.some((item) =>
@@ -527,13 +959,11 @@ try {
         ),
       "the slow round to reach the provider",
     );
-    assert.equal(await page.evaluate(() => window.ai.arjunah.disable()), true);
+    assert.equal(await site.evaluate("window.ai.arjunah.disable()"), true);
     const failed = await until(
       () =>
-        page.evaluate(() =>
-          window.loopLog.find(
-            (item) => /model-results$/.test(item.path) && item.body.error,
-          ),
+        site.evaluate(
+          "window.loopLog.find((item) => /model-results$/.test(item.path) && item.body.error)",
         ),
       "the loop to receive the revocation",
     );
@@ -542,12 +972,11 @@ try {
     await until(
       async () =>
         /The visitor's model stopped: PERMISSION_REQUIRED/.test(
-          await dom.text(),
+          await site.text(),
         ),
       "the loop's error in the panel",
     );
-    await cdp.detach();
-    await page.close();
+    await site.close();
     results.push("revocation ended the loop's pending completion");
   }
 
@@ -555,43 +984,151 @@ try {
   // the model is told so as the call's result.
   {
     const before = modelRequests.length;
-    const { page, cdp, dom } = await openSite(
+    const site = await browser.openSite(
       `http://127.0.0.1:${port}/approval.html`,
     );
-    await page.keyboard.type("remove A-1");
-    await page.keyboard.press("Enter");
+    await site.type("remove A-1");
+    await site.enter();
     await until(
       async () =>
-        /This tool asks you before it runs: delete_item/.test(await dom.text()),
+        /This tool asks you before it runs: delete_item/.test(
+          await site.text(),
+        ),
       "the approval disclosure in consent",
     );
-    await page.keyboard.press("Enter");
+    await site.enter();
     await until(
-      async () => /Approval requested/.test(await dom.text()),
+      async () => /Approval requested/.test(await site.text()),
       "the approval prompt",
     );
-    assert.match(await dom.text(), /\\+"sku\\+": \\+"A-1\\+"/);
-    await dom.click(await dom.button("Deny"));
+    assert.match(await site.text(), /\\*"sku\\*": \\*"A-1\\*"/);
+    await site.click("Deny");
     await until(
-      async () => /Understood, nothing was removed\./.test(await dom.text()),
+      async () => /Understood, nothing was removed\./.test(await site.text()),
       "the final answer",
     );
-    assert.equal(await page.evaluate(() => window.deleted), 0);
+    assert.equal(await site.evaluate("window.deleted"), 0);
     const rounds = modelRequests.slice(before);
     assert.equal(rounds.length, 2);
     const toolMessage = rounds[1].messages.find((item) => item.role === "tool");
     assert.match(toolMessage.content, /did not approve/);
-    await cdp.detach();
-    await page.close();
+    await site.close();
     results.push("mode 1 denied approval reached the model as a tool error");
   }
 
+  // (d) Provider-state continuity between a loop's own rounds (SPEC 5.4) on
+  // a Gemini model: round 1's signature waits in the extension's IndexedDB,
+  // which the settings page reports, and goes back on round 2. A second turn
+  // keeps its round-1 state too, until the settings page clears it (11.2):
+  // the loop's next round then names a conversation that no longer verifies,
+  // gets a new one, and nothing is reattached.
+  {
+    assert.deepEqual(await browser.saveZen(), ["gemini-3.1-pro"]);
+    await browser.useDefault("opencode-api/gemini-3.1-pro");
+    await browser.storedSummary(/^Nothing stored\.$/);
+    const site = await browser.openSite(
+      `http://localhost:${port}/loop.html?composer=server`,
+    );
+    const runRoundOne = async (text, consent) => {
+      await site.focus();
+      await site.type(text);
+      await site.enter();
+      if (consent) {
+        await until(
+          async () =>
+            /This site's server writes the prompts/.test(await site.text()),
+          "consent for the Gemini loop",
+        );
+        assert.match(await site.text(), /Level 1 · Completion/);
+        await site.enter();
+      }
+      return until(
+        () => site.evaluate("window.stateFirst"),
+        `round 1 of "${text}"`,
+      );
+    };
+    const finishTurn = async (n) => {
+      await site.evaluate(
+        "(window.stateFirst = null, window.continueState(), true)",
+      );
+      const second = await until(
+        () => site.evaluate("window.stateSecond"),
+        `round 2 of turn ${n}`,
+      );
+      await site.evaluate("(window.stateSecond = null, true)");
+      return second;
+    };
+
+    const first = await runRoundOne("state one", true);
+    assert.deepEqual(
+      first.result.message.toolCalls.map((call) => call.id),
+      ["g_state"],
+    );
+    assert.equal(first.result.providerState, "none");
+    assert.equal(
+      JSON.stringify(first).includes(GEMINI_SIGNATURE),
+      false,
+      "provider state never reaches the loop",
+    );
+    // Read by the settings page from the index keys of the background's
+    // IndexedDB store.
+    await browser.storedSummary(
+      /^1 provider-state entry \(\d+ bytes\) for 1 site$/,
+    );
+    const second = await finishTurn(1);
+    assert.equal(second.result.providerState, "reused");
+    assert.equal(second.result.message.content, "It is 21C.");
+    assert.equal(second.conversation, first.conversation);
+    const replayed = geminiRequests
+      .at(-1)
+      .contents.flatMap((content) => content.parts)
+      .find((part) => part.functionCall);
+    assert.equal(replayed.thoughtSignature, GEMINI_SIGNATURE);
+    await until(
+      async () => /State says: It is 21C\. \/ reused/.test(await site.text()),
+      "turn 1's message",
+    );
+    // The final round ended the turn and its state.
+    await browser.storedSummary(/^Nothing stored\.$/);
+
+    const again = await runRoundOne("state two", false);
+    assert.equal(again.conversation, first.conversation, "one per thread");
+    await browser.storedSummary(/^1 provider-state entry /);
+    assert.match(
+      await browser.clearStoredState(),
+      /^Cleared 1 provider-state entry and 0 desktop agent threads\./,
+    );
+    await browser.storedSummary(/^Nothing stored\.$/);
+    const after = await finishTurn(2);
+    assert.equal(after.result.providerState, "none");
+    assert.equal(after.result.message.content, "It is 21C.");
+    assert.match(after.conversation, /^[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{22}$/);
+    assert.notEqual(
+      after.conversation,
+      first.conversation,
+      "the cleared conversation was replaced",
+    );
+    const resent = geminiRequests
+      .at(-1)
+      .contents.flatMap((content) => content.parts)
+      .find((part) => part.functionCall);
+    assert.equal(resent.thoughtSignature, undefined);
+    await until(
+      async () => /State says: It is 21C\. \/ none/.test(await site.text()),
+      "turn 2's message",
+    );
+    assert.equal(geminiRequests.length, 4);
+    await site.close();
+    results.push(
+      "loop rounds reused IndexedDB provider state; clearing it in settings replaced the conversation",
+    );
+  }
+
   assert.deepEqual(errors, []);
-  console.log(`Hosted loop E2E passed: ${results.join("; ")}.`);
+  console.log(`Hosted loop E2E (${BROWSER}) passed: ${results.join("; ")}.`);
 } finally {
   await browser.close();
   await mock.cleanup();
-  await rm(profile, { recursive: true, force: true });
   server.closeAllConnections();
   server.close();
 }

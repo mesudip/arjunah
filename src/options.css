@@ -286,7 +286,53 @@ form {
 }
 .grant .btn {
   grid-column: 2;
-  grid-row: 1 / span 2;
+  grid-row: 1 / span 3;
+}
+/* The site a page's openSettings() asked about (options.html#grants:<origin>). */
+.grant.asked {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.grant:focus {
+  outline: none;
+}
+
+/* Stored conversation state */
+.stored-state {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 12px;
+  align-items: start;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.stored-state h3 {
+  font-size: 14px;
+}
+.stored-state .help {
+  margin: 4px 0 6px;
+}
+.stored-state .detail {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.confirm {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--danger);
+  border-radius: 12px;
+  background: var(--danger-soft);
+  display: grid;
+  gap: 10px;
+}
+.confirm[hidden] {
+  display: none;
+}
+@media (max-width: 560px) {
+  .stored-state {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* Diagnostics */

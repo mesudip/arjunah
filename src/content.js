@@ -102,6 +102,11 @@
       statePort = port;
       port.onMessage.addListener((message) => {
         if (message?.kind !== "arjunah-state") return;
+        // The user cleared stored conversation state (SPEC 11.2): the ids
+        // this document holds for its loop threads no longer verify, so the
+        // next round of each thread creates a new conversation.
+        if (message.reason === "conversations:cleared")
+          loopConversations.clear();
         clearTimeout(stateRefreshTimer);
         stateRefreshTimer = setTimeout(() => void refreshSettings(), 50);
         // The usage ledger moves on every reply and never changes a grant.
@@ -2005,6 +2010,9 @@
         loopConversations.set(threadId, opened.id);
         return opened.id;
       }
+      // Refused: the id is not one this install can verify any more.
+      if (loopConversations.get(threadId) === requested)
+        loopConversations.delete(threadId);
     }
     const known = loopConversations.get(threadId);
     if (known) return known;

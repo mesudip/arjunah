@@ -327,7 +327,8 @@
         </div>
         <p class="help">
           Grants are exact-origin permissions with an access level and the model
-          you chose for that site. Revoking forces the site to ask again.
+          you chose for that site. Revoking forces the site to ask again and
+          deletes the conversation state stored for it.
         </p>
         <div id="grants" class="grants"></div>
         <div class="actions">
@@ -336,6 +337,39 @@
           </button>
         </div>
         <p id="grant-status" class="status" role="status"></p>
+        <div class="stored-state">
+          <div>
+            <h3>Stored conversation state</h3>
+            <p class="help">
+              Provider state kept between the rounds of a site's own tool turns,
+              and the desktop agent sessions those conversations resumed.
+              Clearing it ends every conversation a site holds: sites keep their
+              grants, but must start a new conversation.
+            </p>
+            <p id="stored-state-summary" class="detail">Checking…</p>
+          </div>
+          <button type="button" id="clear-state" class="btn btn-danger">
+            Clear stored conversation state
+          </button>
+        </div>
+        <div
+          id="clear-state-confirm"
+          class="confirm"
+          role="alertdialog"
+          aria-labelledby="clear-state-question"
+          hidden
+        >
+          <p id="clear-state-question"></p>
+          <div class="actions">
+            <button type="button" id="clear-state-cancel" class="btn btn-ghost">
+              Cancel
+            </button>
+            <button type="button" id="clear-state-yes" class="btn btn-danger">
+              Delete and end conversations
+            </button>
+          </div>
+        </div>
+        <p id="state-status" class="status" role="status"></p>
       </section>
 
       <section class="card" id="logs-section">

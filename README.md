@@ -63,7 +63,7 @@ const { message } = await ai.models.generate({
 });
 ```
 
-Read [docs/INTEGRATION.md](docs/INTEGRATION.md) for the whole API on one screen, the three access levels, request bounds, error codes, and the traps. The normative contract is [SPEC.md](SPEC.md); the SDK's types are in [packages/sdk/src/types.ts](packages/sdk/src/types.ts). The [hosted playgrounds](https://mesudip.github.io/arjunah/) feature a level-0 Paint studio and preserve the original trip planner; both also run locally with `npm run demo`.
+A site that runs its own conversation loop, on its server or in its page, can still answer it with the visitor's model; [The five modes](docs/INTEGRATION.md#the-five-modes) shows each split. Read [docs/INTEGRATION.md](docs/INTEGRATION.md) for the whole API on one screen, the three access levels, request bounds, error codes, and the traps. The normative contract is [SPEC.md](SPEC.md); the SDK's types are in [packages/sdk/src/types.ts](packages/sdk/src/types.ts). The [hosted playgrounds](https://mesudip.github.io/arjunah/) feature a level-0 Paint studio and preserve the original trip planner; both also run locally with `npm run demo`.
 
 **Using an AI coding assistant?** Point it at [llms.txt](llms.txt), which links the integration guide, the types, and the spec in the order an agent should read them.
 
@@ -88,7 +88,7 @@ The repository is an npm workspace: the extension in `src/`, the shared chat ren
 
 ## Status
 
-1.0.0-alpha.3. Chrome Manifest V3 and Firefox Manifest V3 are tested targets; the desktop app has been exercised on macOS with OpenCode, Codex, and Claude Code and on the fake-agent end-to-end suite. Linux and Windows autostart are implemented and unit-tested but not yet exercised on real machines. This is not an independent security certification; see [docs/REMEDIATION.md](docs/REMEDIATION.md) for the audit findings and their regression tests.
+1.0.0-beta.2. Chrome Manifest V3 and Firefox Manifest V3 are tested targets. The automated suites run against mock providers and fake desktop agents. The self-hosted Ollama provider has also passed its browser suite against a real Ollama server, but nothing else new in this release (conversations and provider state, round streaming, `require`, `toolChoice`, the hosted external loop, the site's own models, bridged mode) has been exercised against a live provider yet. Earlier releases ran the desktop app on macOS with OpenCode, Codex, and Claude Code. Linux and Windows autostart are implemented and unit-tested but not yet exercised on real machines. This is not an independent security certification; see [docs/REMEDIATION.md](docs/REMEDIATION.md) for the audit findings and their regression tests.
 
 ## License
 

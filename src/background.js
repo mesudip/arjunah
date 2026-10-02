@@ -19,6 +19,7 @@ import {
   verifyConversationId,
 } from "./lib/conversations.js";
 import { providerIcon } from "./lib/provider-icons.js";
+import { grantsHash } from "./lib/settings-link.js";
 import {
   buildCatalog,
   activeModelId,
@@ -660,10 +661,18 @@ async function handle(method, params, sender) {
         throw new BrokerError("INVALID_REQUEST", "Invalid grant origin.");
       return revokeGrant(params.origin);
     }
+    if (method === "grants.storedState") {
+      assertOptionsPage(sender);
+      return storedConversationState();
+    }
+    if (method === "grants.clearState") {
+      assertOptionsPage(sender);
+      return clearConversationState();
+    }
     if (method === "grants.clear") {
       invalidate();
       clearMcpSessions();
-      endDesktopThreads(() => true);
+      void endDesktopThreads(() => true);
       const cleared = providerState.clearAll();
       return mutateGrants(async () => {
         await chrome.storage.local.remove(STORAGE.grants);
@@ -1417,6 +1426,53 @@ function installKey() {
     throw error;
   }));
 }
+/**
+ * A new install key (SPEC 11.2): every conversation id and desktop thread id
+ * minted under the old one stops verifying. Requests already waiting on the
+ * old key's read finish with it, so the caller ends those first.
+ */
+function rotateInstallKey() {
+  const raw = crypto.getRandomValues(new Uint8Array(INSTALL_KEY_BYTES));
+  const read = (async () => {
+    await chrome.storage.local.set({ [INSTALL_KEY]: base64url(raw) });
+    return importInstallKey(raw);
+  })();
+  installKeyRead = read;
+  read.catch(() => {
+    if (installKeyRead === read) installKeyRead = null;
+  });
+  return read;
+}
+/** What the settings page reports as stored conversation state. */
+async function storedConversationState() {
+  const summary = await providerState.summary();
+  await readDesktopThreads().catch(() => {});
+  return { ...summary, threads: desktopThreads.size };
+}
+/**
+ * "Clear stored conversation state" on the settings page (SPEC 11.2): every
+ * provider-state entry, every recorded desktop agent thread, and the install
+ * key, so every conversation id a page holds is refused from now on and the
+ * page creates a new conversation. Page rounds in flight end first, as on
+ * revocation, so none stores state under an id that no longer verifies.
+ */
+async function clearConversationState() {
+  invalidate((turn) => turn.kind === "direct");
+  const before = await storedConversationState();
+  const threads = await endDesktopThreads(() => true);
+  await providerState.clearAll();
+  await rotateInstallKey();
+  broadcastState("conversations:cleared");
+  logEvent(
+    "info",
+    "settings",
+    `stored conversation state cleared (${before.entries} entries, ${threads} desktop threads)`,
+  );
+  return {
+    cleared: { entries: before.entries, bytes: before.bytes, threads },
+    ...(await storedConversationState()),
+  };
+}
 /** The id itself, when this install minted it for this origin. */
 async function verifiedConversation(origin, id) {
   if (!(await verifyConversationId(await installKey(), origin, id)))
@@ -1549,18 +1605,26 @@ async function endDesktopThread(id, { always = false } = {}) {
   if (!known && !always) return false;
   return desktopEndThread(await getDesktop(), id);
 }
-/** Ends every recorded page-conversation thread whose origin matches. */
+/**
+ * Ends every recorded page-conversation thread whose origin matches. Resolves
+ * with how many records it removed once they are gone; the companion's
+ * `DELETE`s go on without being waited for.
+ */
 function endDesktopThreads(matches) {
-  void readDesktopThreads()
-    .then(async () => {
+  return readDesktopThreads()
+    .then(() => {
       const ended = [...desktopThreads].filter(([, origin]) => matches(origin));
-      if (!ended.length) return;
+      if (!ended.length) return 0;
       for (const [id] of ended) desktopThreads.delete(id);
       writeDesktopThreads();
-      const link = await getDesktop();
-      await Promise.all(ended.map(([id]) => desktopEndThread(link, id)));
+      void getDesktop()
+        .then((link) =>
+          Promise.all(ended.map(([id]) => desktopEndThread(link, id))),
+        )
+        .catch(() => {});
+      return ended.length;
     })
-    .catch(() => {});
+    .catch(() => 0);
 }
 /** A document's own conversation ends with the document. */
 function endDocumentConversation(scope) {
@@ -1591,6 +1655,23 @@ function directFailure(turn, error) {
 }
 function assertExtensionPage(sender) {
   if (!sender.url?.startsWith(chrome.runtime.getURL("")))
+    throw new BrokerError(
+      "PERMISSION_REQUIRED",
+      "This operation is available only in extension settings.",
+    );
+}
+/**
+ * Stricter than `assertExtensionPage`: only the options page itself, for
+ * settings that have no place in the popup.
+ */
+function assertOptionsPage(sender) {
+  const page = chrome.runtime.getURL("options.html");
+  const url = typeof sender.url === "string" ? sender.url : "";
+  if (
+    url !== page &&
+    !url.startsWith(`${page}#`) &&
+    !url.startsWith(`${page}?`)
+  )
     throw new BrokerError(
       "PERMISSION_REQUIRED",
       "This operation is available only in extension settings.",
@@ -2324,7 +2405,9 @@ const settingsOpenedAt = new Map();
 /**
  * `window.ai.arjunah.openSettings()` (SPEC 3): the toolbar popup, which shows
  * the sender's tab, where the browser lets an extension open it; otherwise
- * the options page at its site list. The content script has already checked
+ * the options page scrolled to this site's row (`options.html#grants:<encoded
+ * origin>`, with the origin taken from the sender, never from the page). The
+ * page learns only that something opened. The content script has already checked
  * that the page has a user gesture; one opening per tab per second keeps a
  * page from flooding the user with tabs on every click.
  */
@@ -2349,7 +2432,7 @@ async function openSettings(sender, origin) {
     /* not allowed here; the options page always is */
   }
   await chrome.tabs.create({
-    url: chrome.runtime.getURL("options.html#grants"),
+    url: chrome.runtime.getURL(`options.html${grantsHash(origin)}`),
     ...(Number.isInteger(sender.tab.windowId)
       ? { windowId: sender.tab.windowId }
       : {}),
@@ -3420,7 +3503,7 @@ async function fingerprint(value) {
 function revokeGrant(origin) {
   invalidate((turn) => turn.binding.origin === origin);
   clearMcpSessions(origin);
-  endDesktopThreads((owner) => owner === origin);
+  void endDesktopThreads((owner) => owner === origin);
   // Queued after any write a just-aborted round already queued, and the
   // abort above stops one that was not queued yet (SPEC 5.4).
   const cleared = providerState.clearOrigin(origin);

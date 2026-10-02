@@ -661,10 +661,25 @@ try {
   await waitFor(() => opened());
   const settingsView = opened();
   // Headless Chrome has no toolbar to anchor the popup to, so this is the
-  // fallback: the settings page at its site list.
+  // fallback: the settings page at the asking site's row, outlined and
+  // focused. The origin in the address is the sender's.
   if (/options\.html/.test(settingsView.url())) {
-    assert.match(settingsView.url(), /options\.html#grants$/);
-    await (await settingsView.page())?.close();
+    const asking = `http://localhost:${port}`;
+    assert.equal(
+      new URL(settingsView.url()).hash,
+      `#grants:${encodeURIComponent(asking)}`,
+    );
+    const view = await settingsView.page();
+    await view.waitForFunction(
+      (origin) =>
+        [...document.querySelectorAll(".grant.asked")]
+          .map((row) => row.dataset.origin)
+          .join() === origin &&
+        document.activeElement?.dataset.origin === origin,
+      { polling: 100 },
+      asking,
+    );
+    await view.close();
   }
   await page.bringToFront();
   assert.equal(modelRequests.at(-1).authorization, "Bearer e2e-secret");
@@ -1569,12 +1584,133 @@ try {
   );
   assert.deepEqual(await storedState(), []);
   // The install key that signs conversation ids lives in local storage.
-  assert.match(
-    await settings.evaluate(
+  const installKeyNow = () =>
+    settings.evaluate(
       async () => (await chrome.storage.local.get("installKey")).installKey,
-    ),
-    /^[A-Za-z0-9_-]{43}$/,
+    );
+  const keyBefore = await installKeyNow();
+  assert.match(keyBefore, /^[A-Za-z0-9_-]{43}$/);
+
+  // Settings clear stored conversation state (SPEC 11.2): a one-off round
+  // and a conversation round each leave an entry, the options page reports
+  // them, and clearing them (after a confirmation) rotates the install key.
+  const oneOffRound = (previous) =>
+    zenPage.evaluate(
+      async ({ tool, previous }) => {
+        const session = await window.__zenSession;
+        const ask = { role: "user", content: "Weather in Kathmandu?" };
+        return session.models.generate({
+          tools: [tool],
+          messages: previous
+            ? [
+                ask,
+                {
+                  role: "assistant",
+                  content: previous.message.content,
+                  toolCalls: previous.message.toolCalls.map((call) => ({
+                    id: call.id,
+                    type: "function",
+                    function: { name: call.name, arguments: call.arguments },
+                  })),
+                },
+                {
+                  role: "tool",
+                  toolCallId: previous.message.toolCalls[0].id,
+                  content: '{"tempC":21}',
+                },
+              ]
+            : [ask],
+        });
+      },
+      { tool: weatherTool, previous },
+    );
+  const oneOff = await oneOffRound(null);
+  const kept2 = await toolRound(null);
+  assert.equal((await storedState()).length, 2);
+  // The user works the page in front: a background tab gets no frames.
+  await settings.bringToFront();
+  await settings.reload();
+  await settings.waitForFunction(
+    () =>
+      /^2 provider-state entries \(\S.*\) for 1 site$/.test(
+        document.querySelector("#stored-state-summary")?.textContent ?? "",
+      ),
+    { polling: 100 },
   );
+  // The site's own row shows what it keeps and says revoking deletes it.
+  assert.match(
+    await settings.$eval(
+      `.grant[data-origin="http://127.0.0.1:${port}"]`,
+      (row) => row.textContent,
+    ),
+    /Stored conversation state: 2 entries, .*Revoking deletes it\./,
+  );
+  assert.equal(
+    await settings.$eval("#clear-state", (button) =>
+      button.classList.contains("btn-danger"),
+    ),
+    true,
+  );
+  await settings.click("#clear-state");
+  await settings.waitForFunction(
+    () => !document.querySelector("#clear-state-confirm").hidden,
+    { polling: 100 },
+  );
+  assert.match(
+    await settings.$eval("#clear-state-question", (node) => node.textContent),
+    /^This deletes 2 provider-state entries .* sites must start a new one\./,
+  );
+  // Cancel keeps everything.
+  await settings.click("#clear-state-cancel");
+  assert.equal((await storedState()).length, 2);
+  await settings.click("#clear-state");
+  await settings.waitForFunction(
+    () => !document.querySelector("#clear-state-confirm").hidden,
+    { polling: 100 },
+  );
+  await settings.click("#clear-state-yes");
+  await settings.waitForFunction(
+    () =>
+      /^Cleared 2 provider-state entries/.test(
+        document.querySelector("#state-status")?.textContent ?? "",
+      ) &&
+      document.querySelector("#stored-state-summary").textContent ===
+        "Nothing stored.",
+    { polling: 100 },
+  );
+  assert.deepEqual(await storedState(), []);
+  const keyAfter = await installKeyNow();
+  assert.match(keyAfter, /^[A-Za-z0-9_-]{43}$/);
+  assert.notEqual(keyAfter, keyBefore, "clearing rotated the install key");
+  // The one-off's next round finds nothing to reattach.
+  assert.equal((await oneOffRound(oneOff)).providerState, "none");
+  // The conversation's id no longer verifies: its next round, open(), and
+  // release() are refused, and a new conversation works.
+  const afterClear = await zenPage.evaluate(async (id) => {
+    const session = await window.__zenSession;
+    const code = (promise) =>
+      promise.then(
+        () => "unexpected",
+        (error) => error.code,
+      );
+    return {
+      round: await code(
+        window.__conversation.generate({
+          messages: [{ role: "user", content: "hello zen" }],
+        }),
+      ),
+      open: await code(session.conversations.open(id)),
+      release: await code(window.__conversation.release()),
+      fresh: (await session.conversations.create()).id !== id,
+    };
+  }, conversationId);
+  assert.deepEqual(afterClear, {
+    round: "INVALID_REQUEST",
+    open: "INVALID_REQUEST",
+    release: "INVALID_REQUEST",
+    fresh: true,
+  });
+  assert.ok(kept2.message.toolCalls.length);
   await zenPage.close();
 
   assert.deepEqual(errors, []);

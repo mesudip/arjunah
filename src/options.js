@@ -7,6 +7,7 @@ import {
 import { OPENCODE_BASE_URL, opencodeDisplayName } from "./lib/opencode.js";
 import { searchFilter } from "./lib/search.js";
 import { ollamaDisplayName } from "./lib/ollama.js";
+import { originFromHash } from "./lib/settings-link.js";
 let existing = null;
 let opencodeExisting = null;
 let desktop = null;
@@ -750,11 +751,66 @@ const LEVEL_LABELS = {
   completion: "Level 1 · Completion",
   catalog: "Level 2 · Catalog",
 };
+// Sizes as the caps in SPEC 5.4 are written: decimal kilobytes and megabytes.
+function approxSize(bytes) {
+  if (bytes < 1000) return `${bytes} bytes`;
+  if (bytes < 1_000_000) return `~${Math.round(bytes / 1000)} KB`;
+  return `~${(bytes / 1_000_000).toFixed(1)} MB`;
+}
+const plural = (count, one, many = `${one}s`) =>
+  `${format(count)} ${count === 1 ? one : many}`;
+let storedState = null;
+function renderStoredState() {
+  const summary = $("#stored-state-summary");
+  if (!storedState) {
+    summary.textContent = "The amount stored could not be read.";
+    return;
+  }
+  const { entries, bytes, origins, threads } = storedState;
+  const sites = Object.keys(origins ?? {}).length;
+  const parts = [];
+  if (entries)
+    parts.push(
+      `${plural(entries, "provider-state entry", "provider-state entries")} (${approxSize(bytes)}) for ${plural(sites, "site")}`,
+    );
+  if (threads) parts.push(plural(threads, "desktop agent thread"));
+  summary.textContent = parts.length ? parts.join(" · ") : "Nothing stored.";
+}
+// The site a page's openSettings() asked about (options.html#grants:<origin>):
+// scrolled to once, and outlined for as long as the page stays open.
+let askedOrigin = null;
+let askedPending = false;
+function readAskedOrigin() {
+  askedOrigin = originFromHash(location.hash);
+  askedPending = Boolean(askedOrigin);
+}
+function showAskedOrigin(rows) {
+  if (!askedOrigin) return;
+  const row = rows.find((item) => item.dataset.origin === askedOrigin);
+  row?.classList.add("asked");
+  if (!askedPending) return;
+  askedPending = false;
+  if (row) {
+    row.scrollIntoView({ block: "center" });
+    row.focus({ preventScroll: true });
+  } else {
+    $("#grants").scrollIntoView({ block: "center" });
+    status("#grant-status", `${askedOrigin} holds no site grant.`);
+  }
+}
 async function refreshGrants() {
-  const grants = await runtime("grants.list");
+  const [grants, stored] = await Promise.all([
+    runtime("grants.list"),
+    runtime("grants.storedState").catch(() => null),
+  ]);
+  storedState = stored;
+  renderStoredState();
   $("#grants").replaceChildren();
+  const rows = [];
   for (const grant of grants) {
     const row = element("div", null, "grant");
+    row.dataset.origin = grant.origin;
+    row.tabIndex = -1;
     const head = element("div", null, "origin");
     head.append(grant.origin, " ");
     head.append(
@@ -771,21 +827,39 @@ async function refreshGrants() {
     ]
       .filter(Boolean)
       .join(" · ");
+    const kept = stored?.origins?.[grant.origin];
     const button = element("button", "Revoke", "btn btn-danger btn-sm");
+    button.title =
+      "Revoke this site's grant and delete its stored conversation state";
     button.addEventListener("click", async () => {
       try {
         await runtime("grants.revoke", { origin: grant.origin });
         await refreshGrants();
-        status("#grant-status", "Site grant revoked.");
+        status(
+          "#grant-status",
+          "Site grant revoked and its stored conversation state deleted.",
+        );
       } catch (error) {
         status("#grant-status", error.message, true);
       }
     });
-    row.append(head, element("div", detail, "detail"), button);
+    row.append(head, element("div", detail, "detail"));
+    row.append(
+      element(
+        "div",
+        kept?.entries
+          ? `Stored conversation state: ${plural(kept.entries, "entry", "entries")}, ${approxSize(kept.bytes)}. Revoking deletes it.`
+          : "No stored conversation state. Revoking deletes any it keeps.",
+        "detail",
+      ),
+    );
+    row.append(button);
+    rows.push(row);
     $("#grants").append(row);
   }
   if (!grants.length)
     $("#grants").append(element("p", "No site grants.", "muted small"));
+  showAskedOrigin(rows);
 }
 const format = (n) => Number(n || 0).toLocaleString();
 /** Local usage from the ledger plus provider-reported quota (SPEC 11.1). */
@@ -1191,6 +1265,17 @@ applyOllamaSummary("cloud", ollamaExisting.cloud);
 wireOllamaForm("local");
 wireOllamaForm("cloud");
 renderProviders();
+readAskedOrigin();
+window.addEventListener("hashchange", () => {
+  readAskedOrigin();
+  void refreshGrants().catch(() => {});
+});
+// Stored conversation state changes with every page round and announces
+// nothing, so coming back to this tab reads it again.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible")
+    void refreshGrants().catch(() => {});
+});
 await refreshGrants();
 refreshDesktop();
 connectStateStream();
@@ -1301,11 +1386,61 @@ $("#clear-opencode").addEventListener("click", async () => {
     status("#opencode-status", error.message, true);
   }
 });
+// Clearing stored conversation state asks first (SPEC 11.2): it cannot be
+// undone, and every conversation id a site holds stops working.
+function closeClearState() {
+  $("#clear-state-confirm").hidden = true;
+  $("#clear-state").disabled = false;
+}
+$("#clear-state").addEventListener("click", async () => {
+  const fresh = await runtime("grants.storedState").catch(() => storedState);
+  storedState = fresh;
+  renderStoredState();
+  const parts = [];
+  if (fresh?.entries)
+    parts.push(
+      `deletes ${plural(fresh.entries, "provider-state entry", "provider-state entries")} (${approxSize(fresh.bytes)})`,
+    );
+  if (fresh?.threads)
+    parts.push(`ends ${plural(fresh.threads, "desktop agent thread")}`);
+  $("#clear-state-question").textContent = [
+    parts.length ? `This ${parts.join(" and ")}.` : "Nothing is stored now.",
+    "Every conversation a site holds ends too, so sites must start a new one. Site grants and provider keys are kept. This cannot be undone.",
+  ].join(" ");
+  $("#clear-state").disabled = true;
+  $("#clear-state-confirm").hidden = false;
+  $("#clear-state-cancel").focus();
+});
+$("#clear-state-cancel").addEventListener("click", () => {
+  closeClearState();
+  $("#clear-state").focus();
+});
+$("#clear-state-yes").addEventListener("click", async () => {
+  $("#clear-state-yes").disabled = true;
+  try {
+    const result = await runtime("grants.clearState");
+    storedState = result;
+    renderStoredState();
+    status(
+      "#state-status",
+      `Cleared ${plural(result.cleared.entries, "provider-state entry", "provider-state entries")} and ${plural(result.cleared.threads, "desktop agent thread")}. Sites start new conversations from now on.`,
+    );
+    await refreshGrants();
+  } catch (error) {
+    status("#state-status", error.message, true);
+  } finally {
+    $("#clear-state-yes").disabled = false;
+    closeClearState();
+  }
+});
 $("#clear-grants").addEventListener("click", async () => {
   try {
     await runtime("grants.clear");
     await refreshGrants();
-    status("#grant-status", "All site grants revoked.");
+    status(
+      "#grant-status",
+      "All site grants revoked and their stored conversation state deleted.",
+    );
   } catch (error) {
     status("#grant-status", error.message, true);
   }
