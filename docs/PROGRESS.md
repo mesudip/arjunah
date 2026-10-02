@@ -1,5 +1,10 @@
 # Project progress
 
+## 2026-10-03 — 1.0.0-beta.2 released
+
+- Tagged `v1.0.0-beta.2` at `3a2bbdf` (main fast-forwarded from `server-composer-gateway`). The Release workflow passed in 5 min 55 s: build (`npm run check`, `lint:firefox`, pack), publish of `arjunah@1.0.0-beta.2` and `arjunah-desktop@1.0.0-beta.2` with provenance under the `beta` dist-tag, registry verification (well inside the new 45-minute budget this time), and the GitHub pre-release with `arjunah-chrome-v1.0.0-beta.2.zip` and `arjunah-firefox-v1.0.0-beta.2.xpi`. CI on `main` passed.
+- `latest` on both packages still points at `1.0.0-alpha.1`; moving it needs a maintainer login. `arjunah-widget` is still not published to npm, though the docs describe installing it.
+
 ## 2026-10-03 — release audit fixes for 1.0.0-beta.2
 
 1.0.0-beta.2 was bumped but never tagged or published. It ships with this audit and the 2026-10-02/03 settings and desktop work below, still as beta.2; no version string changed.

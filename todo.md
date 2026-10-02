@@ -2,7 +2,8 @@
 
 ## Now
 
-- [ ] Move the stale `latest` dist-tag off `1.0.0-alpha.1` on both npm packages (`npm dist-tag add <pkg>@1.0.0-beta.1 latest`); it needs a maintainer login. `v1.0.0-beta.1` itself is released: npm `beta`, GitHub pre-release with the Chrome zip and Firefox xpi.
+- [ ] Move the stale `latest` dist-tag off `1.0.0-alpha.1` on both npm packages (`npm dist-tag add <pkg>@1.0.0-beta.2 latest`); it needs a maintainer login. `v1.0.0-beta.2` itself is released: npm `beta`, GitHub pre-release with the Chrome zip and Firefox xpi.
+- [ ] Publish `arjunah-widget` to npm (the release workflow publishes only the SDK and the desktop app), or stop documenting `npm install arjunah-widget` until it is.
 
 ## Next
 
