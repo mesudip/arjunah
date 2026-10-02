@@ -1,6 +1,7 @@
 // End-to-end: browser extension + desktop companion. The companion runs in-process
 // with a fake subscription agent so the suite needs no real sign-in; set
 // ARJUNAH_E2E_LIVE=opencode (or codex/claude-code) to drive a real CLI instead.
+import { approveConsent } from "../helpers/consent.mjs";
 import { mockProviderExtension } from "../helpers/browser-extension.mjs";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
@@ -182,7 +183,8 @@ try {
   settings.on("pageerror", (error) =>
     errors.push(`settings: ${error.message}`),
   );
-  await settings.goto(`chrome-extension://${extensionId}/options.html`);
+  // Settings show one view at a time; pairing is on the Desktop app view.
+  await settings.goto(`chrome-extension://${extensionId}/options.html#desktop`);
   await settings.waitForFunction(() =>
     /Desktop app v|not detected/.test(
       document.querySelector("#desktop-state").textContent,
@@ -231,35 +233,42 @@ try {
   // The desktop provider appears with its account label and can be selected.
   step("providers");
   await settings.waitForFunction(
-    () => document.querySelectorAll("#providers .provider").length >= 2,
+    () => document.querySelectorAll("#provider-list .provider").length >= 2,
   );
   const providerText = await settings.$eval(
-    "#providers",
+    "#provider-list",
     (el) => el.textContent,
   );
-  assert.match(providerText, new RegExp(`${liveName} · `));
+  assert.match(providerText, new RegExp(liveName));
   if (!live) assert.match(providerText, /fake@example.test/);
-  // Select the model and press Use inside the page so periodic re-renders cannot detach handles.
-  await settings.evaluate(
-    (name, pickLast) => {
-      const card = [...document.querySelectorAll("#providers .provider")].find(
-        (item) => item.textContent.includes(name),
-      );
-      // The model control is a typable combobox (SPEC 8.2), which draws its
-      // rows only while open and closes again once one is picked.
-      const combo = card.querySelector(".combo");
+  // Each subscription has its own view. Pick the model and press Use inside
+  // the page, so the redraws every state change causes cannot detach handles.
+  await settings.evaluate((id) => {
+    location.hash = `#providers/${id}`;
+  }, liveId);
+  await settings.waitForFunction(
+    () => document.querySelector("#subscription-model .combo-input"),
+    { polling: 100 },
+  );
+  await settings.evaluate((pickLast) => {
+    // The model control is a typable combobox (SPEC 8.2), which draws its
+    // rows only while open and closes again once one is picked.
+    const pick = (last) => {
+      const combo = document.querySelector("#subscription-model");
       combo
         .querySelector(".combo-input")
         .dispatchEvent(new Event("click", { bubbles: true }));
       const rows = [...combo.querySelectorAll(".combo-option")];
-      rows[pickLast ? rows.length - 1 : 0].dispatchEvent(
+      rows[last ? rows.length - 1 : 0].dispatchEvent(
         new MouseEvent("mousedown", { bubbles: true }),
       );
-      card.querySelector(".controls > .btn").click();
-    },
-    liveName,
-    !live,
-  );
+    };
+    pick(pickLast);
+    // Use is offered only when it changes something; a provider that is
+    // already the default with that model gets the other end of the list.
+    if (!document.querySelector("#subscription-use")) pick(!pickLast);
+    document.querySelector("#subscription-use").click();
+  }, !live);
   await settings.waitForFunction(
     (name) =>
       new RegExp(`Websites now use ${name} on this computer`).test(
@@ -293,7 +302,7 @@ try {
   await page.waitForFunction(
     () => document.activeElement?.id === "arjunah-extension",
   );
-  await page.keyboard.press("Enter");
+  await approveConsent(page);
   await page.evaluate(() => window.__session);
   const models = await page.evaluate(async () =>
     (await window.__session).models.list(),
@@ -335,7 +344,7 @@ try {
   );
   await page.keyboard.press("Enter");
   await new Promise((wait) => setTimeout(wait, 300));
-  await page.keyboard.press("Enter");
+  await approveConsent(page);
   await page.waitForFunction(() => window.toolCalls === 1, {
     timeout: live ? 170000 : 20000,
   });
@@ -438,7 +447,7 @@ try {
   await settings.bringToFront();
   await settings.evaluate(() => document.querySelector("#log-refresh").click());
   await settings.waitForFunction(() =>
-    /turn:/.test(document.querySelector("#log-view").textContent),
+    /round \d+ → /.test(document.querySelector("#log-view").textContent),
   );
   assert.match(
     await settings.$eval("#log-view", (el) => el.textContent),
@@ -461,7 +470,7 @@ try {
   // CLI: neither the first-run phase nor a slow-resolve note may appear here.
   assert.doesNotMatch(
     desktopLog,
-    /provider resolved in \d+ms|Looking for /,
+    /provider resolved in|Looking for /,
     "a turn against an already-detected provider does not re-detect it",
   );
   assert.ok(
@@ -516,7 +525,7 @@ try {
         console.error(
           await page
             .evaluate(() =>
-              ["#desktop-state", "#active-status", "#providers"]
+              ["#desktop-state", "#active-status", "#provider-list"]
                 .map(
                   (id) =>
                     `${id}: ${document.querySelector(id)?.textContent?.slice(0, 400)}`,

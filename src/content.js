@@ -20,6 +20,9 @@
   const RETRYABLE = new Set(["TIMEOUT", "RATE_LIMITED"]);
   const IMAGE_TYPES = R.IMAGE_TYPES;
   const HISTORY_LIMIT = 40;
+  // How long the consent sheet must stay visible before Allow works; the same
+  // order as Firefox's own delay on security dialogs.
+  const CONSENT_ARM_MS = 1000;
   // A round stream's bounds (SPEC 5.3): one delta, and each text per round,
   // which is the result's own answer and reasoning bound.
   const ROUND_DELTA_UNITS = 4000;
@@ -774,7 +777,7 @@
     root = host.attachShadow({ mode: "closed" });
     const style = document.createElement("style");
     // Wallet-only chrome: the line a panel driven by another composer carries.
-    style.textContent = `${R.STYLE}\n.loop-line{display:block;margin:6px 4px 0;font-size:11.5px;line-height:1.4;color:var(--muted)}.loop-line[hidden]{display:none}`;
+    style.textContent = `${R.STYLE}\n.loop-line{display:block;margin:6px 4px 0;font-size:11.5px;line-height:1.4;color:var(--muted)}.loop-line[hidden]{display:none}.actions .allow[aria-disabled=true]{opacity:.55;cursor:wait}.consent:focus{outline:none}`;
     root.append(style);
     root.append(R.build(document, LAUNCHER_HTML));
     // The renderer owns the conversation; the extension keeps consent, the
@@ -2040,10 +2043,14 @@
    */
   function loopAccess(manifest, site) {
     const reason = `${manifest.name} wants to run its assistant in this panel.`;
+    // A loop that can ask the page to run the site's tools (tool.client)
+    // asks for that permission too, so consent lists it.
+    const tools = manifest.tools.length ? ["tools.site"] : [];
     return site
-      ? { capabilities: ["chat.hosted"], reason }
+      ? { capabilities: ["chat.hosted", ...tools], reason }
       : {
           level: manifest.loop.level === 2 ? "catalog" : "completion",
+          ...(tools.length ? { capabilities: tools } : {}),
           composer: manifest.loop.composer,
           reason,
         };
@@ -2516,6 +2523,17 @@
     await loopPost(turn, "tool-results", { id, result });
   }
 
+  /**
+   * A tool name, label, or title the site wrote, as it may appear inside the
+   * extension's own prompts: one line, no direction overrides or other
+   * invisible controls, and never in the extension's name, so a loop cannot
+   * dress its prompt up as अर्जुनः asking.
+   */
+  function siteWords(value, limit = 128) {
+    const text = H.plainLine(value, limit);
+    return /अर्जुन|arjunah/i.test(text) ? "" : text;
+  }
+
   /** `input.client`: the value goes to `inputs` once and is kept nowhere. */
   async function runLoopInput(data, turn) {
     const id = callId(data?.id);
@@ -2523,15 +2541,25 @@
     turn.answered.add(`input:${id}`);
     const definition = R.userInputDeclaration(data.input);
     let answer = { id, cancelled: true };
-    if (definition)
+    // Only a loop that declared `inputs: true` was disclosed at consent as
+    // one that asks for values (SPEC 15.1); any other gets a cancellation.
+    if (!turn.contract.manifest.loop?.inputs)
+      view.applyEvent({
+        type: "agent.phase",
+        text: "The site's loop asked for a value it had not declared. अर्जुनः did not ask you.",
+      });
+    else if (definition)
       try {
+        const name = siteWords(
+          view.stepName(boundedText(data.toolId, 128)) ?? "",
+        );
         const value = await view.requestUserInput({
-          toolName: view.stepName(boundedText(data.toolId, 128)) ?? "A tool",
-          origin: location.origin,
+          toolName: name ? `The site tool “${name}”` : "A tool of this site",
+          origin: `Asked by ${location.origin}`,
           definition,
           hint: definition.secret
-            ? "Masked. Sent only to this site's loop for this call; अर्जुनः does not store it or send it to the model."
-            : "Sent only to this site's loop for this call; अर्जुनः does not store it or send it to the model.",
+            ? `Masked. Goes to ${location.origin} for this call only; अर्जुनः does not store it or send it to the model.`
+            : `Goes to ${location.origin} for this call only; अर्जुनः does not store it or send it to the model.`,
         });
         answer = { id, value };
       } catch {
@@ -2553,7 +2581,7 @@
         (await view
           .requestApproval({
             origin: location.origin,
-            toolName: view.stepName(toolId),
+            toolName: siteWords(view.stepName(toolId) ?? "", 64) || null,
             approval: data.approval,
           })
           .catch(() => false)) === true;
@@ -2819,7 +2847,11 @@
         node.append(summary, pre);
         body.append(node);
       };
-      if (request.reason) row(request.reason);
+      // Everything the site wrote is shown as plain lines: no direction
+      // overrides and no line breaks, so it cannot reorder this sheet's own
+      // sentences or draw lines that look like them.
+      const said = (value, max) => H.plainLine(value, max);
+      if (request.reason) row(said(request.reason));
       // Who writes the prompts and who answers them, per mode (SPEC 15.3).
       const approvals = manifest
         ? [
@@ -2838,6 +2870,7 @@
         composer: loop?.composer ?? request.composer ?? "webapp",
         siteModel: siteAnswer,
         approvals,
+        loopInputs: loop?.inputs === true,
       }))
         row(line);
       let modelPicker = null;
@@ -2875,14 +2908,13 @@
         }
         for (const [provider, list] of groups) {
           const group = document.createElement("optgroup");
-          group.label = provider;
+          group.label = said(provider, 80);
           for (const model of list) {
             const option = document.createElement("option");
             option.value = model.id;
+            const label = said(model.displayName, 120);
             option.textContent =
-              model.id === status.defaultModel
-                ? `${model.displayName} (default)`
-                : model.displayName;
+              model.id === status.defaultModel ? `${label} (default)` : label;
             option.selected = model.id === status.model;
             group.append(option);
           }
@@ -2891,7 +2923,7 @@
         field.append(modelPicker);
         body.append(field);
       } else if (status?.provider && !siteAnswer)
-        row(`Requests are sent to: ${status.provider}`);
+        row(`Requests are sent to: ${said(status.provider, 120)}`);
       else if (needsModel && !unavailable)
         row(
           "No provider is configured yet. Add an API key or pair the desktop app in extension settings.",
@@ -2940,21 +2972,27 @@
       if (fields.length)
         row(`Page context fields after approval: ${fields.join(", ")}`);
       if (manifest) {
-        row(`Assistant: ${manifest.name}\n${manifest.description}`);
+        row(
+          `Assistant: ${said(manifest.name, 80)}\n${said(manifest.description)}`,
+        );
         if (manifest.systemPrompt)
-          details("Full site instructions", manifest.systemPrompt);
+          details("Full site instructions", H.plainText(manifest.systemPrompt));
         // The site stores the conversation, so consent has to say so (SPEC 7.6).
         if (manifest.threads)
           row(
             "This site stores your conversations with this assistant and can supply earlier messages back to the model. Stored messages are shown as untrusted site content.",
           );
-        if (manifest.tools.some((tool) => tool.outputContent?.includes("card")))
+        // A loop's events may carry cards whatever its tools declare.
+        if (
+          loop ||
+          manifest.tools.some((tool) => tool.outputContent?.includes("card"))
+        )
           row(
             "This assistant can show interactive cards written by the site inside the chat. Buttons that send a message always show you the exact text first.",
           );
         for (const tool of manifest.tools)
           details(
-            `Site tool: ${tool.name} — ${tool.description}`,
+            `Site tool: ${tool.name} — ${said(tool.description)}`,
             [
               JSON.stringify(tool.inputSchema, null, 2),
               ...(tool.requiresApproval ? ["\nAsks you before it runs."] : []),
@@ -2964,7 +3002,7 @@
                       tool.userInputs
                         .map(
                           (input) =>
-                            `- ${input.label} (${input.id}${input.secret ? ", masked" : ""})`,
+                            `- ${said(input.label, 80)} (${input.id}${input.secret ? ", masked" : ""})`,
                         )
                         .join("\n"),
                   ]
@@ -2989,17 +3027,17 @@
             manifest.widget.controls
               .map(
                 (control) =>
-                  `${control.label} (${control.type}${control.model ? ", visible to the model" : ""})`,
+                  `${said(control.label, 80)} (${control.type}${control.model ? ", visible to the model" : ""})`,
               )
               .join("\n"),
           );
         for (const server of manifest.mcpServers) {
-          row(`MCP server: ${server.name}\n${server.url}`);
+          row(`MCP server: ${said(server.name, 80)}\n${server.url}`);
           // Declared tools are part of the contract, so they are inspectable
           // here and never rediscovered behind the user's back (SPEC 7.7).
           for (const tool of server.tools ?? [])
             details(
-              `Declared tool at ${server.name}: ${tool.name} — ${tool.description}`,
+              `Declared tool at ${said(server.name, 80)}: ${tool.name} — ${said(tool.description)}`,
               [
                 JSON.stringify(tool.inputSchema, null, 2),
                 ...(tool.requiresApproval
@@ -3012,7 +3050,7 @@
                         tool.userInputs
                           .map(
                             (input) =>
-                              `- ${input.label} (${input.id}${input.secret ? ", masked" : ""})`,
+                              `- ${said(input.label, 80)} (${input.id}${input.secret ? ", masked" : ""})`,
                           )
                           .join("\n"),
                     ]
@@ -3031,7 +3069,7 @@
       if (tools)
         for (const tool of tools)
           details(
-            `${tool.source}: ${tool.name} — ${tool.description}`,
+            `${said(tool.source, 80)}: ${said(tool.name, 128)} — ${said(tool.description)}`,
             JSON.stringify(tool.inputSchema, null, 2),
           );
       const note = document.createElement("p");
@@ -3061,8 +3099,89 @@
           "अर्जुनः could not load the model choices required for this access level. Close this dialog and try again.";
         foot.append(unavailable);
       }
+      // A page can open this sheet whenever it likes (enable() needs no user
+      // gesture), cover it with its own content, and time it to a key or
+      // click the visitor meant for the page. So the sheet takes focus itself,
+      // never Allow, and Allow arms only once the sheet has been showing,
+      // in a focused tab and (where the browser can tell) uncovered, for
+      // CONSENT_ARM_MS without a break. Any break disarms it and restarts
+      // the wait.
+      let armed = false;
+      let armTimer = null;
+      let uncovered = true;
+      let focused = true;
+      const setArmed = (value) => {
+        armed = value;
+        if (value) allow.removeAttribute("aria-disabled");
+        else allow.setAttribute("aria-disabled", "true");
+      };
+      const rearm = () => {
+        clearTimeout(armTimer);
+        armTimer = null;
+        setArmed(false);
+        if (document.visibilityState === "visible" && focused && uncovered)
+          armTimer = setTimeout(() => setArmed(true), CONSENT_ARM_MS);
+      };
+      const onBlur = () => {
+        focused = false;
+        rearm();
+      };
+      const onFocus = () => {
+        focused = true;
+        rearm();
+      };
+      document.addEventListener("visibilitychange", rearm);
+      window.addEventListener("blur", onBlur);
+      window.addEventListener("focus", onFocus);
+      // Chrome's IntersectionObserver v2 reports a target as not visible when
+      // anything paints over it or an ancestor (our host, which the page can
+      // style) is transparent, transformed, or filtered.
+      let watcher = null;
+      if (
+        typeof IntersectionObserverEntry !== "undefined" &&
+        "isVisible" in IntersectionObserverEntry.prototype
+      ) {
+        watcher = new IntersectionObserver(
+          (entries) => {
+            const visible = entries.at(-1).isVisible;
+            if (visible === uncovered) return;
+            uncovered = visible;
+            rearm();
+          },
+          { trackVisibility: true, delay: 100, threshold: [0, 1] },
+        );
+        uncovered = false;
+        watcher.observe(card);
+      }
+      card.tabIndex = -1;
+      // Keep Tab inside the sheet, as a modal dialog should, so Shift+Tab
+      // from the sheet reaches Allow and nothing behind it.
+      card.addEventListener("keydown", (event) => {
+        if (event.key !== "Tab") return;
+        const stops = [
+          ...card.querySelectorAll(
+            "button, select, input, summary, [tabindex='0']",
+          ),
+        ].filter((node) => !node.disabled && !node.hidden && node.offsetParent);
+        if (!stops.length) return;
+        const first = stops[0];
+        const last = stops.at(-1);
+        const active = root.activeElement;
+        if (event.shiftKey && (active === first || active === card)) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && active === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      });
       const finish = (allowed) => {
         pendingConsent = null;
+        clearTimeout(armTimer);
+        watcher?.disconnect();
+        document.removeEventListener("visibilitychange", rearm);
+        window.removeEventListener("blur", onBlur);
+        window.removeEventListener("focus", onFocus);
         overlay.remove();
         resolve({
           allowed: allowed && !unavailable,
@@ -3078,7 +3197,9 @@
       };
       pendingConsent = finish;
       deny.addEventListener("click", () => finish(false), { once: true });
-      allow.addEventListener("click", () => finish(true), { once: true });
+      allow.addEventListener("click", (event) => {
+        if (armed && event.isTrusted) finish(true);
+      });
       actions.append(deny, allow);
       const hint = document.createElement("span");
       hint.className = "consent-hint";
@@ -3093,7 +3214,8 @@
       };
       body.addEventListener("scroll", updateHint);
       requestAnimationFrame(updateHint);
-      (unavailable ? deny : allow).focus();
+      rearm();
+      card.focus();
     });
   }
 
@@ -3362,14 +3484,17 @@
       void enqueuePrompt(() =>
         view.requestUserInput({
           toolName:
-            typeof message.toolName === "string"
-              ? message.toolName.slice(0, 64)
-              : "A tool",
+            siteWords(
+              typeof message.toolName === "string" ? message.toolName : "",
+              64,
+            ) || "A tool",
           origin: recipient,
           definition,
+          // The panel shares the page's document, so the page can watch the
+          // keys typed here even when the value goes elsewhere (SECURITY.md).
           hint: definition.secret
-            ? `Masked. Sent only to ${recipient} for this call; अर्जुनः does not store it or send it to the model.`
-            : `Sent only to ${recipient} for this call; अर्जुनः does not store it or send it to the model.`,
+            ? `Masked. अर्जुनः sends it to ${recipient} for this call only, and does not store it or send it to the model. ${location.origin} can see what you type here.`
+            : `अर्जुनः sends it to ${recipient} for this call only, and does not store it or send it to the model. ${location.origin} can see what you type here.`,
         }),
       ).then(
         (value) =>

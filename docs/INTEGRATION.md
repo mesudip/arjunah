@@ -130,7 +130,7 @@ handler(args, invocation): sync or async. invocation is { id, name, controls, re
 requiresApproval: true makes the extension show its approval prompt (the tool name, the model's arguments, your origin) before each call; only Approve runs the handler, and anything else reaches the model as a tool error saying the visitor did not approve. Consent lists the tools that ask first. See SPEC 7.8.
 userInputs: scalars the model must never supply (passphrase, one-time code, confirmation). Declared outside inputSchema, collected by the extension in its own labelled prompt, delivered only to your handler via await invocation.requestInput(id), never added to model messages or history. Your handler receives the value, so this protects against accidental model exposure, not against your own code. See SPEC 7.3.
 mcpServers: up to 8 { id, name, url, headers?, tools? }. HTTPS only, loopback HTTP for development. Without tools the visitor approves the server, then its discovered tool metadata, before any model call. With tools (up to 64 definitions) the extension never calls tools/list, the definitions join the fingerprinted contract, and one approval covers them — this is how you run first-party tools on your own backend while the secret stays there. tools/call carries { arjunah: { conversationId } } in params.\_meta. A declared tool may also set requiresApproval and userInputs: the extension asks first, collects the inputs in its own prompt labelled with your server's origin, and sends them as params.\_meta.arjunah.inputs, an object keyed by input id, never in arguments.
-loop: { composer: "server" | "webapp", fetch(path, init), level?: 1 | 2 }. A loop outside the extension composes the conversation and the extension hosts the panel (modes 2 and 3 below). Exclusive with systemPrompt; mcpServers is ignored.
+loop: { composer: "server" | "webapp", fetch(path, init), level?: 1 | 2, inputs?: boolean }. A loop outside the extension composes the conversation and the extension hosts the panel (modes 2 and 3 below). Exclusive with systemPrompt; mcpServers is ignored.
 models: { list: [{ id, displayName?, capabilities?, contextWindow?, reasoningLevels? }], generate?(request, { signal }) }. One to eight of your own models, shown in the picker under your site's name beside the visitor's (SPEC 15.2). generate is required without a loop and must be absent with one.
 
 threads: your own conversation store, as local functions { list, create, load, append, rename?, delete }. Declaring it means the extension keeps no history of its own: it asks you for the thread list, loads the one the visitor picks, and hands you the entries each finished turn produced. Consent says your site stores the conversation, and messages you supply reach the model labelled as untrusted. See SPEC 7.6.
@@ -223,12 +223,21 @@ page tools on `tool.client`, shows `input.client` and `approval.client`, and
 answers `model.client` from the visitor's model, returning the conversation id
 it created on `model-results`.
 
+`approval.client` always works. `input.client` works only with `inputs: true`
+in `loop`, because consent has to tell the visitor that your loop can ask for
+values (masked ones included) inside the extension's panel; without it every
+`input.client` is answered with a cancellation and no prompt appears. Each
+prompt names your origin as the one asking, and a tool name containing the
+extension's name is not shown. If you declare `tools`, consent also asks for
+`tools.site`, and `tool.client` is refused until the visitor approves it.
+
 ```js
 await window.ai.arjunah.site.register({
   name: "Trips",
   tools: [pageInfoTool], // what the loop may request with tool.client
   loop: {
     composer: "server",
+    inputs: true, // the backend sends input.client for values the model must not see
     fetch: (path, init) => fetch(`/assistant/${path}`, { ...init, credentials: "same-origin" }),
   },
 });

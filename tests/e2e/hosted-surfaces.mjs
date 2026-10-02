@@ -4,6 +4,7 @@
  * threads driven through the page bridge (7.6). Everything here runs in a real
  * browser with the real extension and a mock provider.
  */
+import { approveConsent } from "../helpers/consent.mjs";
 import { mockProviderExtension } from "../helpers/browser-extension.mjs";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
@@ -186,10 +187,9 @@ try {
   // Consent, then one turn that calls the card tool.
   await page.keyboard.type("show me the seats");
   await page.keyboard.press("Enter");
-  // The consent dialog focuses Allow; the panel is a closed shadow root, so the
-  // test approves it the way a user does, with the keyboard.
-  await new Promise((done) => setTimeout(done, 600));
-  await page.keyboard.press("Enter");
+  // The panel is a closed shadow root, so the test approves consent the way a
+  // keyboard user does.
+  await approveConsent(page);
 
   const deadline = Date.now() + 40000;
   for (;;) {

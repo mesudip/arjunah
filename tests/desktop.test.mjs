@@ -23,6 +23,7 @@ import {
 } from "../desktop/lib/transcript.mjs";
 import {
   ToolSession,
+  SessionLimitError,
   SessionRegistry,
   SESSION_LIMITS,
 } from "../desktop/lib/sessions.mjs";
@@ -885,6 +886,46 @@ test("sessions surface concurrent tool calls immediately and resume each result 
   other.end(true);
   assert.equal((await pending).isError, true);
   assert.ok(SESSION_LIMITS.resumeMs > 0);
+});
+
+test("a session that ends answers the request waiting on it at once", async () => {
+  const registry = new SessionRegistry();
+  const session = registry.create({ tools: [], model: "m", providerId: "p" });
+  const waiting = session.nextEvent(60_000);
+  const at = Date.now();
+  session.end(true, "gone");
+  assert.deepEqual(await waiting, { type: "error", message: "gone" });
+  assert.ok(Date.now() - at < 100);
+  // A final answer still reaches its waiter as the answer, not an error.
+  const other = registry.create({ tools: [], model: "m", providerId: "p" });
+  const answer = other.nextEvent(60_000);
+  other.emit({ type: "final", content: "done" });
+  assert.equal((await answer).type, "final");
+  assert.equal(other.ended, true);
+});
+
+test("the registry evicts only a run paused on the browser, the longest paused first", async () => {
+  const registry = new SessionRegistry();
+  const all = [];
+  for (let index = 0; index < SESSION_LIMITS.maxSessions; index++)
+    all.push(registry.create({ tools: [], model: "m", providerId: "p" }));
+  // Every run is working (a request waits on each): there is no room.
+  const waits = all.map((session) => session.nextEvent(60_000));
+  assert.equal(registry.makeRoom(), false);
+  assert.throws(
+    () => registry.create({ tools: [], model: "m", providerId: "p" }),
+    SessionLimitError,
+  );
+  // Two of them hand tool calls to the browser and stop.
+  void all[3].call("site__a", {});
+  await waits[3];
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  void all[1].call("site__b", {});
+  await waits[1];
+  assert.equal(registry.makeRoom(), true);
+  assert.equal(all[3].ended, true, "the one paused longest went");
+  assert.equal(all[1].ended, false);
+  for (const session of all) session.end(true);
 });
 
 test("partial tool results resume their live session without retiring sibling calls", async () => {
@@ -1896,4 +1937,88 @@ test("Codex app-server probe yields account, rate-limit windows, spend, and mode
   );
   assert.match(probe.quota.label, /Spend \$9\.10 of \$20 · Weekly 16%/);
   assert.equal(probe.quota.note, "Spend $9.10 of $20");
+});
+
+test("an ordinary provider read answers from the cached view while a slow light pass refreshes it behind", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "arjunah-stale-test-"));
+  const provider = (models) => ({
+    id: "fake",
+    name: "Fake",
+    vendor: "Test",
+    kind: "subscription",
+    installed: true,
+    available: true,
+    models: models.map((id) => ({ id, displayName: id })),
+    defaultModel: models[0],
+  });
+  let lightPasses = 0;
+  let release;
+  const instance = createDesktopApp({
+    store: new Store(directory),
+    detect: async () => [provider(["first"])],
+    // A light pass that takes as long as the person's machine made it take.
+    refresh: async () => {
+      lightPasses++;
+      await new Promise((resolve) => {
+        release = resolve;
+      });
+      return [provider(["first", "second"])];
+    },
+    providerStaleMs: 0,
+  });
+  const address = await instance.listen(0);
+  t.after(async () => {
+    release?.();
+    await instance.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const base = `http://127.0.0.1:${address.port}`;
+  const call = async (path, headers = {}) => {
+    const response = await fetch(`${base}${path}`, {
+      method: path === "/api/pair" ? "POST" : "GET",
+      headers: {
+        Origin: "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+        "Content-Type": "application/json",
+        ...headers,
+      },
+      ...(path === "/api/pair"
+        ? {
+            body: JSON.stringify({
+              code: instance.pairing.current().code,
+              client: { name: "t" },
+            }),
+          }
+        : {}),
+    });
+    return response.json();
+  };
+  const { token } = await call("/api/pair");
+  const auth = { Authorization: `Bearer ${token}` };
+  // The first read waits for detection: there is no view to answer from.
+  const first = await call("/api/providers", auth);
+  assert.deepEqual(
+    first.providers[0].models.map((model) => model.id),
+    ["first"],
+  );
+  // The view is stale at once (providerStaleMs: 0), yet the next read does not
+  // wait for the light pass it starts: it answers from the view it has.
+  const startedAt = Date.now();
+  const cached = await call("/api/providers", auth);
+  assert.ok(Date.now() - startedAt < 1000, "answered without the light pass");
+  assert.deepEqual(
+    cached.providers[0].models.map((model) => model.id),
+    ["first"],
+  );
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(lightPasses, 1, "the stale view started one light pass");
+  // A read while that pass runs starts no second one.
+  await call("/api/providers", auth);
+  assert.equal(lightPasses, 1);
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const refreshed = await call("/api/providers", auth);
+  assert.deepEqual(
+    refreshed.providers[0].models.map((model) => model.id),
+    ["first", "second"],
+  );
 });

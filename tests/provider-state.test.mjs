@@ -834,6 +834,31 @@ test("a one-off completion uses the document as its conversation, which ends wit
   assert.equal(b.providerState.records.size, 0);
 });
 
+test("one-off loops running side by side in a document keep each other's state", async (t) => {
+  const b = await zen(t);
+  anthropicTurn(b);
+  const request = (messages) =>
+    b.ok("models.generate", { model: MODELS.anthropic, messages, tools });
+  const first = await request([ask]);
+  // A second loop starts (a title, a summary) before the first one finishes.
+  const other = await request([{ role: "user", content: "And in Pokhara?" }]);
+  assert.equal(b.providerState.records.size, 2, "starting one kept the other");
+  // The first loop's final round still finds its signed thinking, and ends
+  // only its own entry.
+  const done = await request(continued(first));
+  assert.equal(done.providerState, "reused");
+  assert.deepEqual(
+    [...b.providerState.records.values()].map((record) => record.callIds),
+    [other.message.toolCalls.map((call) => call.id)],
+  );
+  const otherDone = await request([
+    { role: "user", content: "And in Pokhara?" },
+    ...continued(other).slice(1),
+  ]);
+  assert.equal(otherDone.providerState, "reused");
+  assert.equal(b.providerState.records.size, 0);
+});
+
 test("a document's state is still released after the worker restarted, when it generated", async (t) => {
   const b = await zen(t);
   anthropicTurn(b);
@@ -1011,6 +1036,41 @@ test("a round in flight when settings clear stored state ends and stores nothing
   assert.equal(b.providerState.records.size, 0);
   // The grant itself survives: a new conversation works at once.
   assert.match(await conversation(b), /^[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{22}$/);
+});
+
+test("a round that starts while settings clear stored state is refused, never stored", async (t) => {
+  const b = await zen(t);
+  const id = await conversation(b);
+  anthropicTurn(b);
+  // Hold the clear at its first storage read, so the page's round starts
+  // while it is under way.
+  let open;
+  const gate = new Promise((resolve) => {
+    open = resolve;
+  });
+  const allEntries = b.providerState.allEntries;
+  b.providerState.allEntries = async (...args) => {
+    await gate;
+    return allEntries(...args);
+  };
+  const clearing = b.ok("grants.clearState", {}, b.extension);
+  await settle();
+  const pending = b.call("models.generate", {
+    model: MODELS.anthropic,
+    conversationId: id,
+    messages: [ask],
+    tools,
+  });
+  await settle();
+  open();
+  const [late] = await Promise.all([pending, clearing]);
+  assert.equal(
+    late.error.code,
+    "INVALID_REQUEST",
+    "the old id stopped verifying",
+  );
+  await settle();
+  assert.equal(b.providerState.records.size, 0);
 });
 
 test("the hosted loop replays the same state between its own rounds", async (t) => {

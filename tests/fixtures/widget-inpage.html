@@ -18,9 +18,12 @@
         modelResults: [],
         generated: [],
         flood: { pulled: 0, cancelled: false },
-        hangClosed: false,
+        hangClosed: 0,
+        framed: 0,
+        framedChunks: 0,
         mountErrors: [],
         enables: [],
+        visitorErrors: [],
       });
       // A stand-in extension that records the access request and refuses it,
       // so the turn runs with no visitor model announced.
@@ -96,12 +99,55 @@
               signal.addEventListener("abort", resolve, { once: true }),
             );
           } finally {
-            log.hangClosed = true;
+            log.hangClosed++;
           }
         } else {
           yield message("a0", "Unscripted.");
           yield { type: "turn.end", turnId };
         }
+      }
+
+      /**
+       * A turn framed the way a real server may frame it rather than the way
+       * `eventStreamResponse` does: a BOM, comments, CRLF and bare CR line
+       * ends, a CR and its LF in separate chunks, multi-line data, and a
+       * multi-byte character split across chunks.
+       */
+      function framed(threadId) {
+        // Its own ids, so the loop's `pt` numbering stays as it was.
+        const turnId = `pf${++log.framed}`;
+        const text = [
+          "\uFEFF: framed by hand\r\n",
+          `event: turn.start\r\ndata: {"turnId":"${turnId}",\r\n`,
+          `data: "threadId":"${threadId}"}\r\n\r\n`,
+          'event: output.delta\rdata: {"text":"Fram"}\r\r',
+          "event:message\n",
+          `data: ${JSON.stringify({ entry: message("af", "Framed héllo ✓ 𝄞").entry })}\r\n\r\n`,
+          `event: turn.end\r\ndata: {"turnId":"${turnId}"}\r\n\r\n`,
+        ].join("");
+        const bytes = new TextEncoder().encode(text);
+        // Cut after every CR, and through the middle of each multi-byte
+        // character, so each case lands on a chunk boundary.
+        const cuts = [];
+        bytes.forEach((value, index) => {
+          if (value === 0x0d || value >= 0xc0) cuts.push(index + 1);
+        });
+        const chunks = [];
+        let start = 0;
+        for (const cut of [...cuts, bytes.length]) {
+          if (cut > start) chunks.push(bytes.slice(start, cut));
+          start = cut;
+        }
+        log.framedChunks = chunks.length;
+        const body = new ReadableStream({
+          pull(stream) {
+            if (chunks.length) stream.enqueue(chunks.shift());
+            else stream.close();
+          },
+        });
+        return new Response(body, {
+          headers: { "Content-Type": "text/event-stream" },
+        });
       }
 
       /** Bodies that break a bound, one per kind of violation. */
@@ -161,6 +207,7 @@
         }
         if (route[2] === "turns" && route.length === 3) {
           const turn = JSON.parse(body);
+          if (turn.content === "framing") return framed(route[1]);
           const broken = violation(turn.content);
           if (broken !== null) return broken;
           return eventStreamResponse(loop(route[1], turn, signal));
@@ -217,6 +264,7 @@
         mount: document.querySelector("#visitor"),
         backend: { fetch: backendFetch },
         bridge: { arjunah: true },
+        onError: (error) => log.visitorErrors.push(error),
       });
     </script>
   </body>

@@ -518,7 +518,9 @@ async function handle(method, params, sender) {
       return siteSummary(origin);
     }
     if (method === "desktop.status")
-      return desktopSummary(params.refresh === true);
+      return params.cached === true
+        ? cachedDesktopSummary()
+        : desktopSummary(params.refresh === true);
     if (method === "desktop.pair") return pairDesktop(params);
     if (method === "desktop.unpair") {
       const link = await getDesktop();
@@ -701,9 +703,7 @@ async function handle(method, params, sender) {
       documentScopes.delete(tabId);
       // The hosted conversation ended: release the agent thread behind it.
       if (typeof params.conversationId === "string")
-        void getDesktop().then((link) =>
-          desktopEndThread(link, params.conversationId),
-        );
+        endHostedThread(scope.origin, params.conversationId);
     } else if (
       !scope &&
       params.generated === true &&
@@ -762,14 +762,9 @@ async function handle(method, params, sender) {
   if (method === "thread.end") {
     // Leaving or deleting one site-owned thread releases only the agent thread
     // behind it; the document's own session and MCP state stay untouched.
-    pageBinding(sender, params);
-    if (
-      typeof params.conversationId === "string" &&
-      /^[A-Za-z0-9_-]{1,100}$/.test(params.conversationId)
-    )
-      void getDesktop().then((link) =>
-        desktopEndThread(link, params.conversationId),
-      );
+    const binding = pageBinding(sender, params);
+    if (typeof params.conversationId === "string")
+      endHostedThread(binding.origin, params.conversationId);
     return true;
   }
   if (method === "cards.validate") {
@@ -1049,6 +1044,13 @@ async function handle(method, params, sender) {
           "PERMISSION_REQUIRED",
           "The assistant contract needs approval.",
         );
+      // The visitor approved the site's tools for the loop explicitly, as for
+      // hosted chat; the contract alone does not grant them.
+      if (!grant.capabilities?.includes("tools.site"))
+        throw new BrokerError(
+          "PERMISSION_REQUIRED",
+          "Running the site's tools needs approval.",
+        );
       const tool = manifest.tools.find((item) => item.name === params.name);
       if (!tool)
         throw new BrokerError(
@@ -1273,14 +1275,8 @@ async function siteRound(turn, config, request, offered) {
 /** One page `models.generate`, run inside its direct turn. */
 async function directGenerate(turn, params) {
   const grant = await guard(turn, ["models.generate"]);
+  // Enforces the site's `require` (SPEC 4) before any provider is contacted.
   const config = await resolveSiteConfig(grant, params.model);
-  // The site's own constraint on the visitor's models (SPEC 4), checked
-  // before any provider is contacted, whichever way the model was chosen.
-  if (!traitsMatch(requireOrNull(grant.require ?? null), config.traits))
-    throw new BrokerError(
-      "NOT_SUPPORTED",
-      "The model answering this request is not one this site accepts (see require in enable()). The user can choose another in the extension.",
-    );
   turn.providerId = config.catalogProviderId ?? config.providerId;
   turn.usesExposedModel = params.model != null && params.model !== "default";
   const { origin } = turn.binding;
@@ -1355,8 +1351,17 @@ async function directGenerate(turn, params) {
   // A reply without tool calls ends the turn, and with it the state kept for
   // the turn; the conversation itself goes on. One with them keeps its state
   // under the ids the page is about to receive, which it will send back.
+  // One-off completions share their document's key with every other loop the
+  // page runs at the same time, so they end and prune only their own turn.
+  const oneOff = params.conversationId == null;
   if (!result.message.toolCalls.length)
-    await providerState.release(origin, conversation);
+    await (oneOff
+      ? providerState.forget(
+          origin,
+          conversation,
+          current.map((message) => message.callIds),
+        )
+      : providerState.release(origin, conversation));
   else if (issuer && result.rawMessage?.state)
     await providerState.store(
       {
@@ -1368,6 +1373,7 @@ async function directGenerate(turn, params) {
       },
       {
         keep: current.map((message) => message.callIds),
+        prune: !oneOff,
         signal: turn.controller.signal,
       },
     );
@@ -1406,6 +1412,21 @@ async function conversationKey(value, binding) {
 /** A minted id has no ":", so this never collides with one. */
 function documentConversation(session) {
   return `document:${session}`;
+}
+/** The hosted panel's own conversation, named by the content script. */
+function hostedConversation(id) {
+  return `hosted:${id}`;
+}
+/**
+ * Ends the agent session behind one hosted panel conversation, recorded or
+ * not: the record may have been lost with a worker restart.
+ */
+function endHostedThread(origin, id) {
+  if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) return;
+  void installKey()
+    .then((key) => desktopThreadId(key, origin, hostedConversation(id)))
+    .then((thread) => endDesktopThread(thread, { always: true }))
+    .catch(() => {});
 }
 /**
  * One random HMAC key per install for conversation ids (SPEC 5.4), made on
@@ -1453,15 +1474,25 @@ async function storedConversationState() {
  * "Clear stored conversation state" on the settings page (SPEC 11.2): every
  * provider-state entry, every recorded desktop agent thread, and the install
  * key, so every conversation id a page holds is refused from now on and the
- * page creates a new conversation. Page rounds in flight end first, as on
- * revocation, so none stores state under an id that no longer verifies.
+ * page creates a new conversation.
+ *
+ * The key goes first, synchronously: from that moment no new round verifies
+ * an old id or derives an old agent thread, however the awaits below
+ * interleave with it. Rounds already past that check (page rounds and hosted
+ * chat turns alike) are then ended, as on revocation, so their stores see an
+ * aborted signal, and only after that are the entries and threads removed.
  */
 async function clearConversationState() {
-  invalidate((turn) => turn.kind === "direct");
+  const rotated = rotateInstallKey();
+  invalidate(
+    (turn) =>
+      turn.kind === "direct" ||
+      (turn.kind === "hosted" && turn.desktopThread != null),
+  );
   const before = await storedConversationState();
   const threads = await endDesktopThreads(() => true);
   await providerState.clearAll();
-  await rotateInstallKey();
+  await rotated;
   broadcastState("conversations:cleared");
   logEvent(
     "info",
@@ -2065,6 +2096,16 @@ async function resolveSiteConfig(grant, requested) {
   }
   const config = await configFor(target);
   ensureConfigured(config);
+  // The site's constraint on the visitor's models (SPEC 4) holds for every
+  // round they answer, page completions and the hosted chat alike, and
+  // whichever way the model was chosen, including a fallback to the global
+  // default after the pinned model went away. Checked before any provider
+  // is contacted.
+  if (!traitsMatch(requireOrNull(grant?.require ?? null), config.traits))
+    throw new BrokerError(
+      "NOT_SUPPORTED",
+      "The model answering this request is not one this site accepts (see require in enable()). The user can choose another in the extension.",
+    );
   return config;
 }
 function validOrigin(value) {
@@ -2581,15 +2622,52 @@ function desktopSummary(refresh) {
   read.then(done, done);
   return read;
 }
+/**
+ * What is known about the companion without asking it: the stored link and
+ * the last reachability check. The settings page draws this at once, marked
+ * `checking`, while the real read is under way.
+ */
+async function cachedDesktopSummary() {
+  const link = await getDesktop();
+  const baseUrl = link?.baseUrl ?? DESKTOP_DEFAULT_URL;
+  const known = Boolean(reachability.at && reachability.baseUrl === baseUrl);
+  return {
+    baseUrl,
+    running: known ? reachability.running : Boolean(link?.token),
+    paired: Boolean(link?.token),
+    accepted: known ? reachability.accepted : Boolean(link?.token),
+    version: known ? (reachability.version ?? null) : null,
+    device: known ? (reachability.device ?? null) : null,
+    pairedAt: link?.pairedAt ?? null,
+    providers: link?.providers ?? [],
+    providerError: null,
+    checking: true,
+  };
+}
 async function readDesktopSummary(refresh) {
   const link = await getDesktop();
   const baseUrl = link?.baseUrl ?? DESKTOP_DEFAULT_URL;
-  const status = await desktopStatus({ baseUrl, token: link?.token });
+  // What each step of this read cost; a slow read is logged with the split.
+  const startedAt = Date.now();
+  const steps = [];
+  const timed = async (name, work) => {
+    const at = Date.now();
+    try {
+      return await work();
+    } finally {
+      steps.push(`${name} ${Date.now() - at}ms`);
+    }
+  };
+  const status = await timed("status", () =>
+    desktopStatus({ baseUrl, token: link?.token }),
+  );
   reachability = {
     at: Date.now(),
     baseUrl,
     running: status.running,
     accepted: status.running && status.paired,
+    version: status.version,
+    device: status.device,
   };
   let providers = link?.providers ?? [];
   let providerError = null;
@@ -2605,7 +2683,10 @@ async function readDesktopSummary(refresh) {
     }));
   if (status.running && status.paired) {
     try {
-      providers = await desktopProviders(link, refresh);
+      providers = await timed(
+        refresh ? "providers (re-check)" : "providers",
+        () => desktopProviders(link, refresh),
+      );
       // Key order, not content: see stableJson. Plain JSON.stringify here
       // made every read a cache miss, and every miss a write.
       if (stableJson(providers) !== stableJson(link.providers ?? []))
@@ -2616,8 +2697,14 @@ async function readDesktopSummary(refresh) {
       providerError = publicError(error).message;
     }
     if (status.revision > (link.revision ?? 0) || refresh)
-      await pullSync().catch(() => {});
+      await timed("sync", () => pullSync()).catch(() => {});
   }
+  if (Date.now() - startedAt >= 1000)
+    logEvent(
+      "info",
+      "desktop",
+      `desktop app read took ${Date.now() - startedAt}ms: ${steps.join(", ")}${providerError ? ` (${providerError})` : ""}`,
+    );
   return {
     baseUrl,
     running: status.running,
@@ -3803,6 +3890,21 @@ async function hostedChat(
   const siteAnswers = config.kind === "site";
   if (!siteAnswers) ensureConfigured(config);
   let usageReported = !siteAnswers;
+  // The panel conversation's agent session on the desktop companion (SPEC
+  // 12.3.1). Derived from the origin under the install key and recorded like
+  // a page conversation's, so revoking the site or clearing stored
+  // conversation state ends it, and a cleared key never resumes it.
+  const thread =
+    !siteAnswers &&
+    config.kind === "desktop" &&
+    config.supportsThreads &&
+    options.conversationId != null
+      ? await conversationThread(
+          turn.binding.origin,
+          hostedConversation(options.conversationId),
+        )
+      : null;
+  turn.desktopThread = thread;
   const messages = [
     {
       role: "system",
@@ -3951,7 +4053,7 @@ async function hostedChat(
             true,
             {
               continuation,
-              thread: options.conversationId ?? null,
+              thread,
               progress: turn.progress
                 ? {
                     id: `${turn.progress}-${round}`.slice(0, 100),

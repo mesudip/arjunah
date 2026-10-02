@@ -109,6 +109,18 @@ async function desktopFetch(link, path, init = {}) {
     "PROVIDER_ERROR",
   ).catch(() => null);
   if (!response.ok) {
+    // Every agent run the companion allows is still working (its own limit,
+    // not the subscription's), so this one was refused before it started.
+    if (body?.error?.code === "RATE_LIMITED" && body.error.reason === "busy") {
+      const wait = body.error.retryAfterMs;
+      throw new BrokerError(
+        "RATE_LIMITED",
+        "The desktop app is already running as many agent sessions as it allows. Try again in a moment.",
+        Number.isSafeInteger(wait) && wait >= 0
+          ? { retryAfterMs: Math.min(wait, 60_000) }
+          : undefined,
+      );
+    }
     const classified = Object.hasOwn(AGENT_FAILURES, body?.error?.code)
       ? body.error.code
       : null;

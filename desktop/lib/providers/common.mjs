@@ -77,7 +77,25 @@ export async function which(binary, extraPaths = []) {
 // SIGTERM, then SIGKILL, and a `timedOut` flag so the caller can say what
 // happened instead of mistaking empty output for a signed-out account.
 const KILL_GRACE_MS = 2000;
+// Every detection and probe command reports what it cost (server.mjs logs it),
+// so the desktop log says which step is slow with numbers instead of a guess.
+let commandObserver = null;
+export function observeCommands(observer) {
+  commandObserver = observer;
+}
+function reportCommand(binary, args, startedAt, outcome) {
+  try {
+    commandObserver?.({
+      command: describeCommand(binary, args),
+      ms: Date.now() - startedAt,
+      outcome,
+    });
+  } catch {
+    /* diagnostics never break detection */
+  }
+}
 export function run(binary, args, { env, cwd, timeoutMs = 20_000 } = {}) {
+  const startedAt = Date.now();
   return new Promise((resolve) => {
     let timedOut = false;
     let killTimer = null;
@@ -93,6 +111,16 @@ export function run(binary, args, { env, cwd, timeoutMs = 20_000 } = {}) {
       (error, stdout, stderr) => {
         clearTimeout(deadline);
         clearTimeout(killTimer);
+        reportCommand(
+          binary,
+          args,
+          startedAt,
+          timedOut
+            ? `timed out after ${timeoutMs}ms`
+            : error
+              ? `exit ${error.code ?? "error"}`
+              : "exit 0",
+        );
         resolve({
           code: error?.code ?? 0,
           stdout: String(stdout ?? ""),
@@ -408,6 +436,7 @@ export function jsonLineProbe(
   requests,
   { done, env, cwd, timeoutMs = 20_000 } = {},
 ) {
+  const startedAt = Date.now();
   return new Promise((resolve) => {
     let child;
     try {
@@ -437,6 +466,16 @@ export function jsonLineProbe(
       } catch {
         /* gone */
       }
+      reportCommand(
+        binary,
+        args,
+        startedAt,
+        error === "timeout"
+          ? `timed out after ${timeoutMs}ms`
+          : error
+            ? `ended: ${error}`
+            : `answered (${messages.length} message${messages.length === 1 ? "" : "s"})`,
+      );
       resolve({
         messages,
         error: error ?? null,

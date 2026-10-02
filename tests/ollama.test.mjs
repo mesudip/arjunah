@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { generate, listOllamaModels } from "../src/lib/provider.js";
 import { publicError } from "../src/lib/errors.js";
 import {
+  OLLAMA_KEY_REFUSAL,
   OLLAMA_ORIGIN_REFUSAL,
+  OLLAMA_PROXY_REFUSAL,
   normalizeOllamaModels,
   ollamaDisplayName,
   ollamaPreferredModel,
@@ -437,10 +439,17 @@ test("Ollama refusals become our own sentences, and a cut-off stream is an error
   withFetch(t, () => reply());
   const ask = { messages: [{ role: "user", content: "hi" }] };
   const cases = [
+    // Ollama's own Origin check answers 403 with no body at all.
+    [
+      () => new Response(null, { status: 403 }),
+      "PROVIDER_ERROR",
+      OLLAMA_ORIGIN_REFUSAL,
+    ],
+    // Anything that says something is not Ollama's Origin check.
     [
       () => new Response("Forbidden", { status: 403 }),
       "PROVIDER_ERROR",
-      OLLAMA_ORIGIN_REFUSAL,
+      OLLAMA_PROXY_REFUSAL,
     ],
     [
       () => Response.json({ error: "model 'x' not found" }, { status: 404 }),
@@ -619,7 +628,10 @@ test("discovery reads each changed model once, skips models the server cannot ru
           },
         ],
       });
-    if (showStatus !== 200) return new Response("no", { status: showStatus });
+    if (showStatus !== 200)
+      return new Response(showStatus === 403 ? null : "no", {
+        status: showStatus,
+      });
     if (payload.model === "llama3.2:latest" && flaky)
       throw new TypeError("Failed to fetch");
     if (payload.model === "gpt-oss:20b")
@@ -928,7 +940,22 @@ test("Ollama refusals map to the SPEC 9 codes with our own sentences", () => {
     null,
   ]);
   assert.deepEqual(map(401, "unauthorized"), ["NOT_CONFIGURED", false, null]);
+  assert.deepEqual(map(403, "", { emptyBody: true }), [
+    "PROVIDER_ERROR",
+    false,
+    null,
+  ]);
   assert.deepEqual(map(403, "Forbidden"), ["PROVIDER_ERROR", false, null]);
+  // With a key, a 403 that is not Ollama's own Origin check is most likely
+  // the proxy refusing the key.
+  const keyed = ollamaRefusal(403, "", { ...local, apiKey: "k" });
+  assert.equal(keyed.code, "NOT_CONFIGURED");
+  assert.equal(keyed.message, OLLAMA_KEY_REFUSAL);
+  assert.equal(
+    ollamaRefusal(403, "", local, { emptyBody: true }).message,
+    OLLAMA_ORIGIN_REFUSAL,
+  );
+  assert.equal(ollamaRefusal(403, "", local).message, OLLAMA_PROXY_REFUSAL);
   assert.deepEqual(map(503, "busy"), ["PROVIDER_ERROR", true, null]);
   assert.deepEqual(map(400, "bad request"), ["PROVIDER_ERROR", false, null]);
   // A 404 on the model list is a wrong address, not a missing model.

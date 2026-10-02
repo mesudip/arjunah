@@ -8,439 +8,1345 @@
     <link rel="stylesheet" href="options.css" />
   </head>
   <body>
-    <main>
-      <header>
-        <img
-          class="mark"
-          src="icons/icon-128.png"
-          alt=""
-          width="52"
-          height="52"
-        />
-        <div>
-          <h1>अर्जुनः</h1>
-          <p class="muted">
-            Bring your own AI provider or subscription to the web. Websites see
-            only the models you expose to them.
-          </p>
-        </div>
-      </header>
+    <a class="skip" href="#main">Skip to content</a>
+    <div class="shell">
+      <aside class="sidebar">
+        <a class="brand" href="#overview">
+          <img src="icons/icon-128.png" alt="" width="34" height="34" />
+          <span class="brand-text">
+            <strong>अर्जुनः</strong>
+            <small>Settings</small>
+          </span>
+        </a>
+        <nav class="nav" aria-label="Settings sections">
+          <a class="nav-item" href="#overview" data-nav="overview">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="3.5" y="3.5" width="7" height="8" rx="1.8" />
+              <rect x="13.5" y="3.5" width="7" height="5" rx="1.8" />
+              <rect x="13.5" y="11.5" width="7" height="9" rx="1.8" />
+              <rect x="3.5" y="14.5" width="7" height="6" rx="1.8" />
+            </svg>
+            <span>Overview</span>
+          </a>
+          <a class="nav-item" href="#providers" data-nav="providers">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M12 3.5 13.8 8a2 2 0 0 0 1.2 1.2l4.5 1.8-4.5 1.8a2 2 0 0 0-1.2 1.2L12 18.5 10.2 14A2 2 0 0 0 9 12.8L4.5 11 9 9.2A2 2 0 0 0 10.2 8Z"
+              />
+              <path d="M19 3v3M17.5 4.5h3M5 17.5v3M3.5 19h3" />
+            </svg>
+            <span>Providers</span>
+            <span class="nav-meta" id="nav-providers"></span>
+          </a>
+          <a class="nav-item" href="#sites" data-nav="sites">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="8.5" />
+              <path
+                d="M3.5 12h17M12 3.5c2.4 2.4 3.6 5.2 3.6 8.5s-1.2 6.1-3.6 8.5c-2.4-2.4-3.6-5.2-3.6-8.5s1.2-6.1 3.6-8.5Z"
+              />
+            </svg>
+            <span>Sites</span>
+            <span class="nav-meta" id="nav-sites"></span>
+          </a>
+          <a class="nav-item" href="#desktop" data-nav="desktop">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="3.5" y="4.5" width="17" height="11.5" rx="2" />
+              <path d="M9 20h6M12 16v4" />
+            </svg>
+            <span>Desktop app</span>
+            <span class="nav-meta" id="nav-desktop"></span>
+          </a>
+          <a class="nav-item" href="#diagnostics" data-nav="diagnostics">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3.5 12h3.8l2.5-6.5 4.4 13 2.5-6.5h3.8" />
+            </svg>
+            <span>Diagnostics</span>
+          </a>
+          <a class="nav-item" href="#about" data-nav="about">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="8.5" />
+              <path d="M12 11v5.5M12 7.6v.1" />
+            </svg>
+            <span>About</span>
+          </a>
+        </nav>
+        <p class="sidebar-note">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3.5 5 6.2v5.3c0 4.3 3 7.7 7 9 4-1.3 7-4.7 7-9V6.2Z" />
+            <path d="m9 12 2.2 2.2L15.5 10" />
+          </svg>
+          Keys stay in this browser. No analytics.
+        </p>
+      </aside>
 
-      <section class="card">
-        <div class="section-head">
-          <h2>Providers and default model</h2>
-          <span class="eyebrow">Wallet</span>
-        </div>
-        <p class="help">
-          Every website you approve uses the global default model unless you
-          pick another one for that site in the toolbar popup or the chat
-          header. Account details stay here; sites see model names only.
-        </p>
-        <div id="providers" class="providers"></div>
-        <p id="active-status" class="status" role="status"></p>
-      </section>
-
-      <section class="card" id="desktop-section">
-        <div class="section-head">
-          <h2>Desktop app</h2>
-          <span class="eyebrow">Subscriptions</span>
-        </div>
-        <p id="desktop-state" class="status" role="status"></p>
-        <p class="help">
-          अर्जुनः Desktop runs on this computer and shares your Claude Code,
-          Codex, or OpenCode sign-in with paired browsers. Settings saved here
-          sync to the app and back.
-        </p>
-        <form id="pair-form">
-          <label class="field"
-            >Desktop address<input
-              id="desktop-url"
-              type="url"
-              value="http://127.0.0.1:48123"
-              required
-          /></label>
-          <label class="field"
-            >Pairing code<input
-              id="desktop-code"
-              inputmode="numeric"
-              pattern="[0-9 ]{6,7}"
-              autocomplete="one-time-code"
-              placeholder="Shown in the desktop app"
-          /></label>
-          <div class="actions">
-            <button type="button" id="unpair" class="btn btn-danger">
-              Unpair
-            </button>
-            <button
-              type="button"
-              id="refresh-desktop"
-              class="btn btn-secondary"
-            >
-              Refresh
-            </button>
-            <a
-              id="dashboard-link"
-              class="btn btn-secondary"
-              target="_blank"
-              rel="noreferrer"
-              >Open dashboard</a
-            >
-            <button type="submit" id="pair" class="btn btn-primary">
-              Pair
-            </button>
-          </div>
-        </form>
-        <p class="help">
-          Start the app with <code>npm run desktop</code> from the repository,
-          then enter the six-digit code it prints. Pairing is per browser
-          profile and can be revoked from either side.
-        </p>
-      </section>
-
-      <section class="card">
-        <div class="section-head">
-          <h2>OpenCode Zen API key</h2>
-          <span class="eyebrow">API key</span>
-        </div>
-        <p class="help">
-          Use an OpenCode Zen API key with its native model formats. अर्जुनः
-          routes GPT, Claude, Gemini, Grok, Muse, Qwen, and open-model families
-          through the format each model requires. The key stays in this browser
-          profile and syncs only to a desktop app you paired.
-        </p>
-        <form id="opencode-form">
-          <label class="field"
-            >Base URL<input
-              id="opencode-base-url"
-              type="url"
-              required
-              readonly /></label
-          ><label class="field"
-            >API key<input
-              id="opencode-api-key"
-              type="password"
-              autocomplete="off"
-              placeholder="Stored locally"
-          /></label>
-          <label class="keep-key"
-            ><input id="opencode-keep-key" type="checkbox" /> Use the saved
-            OpenCode API key</label
-          >
-          <label class="field"
-            >Default model<span id="opencode-model-mount"></span
-          ></label>
-          <div class="actions">
-            <button type="button" id="clear-opencode" class="btn btn-danger">
-              Clear key
-            </button>
-            <button type="button" id="test-opencode" class="btn btn-secondary">
-              Test connection
-            </button>
-            <button type="submit" class="btn btn-primary">Save key</button>
-          </div>
-        </form>
-        <p id="opencode-status" class="status" role="status"></p>
-        <p class="help">
-          Create a key at <a href="https://opencode.ai/auth">OpenCode Zen</a>.
-          Saving the key loads the models your account can call and selects one
-          for you; pick a different default above and save again to change it.
-          Testing sends a short tool-enabled request to the selected model.
-        </p>
-      </section>
-
-      <section class="card" id="ollama-section">
-        <div class="section-head">
-          <h2>Ollama on your own server</h2>
-          <span class="eyebrow">Self-hosted</span>
-        </div>
-        <p class="help">
-          Use the models of an Ollama server on this computer or your network.
-          अर्जुनः reads each model's own capabilities from the server, so images
-          go only to vision models and site tools only to models that accept
-          them. Requests go only to the address you enter, except for cloud
-          models the server itself forwards to ollama.com, which are marked.
-        </p>
-        <form id="ollama-form">
-          <label class="field"
-            >Server address<input
-              id="ollama-base-url"
-              type="text"
-              inputmode="url"
-              autocomplete="off"
-              spellcheck="false"
-              placeholder="http://127.0.0.1:11434"
-          /></label>
-          <label class="field"
-            >API key (optional)<input
-              id="ollama-api-key"
-              type="password"
-              autocomplete="off"
-              placeholder="Only for a server behind an authenticating proxy"
-          /></label>
-          <label class="keep-key"
-            ><input id="ollama-keep-key" type="checkbox" /> Use the saved
-            key</label
-          >
-          <label class="field"
-            >Default model<span id="ollama-model-mount"></span
-          ></label>
-          <div class="actions">
-            <button type="button" id="clear-ollama" class="btn btn-danger">
-              Disconnect
-            </button>
-            <button type="button" id="refresh-ollama" class="btn btn-ghost">
-              Refresh models
-            </button>
-            <button type="button" id="test-ollama" class="btn btn-secondary">
-              Test connection
-            </button>
-            <button type="submit" class="btn btn-primary">
-              Save and load models
-            </button>
-          </div>
-        </form>
-        <p id="ollama-status" class="status" role="status"></p>
-        <p class="help">
-          Pull a model first, for example <code>ollama pull qwen3-vl:2b</code>.
-          To reach a server on another computer, start it with
-          <code>OLLAMA_HOST=0.0.0.0</code>. Plain <code>http</code> is accepted
-          only for this computer and local-network addresses. Ollama refuses
-          requests that carry a browser extension's origin, so अर्जुनः removes
-          that header on its own requests to this one address; you do not need
-          to change <code>OLLAMA_ORIGINS</code>, and web pages' requests to the
-          server are untouched.
-        </p>
-      </section>
-
-      <section class="card" id="ollama-cloud-section">
-        <div class="section-head">
-          <h2>Ollama Cloud API key</h2>
-          <span class="eyebrow">API key</span>
-        </div>
-        <p class="help">
-          Use the models Ollama hosts at ollama.com with an API key. The key
-          stays in this browser profile and syncs only to a desktop app you
-          paired.
-        </p>
-        <form id="ollama-cloud-form">
-          <label class="field"
-            >Base URL<input
-              id="ollama-cloud-base-url"
-              type="url"
-              value="https://ollama.com"
-              readonly /></label
-          ><label class="field"
-            >API key<input
-              id="ollama-cloud-api-key"
-              type="password"
-              autocomplete="off"
-              placeholder="Ollama API key"
-          /></label>
-          <label class="keep-key"
-            ><input id="ollama-cloud-keep-key" type="checkbox" /> Use the saved
-            Ollama API key</label
-          >
-          <label class="field"
-            >Default model<span id="ollama-cloud-model-mount"></span
-          ></label>
-          <div class="actions">
-            <button
-              type="button"
-              id="clear-ollama-cloud"
-              class="btn btn-danger"
-            >
-              Clear key
-            </button>
-            <button
-              type="button"
-              id="refresh-ollama-cloud"
-              class="btn btn-ghost"
-            >
-              Refresh models
-            </button>
-            <button
-              type="button"
-              id="test-ollama-cloud"
-              class="btn btn-secondary"
-            >
-              Test connection
-            </button>
-            <button type="submit" class="btn btn-primary">Save key</button>
-          </div>
-        </form>
-        <p id="ollama-cloud-status" class="status" role="status"></p>
-        <p class="help">
-          Create a key at
-          <a href="https://ollama.com/settings/keys">ollama.com/settings/keys</a
-          >. Saving the key loads the hosted catalog with each model's
-          capabilities and selects a default for you.
-        </p>
-      </section>
-
-      <section class="card">
-        <div class="section-head">
-          <h2>OpenAI API key</h2>
-          <span class="eyebrow">API key</span>
-        </div>
-        <p class="help">
-          Your credential stays in this browser profile and syncs only to a
-          desktop app you paired. Use a restricted key and provider-side
-          spending limits.
-        </p>
-        <form id="provider-form">
-          <label class="field"
-            >Base URL<input id="base-url" type="url" required readonly /></label
-          ><label class="field"
-            >Default model<span id="openai-model-mount"></span></label
-          ><label class="field"
-            >API key<input
-              id="api-key"
-              type="password"
-              autocomplete="off"
-              placeholder="Stored locally"
-          /></label>
-          <label class="keep-key"
-            ><input id="keep-key" type="checkbox" /> Use the saved OpenAI API
-            key</label
-          >
-          <div class="actions">
-            <button type="button" id="clear-provider" class="btn btn-danger">
-              Clear key
-            </button>
-            <button type="button" id="test" class="btn btn-secondary">
-              Test connection
-            </button>
-            <button type="submit" class="btn btn-primary">Save key</button>
-          </div>
-        </form>
-        <p id="provider-status" class="status" role="status"></p>
-        <p class="help">
-          Test connection sends a short sample request to the selected model.
-          GPT-5.6 tool requests use non-reasoning mode for compatibility.
-        </p>
-      </section>
-
-      <section class="card">
-        <div class="section-head">
-          <h2>Site grants</h2>
-          <span class="eyebrow">Access</span>
-        </div>
-        <p class="help">
-          Grants are exact-origin permissions with an access level and the model
-          you chose for that site. Revoking forces the site to ask again and
-          deletes the conversation state stored for it.
-        </p>
-        <div id="grants" class="grants"></div>
-        <div class="actions">
-          <button id="clear-grants" class="btn btn-danger">
-            Revoke all site grants
-          </button>
-        </div>
-        <p id="grant-status" class="status" role="status"></p>
-        <div class="stored-state">
-          <div>
-            <h3>Stored conversation state</h3>
-            <p class="help">
-              Provider state kept between the rounds of a site's own tool turns,
-              and the desktop agent sessions those conversations resumed.
-              Clearing it ends every conversation a site holds: sites keep their
-              grants, but must start a new conversation.
-            </p>
-            <p id="stored-state-summary" class="detail">Checking…</p>
-          </div>
-          <button type="button" id="clear-state" class="btn btn-danger">
-            Clear stored conversation state
-          </button>
-        </div>
+      <main id="main" tabindex="-1">
         <div
-          id="clear-state-confirm"
-          class="confirm"
-          role="alertdialog"
-          aria-labelledby="clear-state-question"
+          id="app-alert"
+          class="banner banner-danger"
+          role="alert"
+          hidden
+        ></div>
+
+        <!-- Overview -->
+        <section
+          class="view"
+          data-view="overview"
+          aria-labelledby="overview-title"
+        >
+          <header class="view-head">
+            <h1 id="overview-title" tabindex="-1">Overview</h1>
+            <p class="lede">
+              What websites can use right now, and anything that needs your
+              attention.
+            </p>
+          </header>
+          <div class="split">
+            <div class="split-main">
+              <div id="attention" class="attention" hidden></div>
+              <section
+                id="welcome"
+                class="panel welcome"
+                aria-labelledby="welcome-title"
+                hidden
+              >
+                <div class="welcome-body">
+                  <h2 id="welcome-title">Connect your first AI provider</h2>
+                  <p>
+                    Use an API key, your own Ollama server, or the Claude,
+                    ChatGPT, or OpenCode subscription you already have. Websites
+                    ask before they use it, and they never see your key.
+                  </p>
+                  <div class="actions">
+                    <a class="btn btn-primary" href="#providers"
+                      >Connect a provider</a
+                    >
+                    <a class="btn btn-secondary" href="#desktop"
+                      >Use a subscription</a
+                    >
+                  </div>
+                </div>
+                <ol class="steps-inline">
+                  <li>
+                    <span><b>Connect</b> a provider here.</span>
+                  </li>
+                  <li>
+                    <span><b>Visit</b> a site that supports अर्जुनः.</span>
+                  </li>
+                  <li>
+                    <span><b>Approve</b> what that site may use.</span>
+                  </li>
+                </ol>
+              </section>
+              <section
+                id="default-panel"
+                class="panel"
+                aria-labelledby="default-title"
+                hidden
+              >
+                <div class="panel-head">
+                  <div>
+                    <h2 id="default-title">Default model</h2>
+                    <p class="panel-desc">
+                      Sites you approve use this model, unless you choose
+                      another one for a site in the toolbar popup or in its
+                      chat.
+                    </p>
+                  </div>
+                </div>
+                <div class="panel-body">
+                  <div id="global-model-mount" class="global-picker"></div>
+                  <p id="global-model-hint" class="hint"></p>
+                </div>
+              </section>
+            </div>
+            <div id="tiles" class="tiles split-side" hidden></div>
+          </div>
+          <div class="split" id="overview-more" hidden>
+            <div class="split-main">
+              <section class="panel" aria-labelledby="usage-title">
+                <div class="panel-head">
+                  <div>
+                    <h2 id="usage-title">Usage today</h2>
+                    <p class="panel-desc">
+                      Counted in this browser. Plan usage is what each provider
+                      reports.
+                    </p>
+                  </div>
+                  <a class="btn btn-ghost btn-sm" href="#providers"
+                    >Providers</a
+                  >
+                </div>
+                <div id="usage-list" class="usage-list"></div>
+              </section>
+            </div>
+            <div class="split-side">
+              <section class="panel" aria-labelledby="recent-sites-title">
+                <div class="panel-head">
+                  <div>
+                    <h2 id="recent-sites-title">Sites</h2>
+                    <p class="panel-desc">
+                      The ones you approved most recently.
+                    </p>
+                  </div>
+                  <a class="btn btn-ghost btn-sm" href="#sites">All sites</a>
+                </div>
+                <div id="recent-sites" class="rows"></div>
+              </section>
+            </div>
+          </div>
+        </section>
+
+        <!-- Providers -->
+        <section
+          class="view"
+          data-view="providers"
+          aria-labelledby="providers-title"
           hidden
         >
-          <p id="clear-state-question"></p>
-          <div class="actions">
-            <button type="button" id="clear-state-cancel" class="btn btn-ghost">
-              Cancel
-            </button>
-            <button type="button" id="clear-state-yes" class="btn btn-danger">
-              Delete and end conversations
-            </button>
-          </div>
-        </div>
-        <p id="state-status" class="status" role="status"></p>
-      </section>
+          <header class="view-head">
+            <h1 id="providers-title" tabindex="-1">Providers</h1>
+            <p class="lede">
+              The AI accounts websites can use. Keys stay in this browser, and
+              websites see model names only.
+            </p>
+          </header>
+          <div id="provider-list" class="provider-groups"></div>
+        </section>
 
-      <section class="card" id="logs-section">
-        <div class="section-head">
-          <h2>Diagnostics</h2>
-          <span class="eyebrow">Logs</span>
-        </div>
-        <p class="help">
-          What the extension and the desktop app are doing, newest last. Useful
-          when a reply takes a long time: the desktop log names the stage a
-          local agent is in. Entries hold names, models, counts, and timings
-          only — never prompts, replies, keys, or page content. They stay in
-          this browser and on this computer.
-        </p>
-        <div class="log-controls">
-          <div class="log-tabs" role="tablist">
-            <button
-              type="button"
-              id="log-tab-extension"
-              class="btn btn-secondary"
-              role="tab"
-              aria-selected="true"
-            >
-              Extension
-            </button>
-            <button
-              type="button"
-              id="log-tab-desktop"
-              class="btn btn-ghost"
-              role="tab"
-              aria-selected="false"
-            >
-              Desktop app
-            </button>
-          </div>
-          <label class="log-live"
-            ><input id="log-live" type="checkbox" /> Keep refreshing</label
-          >
-          <div class="actions">
-            <button type="button" id="log-clear" class="btn btn-danger">
-              Clear
-            </button>
-            <button type="button" id="log-copy" class="btn btn-secondary">
-              Copy
-            </button>
-            <button type="button" id="log-refresh" class="btn btn-primary">
-              Refresh
-            </button>
-          </div>
-        </div>
-        <pre id="log-view" class="log-view" tabindex="0"></pre>
-        <p id="log-status" class="status" role="status"></p>
-      </section>
-
-      <section class="card">
-        <div class="section-head">
-          <h2>Protocol</h2>
-          <span class="eyebrow">v1.0.0</span>
-        </div>
-        <p class="help">
-          This build implements अर्जुनः Protocol v1.0.0: tiered site access, a
-          unified model catalog, widget options, and extension-collected tool
-          inputs that stay out of model traffic. It has no analytics or
-          extension-operated relay. Desktop providers run locally installed CLIs
-          with their file and shell tools disabled.
-        </p>
-        <a id="open-popup" href="popup.html"
-          >Open the toolbar popup in this tab</a
+        <!-- OpenAI -->
+        <section
+          class="view detail"
+          data-view="providers/openai"
+          aria-labelledby="openai-title"
+          hidden
         >
-      </section>
-    </main>
+          <a class="back" href="#providers">Providers</a>
+          <header class="detail-head" id="openai-head"></header>
+          <div class="split">
+            <div class="split-main">
+              <form id="provider-form" class="panel">
+                <div class="panel-head">
+                  <div>
+                    <h2>Connection</h2>
+                    <p class="panel-desc">
+                      The key stays in this browser profile and syncs only to a
+                      desktop app you paired. Use a restricted key with
+                      provider-side spending limits.
+                    </p>
+                  </div>
+                </div>
+                <div class="panel-body fields">
+                  <div class="field key-field">
+                    <label for="api-key">API key</label>
+                    <div class="saved-key" hidden>
+                      <span class="saved-key-text"
+                        >A key is saved in this browser.</span
+                      >
+                      <button
+                        type="button"
+                        class="btn btn-ghost btn-sm"
+                        data-key-action="replace"
+                      >
+                        Replace key
+                      </button>
+                    </div>
+                    <input
+                      id="api-key"
+                      type="password"
+                      autocomplete="off"
+                      spellcheck="false"
+                      placeholder="sk-…"
+                    />
+                    <button
+                      type="button"
+                      class="btn btn-ghost btn-sm keep-saved"
+                      data-key-action="keep"
+                      hidden
+                    >
+                      Keep the saved key
+                    </button>
+                    <input id="keep-key" type="checkbox" hidden />
+                  </div>
+                  <div class="field">
+                    <span class="label" id="openai-model-label">Model</span>
+                    <span id="openai-model-mount"></span>
+                    <span class="hint"
+                      >Pick one, or type any model id your key can call.</span
+                    >
+                  </div>
+                  <div class="field">
+                    <label for="base-url">Endpoint</label>
+                    <input
+                      id="base-url"
+                      class="plain"
+                      type="url"
+                      required
+                      readonly
+                    />
+                  </div>
+                </div>
+                <div class="panel-foot">
+                  <div class="actions">
+                    <button
+                      type="submit"
+                      id="openai-save"
+                      class="btn btn-primary"
+                    >
+                      Connect
+                    </button>
+                    <button type="button" id="test" class="btn btn-secondary">
+                      Test connection
+                    </button>
+                  </div>
+                  <p id="provider-status" class="status" role="status"></p>
+                </div>
+              </form>
+            </div>
+            <aside class="split-side">
+              <section
+                class="panel"
+                id="openai-usage"
+                aria-label="OpenAI usage"
+                hidden
+              ></section>
+              <details class="help" open>
+                <summary>How this works</summary>
+                <p>
+                  Create a key at
+                  <a
+                    href="https://platform.openai.com/api-keys"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    >platform.openai.com/api-keys</a
+                  >. Test connection sends a short sample request to the
+                  selected model. GPT-5.6 tool requests use non-reasoning mode
+                  for compatibility.
+                </p>
+              </details>
+              <section
+                class="danger-zone"
+                aria-labelledby="openai-danger-title"
+                hidden
+              >
+                <div class="danger-row">
+                  <div>
+                    <h3 id="openai-danger-title">Remove the OpenAI key</h3>
+                    <p>
+                      Sites that answer with OpenAI stop working until you add a
+                      key again.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    id="clear-provider"
+                    class="btn btn-danger"
+                  >
+                    Remove key
+                  </button>
+                </div>
+              </section>
+            </aside>
+          </div>
+        </section>
+
+        <!-- OpenCode Zen -->
+        <section
+          class="view detail"
+          data-view="providers/opencode-api"
+          aria-labelledby="opencode-title"
+          hidden
+        >
+          <a class="back" href="#providers">Providers</a>
+          <header class="detail-head" id="opencode-head"></header>
+          <div class="split">
+            <div class="split-main">
+              <form id="opencode-form" class="panel">
+                <div class="panel-head">
+                  <div>
+                    <h2>Connection</h2>
+                    <p class="panel-desc">
+                      The key stays in this browser profile and syncs only to a
+                      desktop app you paired.
+                    </p>
+                  </div>
+                </div>
+                <div class="panel-body fields">
+                  <div class="field key-field">
+                    <label for="opencode-api-key">API key</label>
+                    <div class="saved-key" hidden>
+                      <span class="saved-key-text"
+                        >A key is saved in this browser.</span
+                      >
+                      <button
+                        type="button"
+                        class="btn btn-ghost btn-sm"
+                        data-key-action="replace"
+                      >
+                        Replace key
+                      </button>
+                    </div>
+                    <input
+                      id="opencode-api-key"
+                      type="password"
+                      autocomplete="off"
+                      spellcheck="false"
+                      placeholder="OpenCode API key"
+                    />
+                    <button
+                      type="button"
+                      class="btn btn-ghost btn-sm keep-saved"
+                      data-key-action="keep"
+                      hidden
+                    >
+                      Keep the saved key
+                    </button>
+                    <input id="opencode-keep-key" type="checkbox" hidden />
+                  </div>
+                  <div class="field">
+                    <span class="label">Model</span>
+                    <span id="opencode-model-mount"></span>
+                    <span class="hint" id="opencode-model-hint"
+                      >Saving your key loads the models it can call.</span
+                    >
+                  </div>
+                  <div class="field">
+                    <label for="opencode-base-url">Endpoint</label>
+                    <input
+                      id="opencode-base-url"
+                      class="plain"
+                      type="url"
+                      required
+                      readonly
+                    />
+                  </div>
+                </div>
+                <div class="panel-foot">
+                  <div class="actions">
+                    <button
+                      type="submit"
+                      id="opencode-save"
+                      class="btn btn-primary"
+                    >
+                      Connect
+                    </button>
+                    <button
+                      type="button"
+                      id="test-opencode"
+                      class="btn btn-secondary"
+                    >
+                      Test connection
+                    </button>
+                  </div>
+                  <p id="opencode-status" class="status" role="status"></p>
+                </div>
+              </form>
+            </div>
+            <aside class="split-side">
+              <section
+                class="panel"
+                id="opencode-usage"
+                aria-label="OpenCode Zen usage"
+                hidden
+              ></section>
+              <details class="help" open>
+                <summary>How this works</summary>
+                <p>
+                  Create a key at
+                  <a
+                    href="https://opencode.ai/auth"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    >OpenCode Zen</a
+                  >. अर्जुनः routes GPT, Claude, Gemini, Grok, Muse, Qwen, and
+                  open model families through the format each one requires.
+                  Saving the key loads the models your account can call and
+                  picks one. Test connection sends a short tool-enabled request
+                  to the selected model; a key that completes it is a paid (Go)
+                  key.
+                </p>
+              </details>
+              <section
+                class="danger-zone"
+                aria-labelledby="opencode-danger-title"
+                hidden
+              >
+                <div class="danger-row">
+                  <div>
+                    <h3 id="opencode-danger-title">
+                      Remove the OpenCode Zen key
+                    </h3>
+                    <p>
+                      Sites that answer with OpenCode Zen stop working until you
+                      add a key again.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    id="clear-opencode"
+                    class="btn btn-danger"
+                  >
+                    Remove key
+                  </button>
+                </div>
+              </section>
+            </aside>
+          </div>
+        </section>
+
+        <!-- Ollama on your own server -->
+        <section
+          class="view detail"
+          data-view="providers/ollama"
+          aria-labelledby="ollama-title"
+          hidden
+        >
+          <a class="back" href="#providers">Providers</a>
+          <header class="detail-head" id="ollama-head"></header>
+          <div class="split">
+            <div class="split-main">
+              <div id="ollama-notices" class="notices"></div>
+              <form id="ollama-form" class="panel">
+                <div class="panel-head">
+                  <div>
+                    <h2>Server</h2>
+                    <p class="panel-desc">
+                      Requests go only to this address, except for cloud models
+                      the server itself forwards to ollama.com, which are
+                      marked.
+                    </p>
+                  </div>
+                </div>
+                <div class="panel-body fields">
+                  <div class="field">
+                    <label for="ollama-base-url">Server address</label>
+                    <input
+                      id="ollama-base-url"
+                      type="text"
+                      inputmode="url"
+                      autocomplete="off"
+                      spellcheck="false"
+                      placeholder="http://127.0.0.1:11434"
+                    />
+                    <span class="hint"
+                      >For Ollama on this computer,
+                      <code>127.0.0.1:11434</code>.</span
+                    >
+                  </div>
+                  <div class="field">
+                    <span class="label">Model</span>
+                    <span id="ollama-model-mount"></span>
+                    <span class="hint" id="ollama-model-hint"
+                      >Connecting loads the server's models and what each one
+                      accepts.</span
+                    >
+                  </div>
+                  <details class="advanced" id="ollama-auth">
+                    <summary>Authentication (optional)</summary>
+                    <div class="field key-field">
+                      <label for="ollama-api-key">API key</label>
+                      <div class="saved-key" hidden>
+                        <span class="saved-key-text"
+                          >A key is saved for this server.</span
+                        >
+                        <button
+                          type="button"
+                          class="btn btn-ghost btn-sm"
+                          data-key-action="replace"
+                        >
+                          Replace key
+                        </button>
+                      </div>
+                      <input
+                        id="ollama-api-key"
+                        type="password"
+                        autocomplete="off"
+                        spellcheck="false"
+                        placeholder="Only for a server behind an authenticating proxy"
+                      />
+                      <button
+                        type="button"
+                        class="btn btn-ghost btn-sm keep-saved"
+                        data-key-action="keep"
+                        hidden
+                      >
+                        Keep the saved key
+                      </button>
+                      <input id="ollama-keep-key" type="checkbox" hidden />
+                    </div>
+                  </details>
+                </div>
+                <div class="panel-foot">
+                  <div class="actions">
+                    <button
+                      type="submit"
+                      id="ollama-save"
+                      class="btn btn-primary"
+                    >
+                      Connect
+                    </button>
+                    <button
+                      type="button"
+                      id="test-ollama"
+                      class="btn btn-secondary"
+                    >
+                      Test connection
+                    </button>
+                    <button
+                      type="button"
+                      id="refresh-ollama"
+                      class="btn btn-ghost"
+                    >
+                      Refresh models
+                    </button>
+                  </div>
+                  <p id="ollama-status" class="status" role="status"></p>
+                </div>
+              </form>
+            </div>
+            <aside class="split-side">
+              <section
+                class="panel"
+                id="ollama-usage"
+                aria-label="Ollama usage"
+                hidden
+              ></section>
+              <details class="help" open>
+                <summary>How this works</summary>
+                <p>
+                  Pull a model first, for example
+                  <code>ollama pull qwen3-vl:2b</code>. अर्जुनः reads each
+                  model's own capabilities from the server, so images go only to
+                  vision models and site tools only to models that accept them.
+                </p>
+                <p>
+                  To reach a server on another computer, start it with
+                  <code>OLLAMA_HOST=0.0.0.0</code>. Plain <code>http</code> is
+                  accepted only for this computer and local-network addresses.
+                </p>
+                <p>
+                  Ollama refuses requests that carry a browser extension's
+                  origin, so अर्जुनः removes that header on its own requests to
+                  this one address. You don't need to change
+                  <code>OLLAMA_ORIGINS</code>, and web pages' requests to the
+                  server are untouched.
+                </p>
+              </details>
+              <section
+                class="danger-zone"
+                aria-labelledby="ollama-danger-title"
+                hidden
+              >
+                <div class="danger-row">
+                  <div>
+                    <h3 id="ollama-danger-title">Disconnect this server</h3>
+                    <p>
+                      Forgets the address, its key, and its model list. Sites
+                      that answer with it stop working.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    id="clear-ollama"
+                    class="btn btn-danger"
+                  >
+                    Disconnect
+                  </button>
+                </div>
+              </section>
+            </aside>
+          </div>
+        </section>
+
+        <!-- Ollama Cloud -->
+        <section
+          class="view detail"
+          data-view="providers/ollama-cloud"
+          aria-labelledby="ollama-cloud-title"
+          hidden
+        >
+          <a class="back" href="#providers">Providers</a>
+          <header class="detail-head" id="ollama-cloud-head"></header>
+          <div class="split">
+            <div class="split-main">
+              <div id="ollama-cloud-notices" class="notices"></div>
+              <form id="ollama-cloud-form" class="panel">
+                <div class="panel-head">
+                  <div>
+                    <h2>Connection</h2>
+                    <p class="panel-desc">
+                      The key stays in this browser profile and syncs only to a
+                      desktop app you paired.
+                    </p>
+                  </div>
+                </div>
+                <div class="panel-body fields">
+                  <div class="field key-field">
+                    <label for="ollama-cloud-api-key">API key</label>
+                    <div class="saved-key" hidden>
+                      <span class="saved-key-text"
+                        >A key is saved in this browser.</span
+                      >
+                      <button
+                        type="button"
+                        class="btn btn-ghost btn-sm"
+                        data-key-action="replace"
+                      >
+                        Replace key
+                      </button>
+                    </div>
+                    <input
+                      id="ollama-cloud-api-key"
+                      type="password"
+                      autocomplete="off"
+                      spellcheck="false"
+                      placeholder="Ollama API key"
+                    />
+                    <button
+                      type="button"
+                      class="btn btn-ghost btn-sm keep-saved"
+                      data-key-action="keep"
+                      hidden
+                    >
+                      Keep the saved key
+                    </button>
+                    <input id="ollama-cloud-keep-key" type="checkbox" hidden />
+                  </div>
+                  <div class="field">
+                    <span class="label">Model</span>
+                    <span id="ollama-cloud-model-mount"></span>
+                    <span class="hint" id="ollama-cloud-model-hint"
+                      >Saving your key loads the hosted models and what each one
+                      accepts.</span
+                    >
+                  </div>
+                  <div class="field">
+                    <label for="ollama-cloud-base-url">Endpoint</label>
+                    <input
+                      id="ollama-cloud-base-url"
+                      class="plain"
+                      type="url"
+                      value="https://ollama.com"
+                      readonly
+                    />
+                  </div>
+                </div>
+                <div class="panel-foot">
+                  <div class="actions">
+                    <button
+                      type="submit"
+                      id="ollama-cloud-save"
+                      class="btn btn-primary"
+                    >
+                      Connect
+                    </button>
+                    <button
+                      type="button"
+                      id="test-ollama-cloud"
+                      class="btn btn-secondary"
+                    >
+                      Test connection
+                    </button>
+                    <button
+                      type="button"
+                      id="refresh-ollama-cloud"
+                      class="btn btn-ghost"
+                    >
+                      Refresh models
+                    </button>
+                  </div>
+                  <p id="ollama-cloud-status" class="status" role="status"></p>
+                </div>
+              </form>
+            </div>
+            <aside class="split-side">
+              <section
+                class="panel"
+                id="ollama-cloud-usage"
+                aria-label="Ollama Cloud usage"
+                hidden
+              ></section>
+              <details class="help" open>
+                <summary>How this works</summary>
+                <p>
+                  Create a key at
+                  <a
+                    href="https://ollama.com/settings/keys"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    >ollama.com/settings/keys</a
+                  >. Saving the key loads the hosted catalog with each model's
+                  capabilities and picks a default for you.
+                </p>
+              </details>
+              <section
+                class="danger-zone"
+                aria-labelledby="ollama-cloud-danger-title"
+                hidden
+              >
+                <div class="danger-row">
+                  <div>
+                    <h3 id="ollama-cloud-danger-title">
+                      Remove the Ollama Cloud key
+                    </h3>
+                    <p>
+                      Sites that answer with Ollama Cloud stop working until you
+                      add a key again.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    id="clear-ollama-cloud"
+                    class="btn btn-danger"
+                  >
+                    Remove key
+                  </button>
+                </div>
+              </section>
+            </aside>
+          </div>
+        </section>
+
+        <!-- A subscription provider on the desktop app (drawn from its state) -->
+        <section
+          class="view detail"
+          data-view="providers/desktop"
+          aria-labelledby="subscription-title"
+          hidden
+        >
+          <a class="back" href="#providers">Providers</a>
+          <div id="subscription"></div>
+        </section>
+
+        <!-- Sites -->
+        <section
+          class="view"
+          data-view="sites"
+          aria-labelledby="sites-title"
+          hidden
+        >
+          <header class="view-head">
+            <h1 id="sites-title" tabindex="-1">Sites</h1>
+            <p class="lede">
+              Websites you approved. Each approval covers one exact origin with
+              an access level and the model you chose for it. Revoking makes the
+              site ask again.
+            </p>
+          </header>
+          <div class="split">
+            <div class="split-main">
+              <div class="toolbar" id="sites-toolbar" hidden>
+                <input
+                  id="sites-filter"
+                  type="search"
+                  placeholder="Filter sites"
+                  aria-label="Filter sites"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </div>
+              <div id="grants" class="site-list"></div>
+              <p id="grant-status" class="status" role="status"></p>
+            </div>
+            <aside class="split-side">
+              <section class="panel" aria-labelledby="levels-title">
+                <div class="panel-head">
+                  <div>
+                    <h2 id="levels-title">Access levels</h2>
+                    <p class="panel-desc">
+                      A site asks for one when it connects, and you approve it.
+                    </p>
+                  </div>
+                </div>
+                <dl class="levels panel-body">
+                  <div>
+                    <dt>
+                      <span class="level level-assistant">Assistant</span>
+                    </dt>
+                    <dd>
+                      The site's assistant chats in a panel अर्जुनः draws, with
+                      your model. The site never calls the model itself.
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>
+                      <span class="level level-completion">Completion</span>
+                    </dt>
+                    <dd>
+                      The site sends its own requests to the one model you chose
+                      for it.
+                    </dd>
+                  </div>
+                  <div>
+                    <dt><span class="level level-catalog">Catalog</span></dt>
+                    <dd>
+                      The site may also list the providers you exposed to it and
+                      choose among their models. It never sees accounts or
+                      quotas.
+                    </dd>
+                  </div>
+                </dl>
+              </section>
+              <section class="danger-zone" aria-labelledby="site-data-title">
+                <h2 id="site-data-title" class="danger-title">Site data</h2>
+                <div class="danger-row stored-state">
+                  <div>
+                    <h3>Stored conversation state</h3>
+                    <p>
+                      Provider state kept between the rounds of a site's own
+                      tool turns, and the desktop agent sessions those
+                      conversations resumed. Clearing it ends every conversation
+                      a site holds: sites keep their access, but must start a
+                      new conversation.
+                    </p>
+                    <p id="stored-state-summary" class="detail">Checking…</p>
+                  </div>
+                  <button type="button" id="clear-state" class="btn btn-danger">
+                    Clear stored conversation state
+                  </button>
+                </div>
+                <div
+                  id="clear-state-confirm"
+                  class="confirm"
+                  role="alertdialog"
+                  aria-labelledby="clear-state-question"
+                  hidden
+                >
+                  <p id="clear-state-question"></p>
+                  <div class="actions">
+                    <button
+                      type="button"
+                      id="clear-state-cancel"
+                      class="btn btn-secondary"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      id="clear-state-yes"
+                      class="btn btn-danger btn-solid"
+                    >
+                      Delete and end conversations
+                    </button>
+                  </div>
+                </div>
+                <p id="state-status" class="status" role="status"></p>
+                <div class="danger-row">
+                  <div>
+                    <h3>Revoke every site</h3>
+                    <p>
+                      Every site must ask again, and the conversation state
+                      stored for them is deleted.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    id="clear-grants"
+                    class="btn btn-danger"
+                  >
+                    Revoke all sites
+                  </button>
+                </div>
+                <div
+                  id="clear-grants-confirm"
+                  class="confirm"
+                  role="alertdialog"
+                  aria-labelledby="clear-grants-question"
+                  hidden
+                >
+                  <p id="clear-grants-question"></p>
+                  <div class="actions">
+                    <button
+                      type="button"
+                      id="clear-grants-cancel"
+                      class="btn btn-secondary"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      id="clear-grants-yes"
+                      class="btn btn-danger btn-solid"
+                    >
+                      Revoke all sites
+                    </button>
+                  </div>
+                </div>
+              </section>
+            </aside>
+          </div>
+        </section>
+
+        <!-- Desktop app -->
+        <section
+          class="view"
+          data-view="desktop"
+          aria-labelledby="desktop-title"
+          hidden
+        >
+          <header class="view-head">
+            <h1 id="desktop-title" tabindex="-1">Desktop app</h1>
+            <p class="lede">
+              Lend the Claude Code, Codex, or OpenCode subscription you're
+              signed in to on this computer. The app runs locally and never
+              contacts a remote service itself.
+            </p>
+          </header>
+          <div class="split">
+            <div class="split-main">
+              <section class="panel" aria-labelledby="desktop-heading">
+                <div class="desktop-hero">
+                  <span id="desktop-badge" class="hero-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24">
+                      <rect x="3.5" y="4.5" width="17" height="11.5" rx="2" />
+                      <path d="M9 20h6M12 16v4" />
+                    </svg>
+                  </span>
+                  <div>
+                    <h2 id="desktop-heading">Checking the desktop app…</h2>
+                    <p id="desktop-state" class="status" role="status"></p>
+                  </div>
+                </div>
+                <form id="pair-form" class="panel-body fields">
+                  <div class="field" id="desktop-code-field">
+                    <label for="desktop-code">Pairing code</label>
+                    <input
+                      id="desktop-code"
+                      class="code-input"
+                      inputmode="numeric"
+                      pattern="[0-9 ]{6,7}"
+                      autocomplete="one-time-code"
+                      placeholder="000 000"
+                    />
+                    <span class="hint"
+                      >The dashboard shows a six-digit code. Pairing is per
+                      browser profile.</span
+                    >
+                  </div>
+                  <details class="advanced" id="desktop-address">
+                    <summary>
+                      Desktop address
+                      <span id="desktop-address-value" class="muted"></span>
+                    </summary>
+                    <div class="field">
+                      <label for="desktop-url">Address</label>
+                      <input
+                        id="desktop-url"
+                        type="url"
+                        value="http://127.0.0.1:48123"
+                        required
+                      />
+                      <span class="hint"
+                        >Change it only if you started the app on another port
+                        (<code>ARJUNAH_DESKTOP_PORT</code>).</span
+                      >
+                    </div>
+                  </details>
+                  <div class="actions">
+                    <button type="submit" id="pair" class="btn btn-primary">
+                      Pair
+                    </button>
+                    <button
+                      type="button"
+                      id="refresh-desktop"
+                      class="btn btn-secondary"
+                    >
+                      Check again
+                    </button>
+                    <a
+                      id="dashboard-link"
+                      class="btn btn-ghost"
+                      target="_blank"
+                      rel="noreferrer"
+                      >Open dashboard</a
+                    >
+                  </div>
+                </form>
+              </section>
+              <section
+                class="panel"
+                id="desktop-providers"
+                aria-labelledby="desktop-providers-title"
+                hidden
+              >
+                <div class="panel-head">
+                  <div>
+                    <h2 id="desktop-providers-title">
+                      Subscriptions on this computer
+                    </h2>
+                    <p class="panel-desc">
+                      Agents run with their file and shell tools disabled.
+                      Settings saved here sync to the app and back.
+                    </p>
+                  </div>
+                </div>
+                <div id="desktop-provider-list" class="rows"></div>
+              </section>
+            </div>
+            <aside class="split-side">
+              <section
+                class="panel"
+                id="desktop-setup"
+                aria-labelledby="desktop-setup-title"
+                hidden
+              >
+                <div class="panel-head">
+                  <div>
+                    <h2 id="desktop-setup-title">Set it up</h2>
+                    <p class="panel-desc">
+                      Needs Node.js 22.22 or later on macOS, Linux, or Windows.
+                    </p>
+                  </div>
+                </div>
+                <ol class="steps panel-body">
+                  <li>
+                    <b>Install it.</b> <code>arjunah-desktop install</code>
+                    starts it now and at every login.
+                    <pre class="command">
+npm install -g arjunah-desktop@beta
+arjunah-desktop install</pre
+                    >
+                  </li>
+                  <li>
+                    <b>Open the dashboard</b> at
+                    <a
+                      href="http://127.0.0.1:48123/"
+                      target="_blank"
+                      rel="noreferrer"
+                      >127.0.0.1:48123</a
+                    >. It shows a six-digit pairing code.
+                  </li>
+                  <li><b>Enter the code</b> and choose Pair.</li>
+                </ol>
+              </section>
+              <section
+                class="danger-zone"
+                id="desktop-danger"
+                aria-labelledby="desktop-danger-title"
+                hidden
+              >
+                <div class="danger-row">
+                  <div>
+                    <h3 id="desktop-danger-title">Unpair this browser</h3>
+                    <p>
+                      Subscriptions stop working here until you pair again. You
+                      can also revoke this browser from the dashboard.
+                    </p>
+                  </div>
+                  <button type="button" id="unpair" class="btn btn-danger">
+                    Unpair
+                  </button>
+                </div>
+              </section>
+            </aside>
+          </div>
+        </section>
+
+        <!-- Diagnostics: the whole width and height, since the log is the view -->
+        <section
+          class="view wide"
+          data-view="diagnostics"
+          aria-labelledby="diagnostics-title"
+          hidden
+        >
+          <header class="view-head">
+            <h1 id="diagnostics-title" tabindex="-1">Diagnostics</h1>
+            <p class="lede">
+              What the extension and the desktop app are doing. Look here when a
+              reply is slow or fails: the desktop app's log names the stage a
+              local agent is in.
+            </p>
+          </header>
+          <section class="panel log-panel" aria-label="Logs">
+            <div class="log-toolbar">
+              <div class="segmented" role="tablist" aria-label="Log">
+                <button
+                  type="button"
+                  id="log-tab-extension"
+                  role="tab"
+                  aria-selected="true"
+                  aria-controls="log-view"
+                >
+                  Extension <span class="count" id="log-count-extension"></span>
+                </button>
+                <button
+                  type="button"
+                  id="log-tab-desktop"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="log-view"
+                >
+                  Desktop app <span class="count" id="log-count-desktop"></span>
+                </button>
+              </div>
+              <input
+                id="log-search"
+                type="search"
+                placeholder="Filter by source or text"
+                aria-label="Filter entries"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <div class="segmented" role="radiogroup" aria-label="Show">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked="true"
+                  data-log-level="all"
+                >
+                  All
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked="false"
+                  data-log-level="important"
+                  title="Everything except routine steps"
+                >
+                  Important
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked="false"
+                  data-log-level="problems"
+                  title="Warnings and errors only"
+                >
+                  Problems
+                </button>
+              </div>
+              <div class="actions">
+                <label class="switch"
+                  ><input id="log-live" type="checkbox" /><span
+                    >Live</span
+                  ></label
+                >
+                <button
+                  type="button"
+                  id="log-refresh"
+                  class="btn btn-secondary btn-sm"
+                >
+                  Refresh
+                </button>
+                <button
+                  type="button"
+                  id="log-copy"
+                  class="btn btn-ghost btn-sm"
+                >
+                  Copy
+                </button>
+                <button
+                  type="button"
+                  id="log-clear"
+                  class="btn btn-danger btn-sm"
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+            <ol
+              id="log-view"
+              class="log-list"
+              role="tabpanel"
+              aria-label="Log entries, newest first"
+              tabindex="0"
+            ></ol>
+            <div class="log-foot">
+              <p id="log-status" class="status" role="status"></p>
+              <p class="note">
+                Names, models, counts, and timings only: never prompts, replies,
+                keys, or page content. Kept in this browser and on this
+                computer.
+              </p>
+            </div>
+          </section>
+        </section>
+
+        <!-- About -->
+        <section
+          class="view"
+          data-view="about"
+          aria-labelledby="about-title"
+          hidden
+        >
+          <header class="view-head">
+            <h1 id="about-title" tabindex="-1">About</h1>
+          </header>
+          <div class="split">
+            <div class="split-main">
+              <section class="panel about-hero">
+                <img src="icons/icon-128.png" alt="" width="56" height="56" />
+                <div>
+                  <h2>अर्जुनः</h2>
+                  <p>
+                    Bring your own AI provider or subscription to the web.
+                    Websites see only the models you expose to them.
+                  </p>
+                  <p class="muted" id="about-version"></p>
+                </div>
+              </section>
+              <section class="panel" aria-labelledby="privacy-title">
+                <div class="panel-head">
+                  <h2 id="privacy-title">Privacy</h2>
+                </div>
+                <ul class="checklist panel-body">
+                  <li>
+                    Keys stay in this browser profile and sync only to a desktop
+                    app you paired.
+                  </li>
+                  <li>
+                    Websites see model names, never your keys, accounts, or
+                    quotas.
+                  </li>
+                  <li>No analytics, and no relay operated by the extension.</li>
+                  <li>
+                    Desktop providers run your locally installed CLIs with their
+                    file and shell tools disabled.
+                  </li>
+                </ul>
+              </section>
+            </div>
+            <aside class="split-side">
+              <section class="panel" aria-labelledby="build-title">
+                <div class="panel-head">
+                  <h2 id="build-title">This build</h2>
+                </div>
+                <div class="panel-body">
+                  <p id="about-protocol">
+                    Implements the अर्जुनः Protocol: tiered site access, a
+                    unified model catalog, widget options, and
+                    extension-collected tool inputs that stay out of model
+                    traffic.
+                  </p>
+                  <div class="link-list">
+                    <a id="open-popup" href="popup.html"
+                      >Open the toolbar popup in this tab</a
+                    >
+                    <a
+                      href="https://github.com/mesudip/arjunah/blob/main/docs/INSTALL.md"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      >Install guide</a
+                    >
+                    <a
+                      href="https://github.com/mesudip/arjunah/blob/main/docs/DESKTOP.md"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      >Desktop app guide</a
+                    >
+                  </div>
+                </div>
+              </section>
+            </aside>
+          </div>
+        </section>
+      </main>
+    </div>
+    <div
+      id="active-status"
+      class="toast"
+      role="status"
+      aria-live="polite"
+    ></div>
     <script type="module" src="options.js"></script>
   </body>
 </html>

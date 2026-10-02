@@ -1,9 +1,9 @@
 // One provider-artwork table for every surface that draws a provider: the
-// popup's wallet cards and site chips, and the hosted widget's model picker,
-// which receives the resolved icon with its model list because a content
-// script cannot import this module. The options page draws text-only pickers
-// and does not use it yet. The files are bundled (see
-// icons/providers/README.md); nothing here is ever fetched from a remote origin.
+// popup's wallet cards and site chips, the options page's provider rows and
+// default-model picker, and the hosted widget's model picker, which receives
+// the resolved icon with its model list because a content script cannot
+// import this module. The files are bundled (see icons/providers/README.md);
+// nothing here is ever fetched from a remote origin.
 const PROVIDER_ICONS = Object.freeze({
   openai: "icons/providers/openai.svg",
   "claude-code": "icons/providers/claude.svg",

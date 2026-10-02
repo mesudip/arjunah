@@ -1874,7 +1874,11 @@ test("hosted conversations carry a thread id to the desktop app and release it o
   const generateCall = b.requests.find(
     (item) => new URL(item.url).pathname === "/api/generate",
   );
-  assert.equal(generateCall.payload.threadId, "conv-abc");
+  // Derived from the origin under the install key, never the panel's own id,
+  // so revocation and "clear stored conversation state" can end it.
+  const threadId = generateCall.payload.threadId;
+  assert.match(threadId, /^[A-Za-z0-9_-]{32}$/);
+  assert.notEqual(threadId, "conv-abc");
   assert.equal(generateCall.payload.reasoning, "medium");
   await b.ok(
     "session.end",
@@ -1902,7 +1906,7 @@ test("hosted conversations carry a thread id to the desktop app and release it o
   await new Promise((resolve) => setTimeout(resolve, 20));
   const ended = b.requests.find(
     (item) =>
-      new URL(item.url).pathname === "/api/threads/conv-abc" &&
+      new URL(item.url).pathname === `/api/threads/${threadId}` &&
       item.init.method === "DELETE",
   );
   assert.ok(ended, "the thread is released when the page session ends");
@@ -1910,6 +1914,45 @@ test("hosted conversations carry a thread id to the desktop app and release it o
   const settings = await b.ok("hosted.settings");
   assert.equal(settings.model.threads, true);
   assert.deepEqual(settings.model.reasoningLevels, []);
+});
+
+test("hosted chat agent threads end on revocation and on clearing stored conversation state", async (t) => {
+  const b = await broker(t);
+  desktopMock(b);
+  await b.ok("desktop.pair", { code: "123456" }, b.extension);
+  await b.ok(
+    "provider.select",
+    { type: "desktop", providerId: "claude-code" },
+    b.extension,
+  );
+  const turn = async () => {
+    const prepared = await b.prepare(manifest);
+    await b.ok("chat.complete", { ...prepared, conversationId: "conv-abc" });
+    return b.requests
+      .filter((item) => new URL(item.url).pathname === "/api/generate")
+      .at(-1).payload.threadId;
+  };
+  const deleted = (id) =>
+    b.requests.some(
+      (item) =>
+        new URL(item.url).pathname === `/api/threads/${id}` &&
+        item.init.method === "DELETE",
+    );
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+  const first = await turn();
+  assert.equal((await b.ok("grants.storedState", {}, b.extension)).threads, 1);
+  const cleared = await b.ok("grants.clearState", {}, b.extension);
+  assert.equal(cleared.cleared.threads, 1, "the hosted thread was recorded");
+  await settle();
+  assert.ok(deleted(first), "clearing ends the hosted agent session");
+  // The same panel conversation never resumes the old session.
+  const second = await turn();
+  assert.notEqual(second, first);
+
+  await b.ok("grant.revoke", {});
+  await settle();
+  assert.ok(deleted(second), "revoking the site ends it too");
 });
 
 test("a paired but unreachable desktop app makes its providers unavailable everywhere, with a clear error", async (t) => {

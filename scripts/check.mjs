@@ -149,6 +149,22 @@ if (!desktopServer.includes(`RELEASE_VERSION = "${pkg.version}"`))
   throw new Error(
     `desktop/lib/server.mjs RELEASE_VERSION must be "${pkg.version}".`,
   );
+// Two hand-written notes name the build they describe; a bump that forgets
+// them would ship docs claiming another release.
+const readmeStatus = /^## Status\n\n(\S+?)\. /m.exec(
+  readFileSync("README.md", "utf8"),
+)?.[1];
+if (readmeStatus !== pkg.version)
+  throw new Error(
+    `README.md's Status section must start with "${pkg.version}.", not "${readmeStatus}.".`,
+  );
+const conformanceUpdated = /^Last updated \d{4}-\d{2}-\d{2} for (\S+?),/m.exec(
+  readFileSync("docs/CONFORMANCE.md", "utf8"),
+)?.[1];
+if (conformanceUpdated !== pkg.version)
+  throw new Error(
+    `docs/CONFORMANCE.md must say "Last updated <date> for ${pkg.version},", not ${conformanceUpdated}.`,
+  );
 // arjunah-widget is MIT, but it is built from extension sources, which are
 // MPL-2.0 by default. Every file it copies must be marked MIT.
 for (const path of [

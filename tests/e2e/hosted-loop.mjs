@@ -16,7 +16,13 @@
  * access instead of CDP.
  */
 import { mockProviderExtension } from "../helpers/browser-extension.mjs";
-import { launchFirefox, waitForExtensionOptions } from "../helpers/firefox.mjs";
+import { approveConsent } from "../helpers/consent.mjs";
+import {
+  approveFirefoxConsent,
+  launchFirefox,
+  openSettingsView,
+  waitForExtensionOptions,
+} from "../helpers/firefox.mjs";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -547,6 +553,10 @@ async function chromeBrowser() {
       },
       async clearStoredState() {
         await front();
+        // Settings show one view at a time; the clear control is on Sites.
+        await settings.evaluate(() => {
+          location.hash = "#sites";
+        });
         await settings.click("#clear-state");
         await settings.waitForFunction(
           () => !document.querySelector("#clear-state-confirm").hidden,
@@ -585,6 +595,7 @@ async function chromeBrowser() {
           evaluate,
           type: (text) => page.keyboard.type(text),
           enter: () => page.keyboard.press("Enter"),
+          approve: () => approveConsent(page),
           text: () => dom.text(),
           // Each pierced read renumbers the nodes, so the button is looked
           // up right before it is clicked.
@@ -628,6 +639,7 @@ async function firefoxBrowser() {
       close,
       async saveOpenAI() {
         await toSettings();
+        await openSettingsView(driver, "providers/openai");
         // The model field is a typable combobox; Tab commits what was typed.
         const modelBox = await driver.findElement(
           By.css("#model .combo-input"),
@@ -642,6 +654,7 @@ async function firefoxBrowser() {
       },
       async saveZen() {
         await toSettings();
+        await openSettingsView(driver, "providers/opencode-api");
         await driver
           .findElement(By.id("opencode-api-key"))
           .sendKeys("zen-e2e-secret");
@@ -649,13 +662,27 @@ async function firefoxBrowser() {
           .findElement(By.css("#opencode-form button[type=submit]"))
           .click();
         await waitText("opencode-status", /^Saved\./, "the Zen key");
-        const meta = await driver
-          .findElement(
-            By.xpath(
-              "//div[contains(concat(' ',normalize-space(@class),' '),' provider ')][.//strong[text()='OpenCode Zen API key']]//div[contains(@class,'meta')]",
-            ),
-          )
-          .getProperty("textContent");
+        // The provider list's row for Zen ends with its model count once the
+        // saved key is reflected; the row redraws, so it is read again.
+        let meta = "";
+        await until(
+          async () => {
+            try {
+              meta = await driver
+                .findElement(
+                  By.css(
+                    '#provider-list a[data-provider="opencode-api"] .row-meta',
+                  ),
+                )
+                .getProperty("textContent");
+            } catch {
+              return false;
+            }
+            return /\d+ models?$/.test(meta);
+          },
+          "the Zen row's model count",
+          10000,
+        );
         return /(\d+) models?$/.exec(meta)?.[1] === "1"
           ? ["gemini-3.1-pro"]
           : meta;
@@ -663,17 +690,14 @@ async function firefoxBrowser() {
       async useDefault(model) {
         assert.equal(model, "opencode-api/gemini-3.1-pro");
         await toSettings();
-        // Zen's only model is selected on its card; this makes it the
-        // default. The cards redraw on every state change, so the button is
-        // found again on each try.
+        await openSettingsView(driver, "providers/opencode-api");
+        // Zen's only model is picked on its view; this makes it the default.
+        // The header redraws on every state change, so the button is found
+        // again on each try.
         await until(
           async () => {
             try {
-              const use = await driver.findElement(
-                By.xpath(
-                  "//div[contains(concat(' ',normalize-space(@class),' '),' provider ')][.//strong[text()='OpenCode Zen API key']]//button[normalize-space(text())='Use as default']",
-                ),
-              );
+              const use = await driver.findElement(By.id("opencode-use"));
               if (!(await use.isEnabled())) return false;
               await use.click();
               return true;
@@ -702,6 +726,7 @@ async function firefoxBrowser() {
       },
       async clearStoredState() {
         await toSettings();
+        await openSettingsView(driver, "sites");
         await driver.findElement(By.id("clear-state")).click();
         // isDisplayed() is a script, which an extension page refuses.
         await until(
@@ -755,6 +780,10 @@ async function firefoxBrowser() {
           async enter() {
             await driver.switchTo().window(handle);
             await driver.actions().sendKeys(Key.ENTER).perform();
+          },
+          async approve() {
+            await driver.switchTo().window(handle);
+            await approveFirefoxConsent(driver);
           },
           // WebDriver hands back elements of a closed root, but not the root
           // itself, so its text is read from inside through getRootNode().
@@ -812,7 +841,7 @@ try {
     const consent = await site.text();
     assert.match(consent, /This site's own model \(Shop model\) answers/);
     assert.doesNotMatch(consent, /No provider is configured yet/);
-    await site.enter();
+    await site.approve();
     // CDP's pierced tree is JSON, where the quotes come escaped.
     await until(
       async () =>
@@ -853,7 +882,7 @@ try {
     assert.doesNotMatch(consent, /Full site instructions/);
     assert.match(consent, /Site tool: page_info/);
     assert.match(consent, /Level 1 · Completion/);
-    await site.enter();
+    await site.approve();
     // The renderer's prompt names the asking origin; the page source cannot
     // contain that line.
     await until(
@@ -951,7 +980,7 @@ try {
         /This site's server writes the prompts/.test(await site.text()),
       "consent after the composer changed",
     );
-    await site.enter();
+    await site.approve();
     await until(
       () =>
         modelRequests.some((item) =>
@@ -996,7 +1025,7 @@ try {
         ),
       "the approval disclosure in consent",
     );
-    await site.enter();
+    await site.approve();
     await until(
       async () => /Approval requested/.test(await site.text()),
       "the approval prompt",
@@ -1040,7 +1069,7 @@ try {
           "consent for the Gemini loop",
         );
         assert.match(await site.text(), /Level 1 · Completion/);
-        await site.enter();
+        await site.approve();
       }
       return until(
         () => site.evaluate("window.stateFirst"),

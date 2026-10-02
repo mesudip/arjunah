@@ -159,9 +159,10 @@ jobs:
             # may take a few minutes to become available", and it means it:
             # v1.0.0-alpha.5 published cleanly and then took past two minutes
             # to appear, failing a 60-second budget and stranding the GitHub
-            # release behind a job that had already done its work. Ten minutes
-            # is the propagation delay npm actually documents.
-            for attempt in {1..40}; do
+            # release behind a job that had already done its work. On
+            # 2026-09-30 v1.0.0-beta.1 took 31 minutes to appear and 39 for
+            # its dist-tag, so the budget is 45 minutes.
+            for attempt in {1..180}; do
               published="$(npm view "$package@$version" version 2>/dev/null || true)"
               tags="$(npm view "$package" dist-tags --json 2>/dev/null || true)"
               tagged="$(node -e '
@@ -176,7 +177,7 @@ jobs:
               fi
               sleep 15
             done
-            echo "npm did not expose $package@$version at dist-tag $DIST_TAG after 10 minutes" >&2
+            echo "npm did not expose $package@$version at dist-tag $DIST_TAG after 45 minutes" >&2
             exit 1
           }
 

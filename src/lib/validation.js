@@ -843,7 +843,15 @@ function validateLoop(input) {
   const level = input.level ?? 1;
   if (level !== 1 && level !== 2)
     invalid("loop.level must be 1 or 2.", { field: "loop.level" });
-  return { composer: input.composer, level };
+  // A loop may ask the visitor for values (input.client) only when it says
+  // so up front, since consent has to tell the visitor before it happens.
+  if (input.inputs != null && typeof input.inputs !== "boolean")
+    invalid("loop.inputs must be a boolean.", { field: "loop.inputs" });
+  return {
+    composer: input.composer,
+    level,
+    ...(input.inputs === true ? { inputs: true } : {}),
+  };
 }
 
 /**

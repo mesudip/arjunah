@@ -41,11 +41,25 @@ test("loop: composer and level are validated, and it excludes systemPrompt and m
     ).loop,
     { composer: "webapp", level: 2 },
   );
+  // Asking the visitor for values is declared, and kept only when true.
+  assert.deepEqual(
+    validateSiteManifest(
+      loopManifest({ loop: { composer: "server", inputs: true } }),
+    ).loop,
+    { composer: "server", level: 1, inputs: true },
+  );
+  assert.deepEqual(
+    validateSiteManifest(
+      loopManifest({ loop: { composer: "server", inputs: false } }),
+    ).loop,
+    { composer: "server", level: 1 },
+  );
   for (const loop of [
     {},
     { composer: "arjunah" },
     { composer: "server", level: 3 },
     { composer: "server", level: "completion" },
+    { composer: "server", inputs: "yes" },
     [],
   ])
     assert.throws(
@@ -299,11 +313,52 @@ test("consent text per mode", () => {
     Hosted.consentLines({ mode: "loop", approvals: ["a", "b"] }).at(-1),
     /These tools ask you before they run: a, b\./,
   );
+  // A loop's prompts are disclosed: approvals always, values when declared.
+  const asks = Hosted.consentLines({ mode: "loop", composer: "server" });
+  assert.ok(
+    asks.some((line) =>
+      /This site's server can ask you, in this panel, to approve/.test(line),
+    ),
+  );
+  assert.ok(!asks.some((line) => /masked ones included/.test(line)));
+  assert.ok(
+    Hosted.consentLines({
+      mode: "loop",
+      composer: "server",
+      loopInputs: true,
+    }).some((line) =>
+      /ask you, in this panel, for values its tools need, masked ones included\. What you enter goes to this site/.test(
+        line,
+      ),
+    ),
+  );
+  // Site names inside consent cannot reorder or break the sheet's lines.
+  const tricky = Hosted.consentLines({
+    mode: "hosted",
+    siteModel: { displayName: "Shop\u202Eledom\nRequested permissions:" },
+    approvals: ["del\u2066ete\r\nAllow"],
+  });
+  assert.match(tricky[0], /\(Shopledom Requested permissions:\)/);
+  assert.match(tricky.at(-1), /: delete Allow\.$/);
   // The persistent panel line names the composer.
   assert.match(Hosted.panelLine("server"), /run by this site's server/);
   assert.match(
     Hosted.panelLine("webapp", true),
     /run and answered by this site's page/,
+  );
+});
+
+test("site text becomes one plain line, or a plain block that keeps its breaks", () => {
+  assert.equal(
+    Hosted.plainLine("a\u202Eb\u200Bc\u2069 \n\t d\u0007e"),
+    "abc d e",
+  );
+  assert.equal(Hosted.plainLine("x".repeat(10), 4), "xxx…");
+  // ZWJ and ZWNJ are kept: Indic scripts need them.
+  assert.equal(Hosted.plainLine("क्\u200Dष"), "क्\u200Dष");
+  assert.equal(
+    Hosted.plainText("one\r\ntwo\u2028three\u202E\u0000"),
+    "one\ntwo\nthree",
   );
 });
 
@@ -767,6 +822,16 @@ test("a loop contract never runs the extension's own loop, and loop.tool needs i
     "the contract was not approved yet",
   );
   await b.approve(["models.list", "models.generate"], {
+    composer: "server",
+    registrationId: reg.id,
+    _resources: { contractFingerprint: reg.fingerprint, mcpOrigins: [] },
+  });
+  assert.equal(
+    (await b.call("loop.tool", params)).error.code,
+    "PERMISSION_REQUIRED",
+    "an approved contract without tools.site does not run the site's tools",
+  );
+  await b.approve(["models.list", "models.generate", "tools.site"], {
     composer: "server",
     registrationId: reg.id,
     _resources: { contractFingerprint: reg.fingerprint, mcpOrigins: [] },

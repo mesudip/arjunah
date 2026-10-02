@@ -158,11 +158,47 @@ export type GenerateRequest = Record<string, JSONValue>;
 /** A section 5.3 result. */
 export type GenerateResult = Record<string, JSONValue>;
 
-/** What `enable()` is asked for in bridged mode (SPEC section 4). */
+/** A section 4 capability, as the SDK's `AICapability`. */
+export type BridgeCapability =
+  | "models.list"
+  | "models.generate"
+  | "models.catalog"
+  | "context.read"
+  | "chat.hosted"
+  | "tools.site"
+  | "tools.mcp";
+
+/** A page context field (SPEC section 4); any field needs `context.read`. */
+export type BridgeContextField = "title" | "url" | "selection" | "text";
+
+/** The provider kinds a `require.kinds` list may name (SPEC section 4). */
+export type BridgeProviderKind = "api-key" | "subscription" | "self-hosted";
+
+/** Which of the visitor's models may answer; every member given must hold. */
+export interface BridgeModelRequirement {
+  kinds?: BridgeProviderKind[];
+  /** Only models that keep prompts on the visitor's computer or network. */
+  local?: true;
+  /** Only models whose answering agent runs no tools of its own. */
+  builtinTools?: false;
+}
+
+/**
+ * What `enable()` is asked for in bridged mode: the SDK's `AIAccessRequest`
+ * (SPEC section 4), passed to the extension unchanged. Without `level` or
+ * `capabilities` it asks for level 1. Context fields need `context.read` in
+ * `capabilities`, alongside the level:
+ * `{ level: "completion", capabilities: ["context.read"], context: ["title"] }`.
+ */
 export interface BridgeAccessRequest {
+  /** `completion` (level 1, the default) or `catalog` (level 2). */
   level?: "completion" | "catalog";
-  context?: Array<"title" | "url" | "selection" | "text">;
+  /** Added to the level's bundle; unique, and non-empty without a level. */
+  capabilities?: BridgeCapability[];
+  context?: BridgeContextField[];
   reason?: string;
+  /** Restrict which of the visitor's models may answer; `{}` lifts it. */
+  require?: BridgeModelRequirement;
   /**
    * Who writes the prompts, for the extension's consent wording. Defaults to
    * "server" with `backend.baseUrl` and "webapp" with `backend.fetch`; pass
@@ -222,6 +258,10 @@ export interface MountConfig {
   onThreadChange?(event: { threadId: string | null }): void;
   onTurnStart?(event: TurnEvent): void;
   onTurnEnd?(event: TurnEndEvent): void;
+  /**
+   * A backend `error` event, and in bridged mode a refused `enable()` or a
+   * lost session, which the visitor is also shown once.
+   */
   onError?(error: { code: string; message: string }): void;
 }
 
@@ -249,12 +289,28 @@ export interface MountedAssistant {
 export function mountAssistant(config: MountConfig): MountedAssistant;
 /**
  * A `text/event-stream` `Response` for `backend.fetch`, one SSE event per
- * item. Pulled one event at a time; the iterator's `return()` runs when the
- * widget stops reading.
+ * item. Pulled one event at a time; the iterator's `return()` runs once
+ * whenever the stream ends early: the widget stops reading, or an item has no
+ * valid `type`, is not JSON, or `next()` throws, which also fails the turn.
  */
 export function eventStreamResponse(
   events: AsyncIterable<TurnStreamEvent> | Iterable<TurnStreamEvent>,
 ): Response;
+/** One event `createEventStreamParser` completed; `data` is not parsed. */
+export interface ParsedStreamEvent {
+  type: string;
+  data: string;
+}
+/**
+ * The widget's own incremental `text/event-stream` parser (WHATWG EventSource
+ * framing: CRLF, LF or CR line ends, comments, multi-line `data`, a leading
+ * BOM dropped). `push` returns the events the given bytes completed; an event
+ * left open when the bytes end is never returned. It holds what it has not
+ * dispatched, so bound the bytes you feed it.
+ */
+export function createEventStreamParser(): {
+  push(bytes: Uint8Array): ParsedStreamEvent[];
+};
 export function validateCard(card: unknown, name?: string): unknown;
 export const ArjunahRenderer: unknown;
 export const PROTOCOL_VERSION: string;

@@ -1,4 +1,5 @@
 import { mockProviderExtension } from "../helpers/browser-extension.mjs";
+import { approveConsent, denyConsent } from "../helpers/consent.mjs";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -536,7 +537,7 @@ try {
   await page.waitForFunction(
     () => document.activeElement?.id === "arjunah-extension",
   );
-  await page.keyboard.press("Enter");
+  await approveConsent(page);
   const grant = await page.evaluate(async () => (await window.__session).grant);
   assert.equal(grant.origin, `http://localhost:${port}`);
   assert.equal(grant.level, "completion");
@@ -584,7 +585,7 @@ try {
   await page.waitForFunction(
     () => document.activeElement?.id === "arjunah-extension",
   );
-  await page.keyboard.press("Enter");
+  await approveConsent(page);
   assert.equal(
     await page.evaluate(() => window.__restricted),
     "NOT_CONFIGURED",
@@ -598,7 +599,7 @@ try {
   await page.waitForFunction(
     () => document.activeElement?.id === "arjunah-extension",
   );
-  await page.keyboard.press("Enter");
+  await approveConsent(page);
   assert.equal(
     await page.evaluate(() => window.__restricted),
     "openai/gpt-test-model",
@@ -888,7 +889,7 @@ try {
     await new Promise((done) => setTimeout(done, 200));
   }
   await composerCdp.detach();
-  await widgetPage.keyboard.press("Enter");
+  await approveConsent(widgetPage);
   await waitFor(() =>
     widgetRelay.posts.some((item) => item.result || item.error),
   );
@@ -943,7 +944,7 @@ try {
     });
   });
   await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-  await page.keyboard.press("Enter");
+  await approveConsent(page);
   await page.evaluate(() => window.__contextSession);
   const context = await page.evaluate(async () =>
     (await window.__contextSession).context.get({ fields: ["title", "text"] }),
@@ -1013,7 +1014,7 @@ try {
   await page.keyboard.type("Please use the echo tool");
   await page.keyboard.press("Enter");
   await new Promise((resolveWait) => setTimeout(resolveWait, 200));
-  await page.keyboard.press("Enter");
+  await approveConsent(page);
   await page.waitForFunction(() => window.toolCalls === 1, { timeout: 10000 });
   await waitFor(() =>
     modelRequests
@@ -1054,7 +1055,7 @@ try {
   await page.keyboard.type("Use the secure echo tool");
   await page.keyboard.press("Enter");
   await new Promise((resolveWait) => setTimeout(resolveWait, 200));
-  await page.keyboard.press("Enter");
+  await approveConsent(page);
   await page.waitForFunction(() => window.safeInputRequested === true, {
     timeout: 10000,
   });
@@ -1099,7 +1100,7 @@ try {
   await page.keyboard.type("Look at the canvas image");
   await page.keyboard.press("Enter");
   await new Promise((resolveWait) => setTimeout(resolveWait, 200));
-  await page.keyboard.press("Enter");
+  await approveConsent(page);
   await page.waitForFunction(() => window.imageToolCalls === 1, {
     timeout: 10000,
   });
@@ -1139,10 +1140,7 @@ try {
   await page.keyboard.type("This contract changed");
   await page.keyboard.press("Enter");
   await new Promise((resolveWait) => setTimeout(resolveWait, 200));
-  await page.keyboard.down("Shift");
-  await page.keyboard.press("Tab");
-  await page.keyboard.up("Shift");
-  await page.keyboard.press("Enter");
+  await denyConsent(page);
   await new Promise((resolveWait) => setTimeout(resolveWait, 250));
   assert.equal(
     modelRequests.length,
@@ -1158,10 +1156,10 @@ try {
   await page.keyboard.type("Use the MCP echo tool");
   await page.keyboard.press("Enter");
   await new Promise((resolveWait) => setTimeout(resolveWait, 200));
-  await page.keyboard.press("Enter");
+  await approveConsent(page);
   await waitFor(() => mcpMethods.includes("tools/list"));
   await new Promise((r) => setTimeout(r, 200));
-  await page.keyboard.press("Enter");
+  await approveConsent(page);
   await waitFor(() => mcpMethods.includes("tools/call"));
   assert.deepEqual(mcpMethods, [
     "initialize",
@@ -1245,10 +1243,7 @@ try {
       );
   });
   await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-  await page.keyboard.down("Shift");
-  await page.keyboard.press("Tab");
-  await page.keyboard.up("Shift");
-  await page.keyboard.press("Enter");
+  await denyConsent(page);
   assert.equal(await page.evaluate(() => window.__denied), "USER_DENIED");
 
   // An OpenCode Zen key coexists with the saved OpenAI key and routes each
@@ -1328,7 +1323,7 @@ try {
     ),
     "the level 1 consent discloses provider-state retention",
   );
-  await zenPage.keyboard.press("Enter");
+  await approveConsent(zenPage);
   await zenPage.evaluate(() => window.__zenSession);
 
   // Zen proxies each family to its own vendor, which means that vendor's own
@@ -1629,6 +1624,8 @@ try {
   assert.equal((await storedState()).length, 2);
   // The user works the page in front: a background tab gets no frames.
   await settings.bringToFront();
+  // Settings show one view at a time; stored state is on the Sites view.
+  await settings.goto(`chrome-extension://${extensionId}/options.html#sites`);
   await settings.reload();
   await settings.waitForFunction(
     () =>

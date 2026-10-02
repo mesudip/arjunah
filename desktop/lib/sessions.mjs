@@ -1,6 +1,8 @@
 import { randomBytes, randomUUID } from "node:crypto";
 
 export const SESSION_LIMITS = Object.freeze({
+  // Agent runs (CLI processes) alive at once. At the limit only a run paused
+  // on the browser is evicted for a new one; see SessionRegistry.makeRoom.
   maxSessions: 6,
   // How long a session waits for the browser to return tool results.
   resumeMs: 120_000,
@@ -30,6 +32,18 @@ export class ToolSession {
     this.child = null;
     this.ended = false;
     this.createdAt = Date.now();
+    // When the run last handed tool calls to the browser and stopped.
+    this.pausedAt = 0;
+  }
+
+  /**
+   * Paused on the browser: the agent is blocked on tool calls the browser has
+   * not answered, and no request is waiting on the run. Evicting such a run
+   * loses nothing that cannot be redone, because tool results for a session
+   * that is gone start a fresh run from the transcript (SPEC 12.3.1).
+   */
+  waitingOnBrowser() {
+    return !this.ended && !this.waiter && this.pending.size > 0;
   }
 
   attach(run) {
@@ -51,13 +65,14 @@ export class ToolSession {
 
   emit(event) {
     if (this.ended) return;
-    if (event.type === "final" || event.type === "error") this.end(false);
     if (this.waiter) {
       const { resolve, timer } = this.waiter;
       this.waiter = null;
       clearTimeout(timer);
       resolve(event);
     } else this.events.push(event);
+    // Delivered first: ending the session answers any waiter with an error.
+    if (event.type === "final" || event.type === "error") this.end(false);
   }
 
   nextEvent(timeoutMs = SESSION_LIMITS.eventMs) {
@@ -90,6 +105,7 @@ export class ToolSession {
         type: "tool_calls",
         calls: [{ id, name, arguments: JSON.stringify(args ?? {}) }],
       });
+      this.pausedAt = Date.now();
       this.armResumeTimer();
     });
   }
@@ -98,7 +114,11 @@ export class ToolSession {
     clearTimeout(this.resumeTimer);
     this.resumeTimer = this.pending.size
       ? setTimeout(() => {
-          if (this.pending.size) this.end(true);
+          if (this.pending.size)
+            this.end(
+              true,
+              "The browser did not return the agent's tool results in time.",
+            );
         }, SESSION_LIMITS.resumeMs)
       : null;
   }
@@ -139,10 +159,21 @@ export class ToolSession {
     }
   }
 
-  end(kill) {
+  /**
+   * Ends the run, killing its process when `kill` is set. A request still
+   * waiting on it is answered at once with `reason`, so nothing is left to sit
+   * out the event timeout on a run that is already gone.
+   */
+  end(kill, reason = "The agent session ended before answering.") {
     if (this.ended) return;
     this.ended = true;
     clearTimeout(this.resumeTimer);
+    if (this.waiter) {
+      const { resolve, timer } = this.waiter;
+      this.waiter = null;
+      clearTimeout(timer);
+      resolve({ type: "error", message: reason });
+    }
     for (const entry of this.pending.values())
       entry.resolve({
         content: JSON.stringify({
@@ -166,20 +197,44 @@ export class ToolSession {
   }
 }
 
+/** Every place is taken by a run that is still working. */
+export class SessionLimitError extends Error {
+  constructor() {
+    super(
+      `The desktop app is already running ${SESSION_LIMITS.maxSessions} agent sessions.`,
+    );
+    this.name = "SessionLimitError";
+  }
+}
+
 export class SessionRegistry {
   constructor() {
     this.sessions = new Map();
   }
+  /**
+   * Frees a place for one more run, or says there is none. At the limit the
+   * run paused on the browser the longest is evicted; a run that is working,
+   * or that a request is waiting on, is never killed to make room, so the
+   * newcomer is refused instead and can try again shortly.
+   */
+  makeRoom() {
+    if (this.sessions.size < SESSION_LIMITS.maxSessions) return true;
+    const paused = [...this.sessions.values()]
+      .filter((session) => session.waitingOnBrowser())
+      .sort((a, b) => a.pausedAt - b.pausedAt)[0];
+    if (!paused) return false;
+    paused.end(true, "The desktop app needed room for another agent run.");
+    return this.sessions.size < SESSION_LIMITS.maxSessions;
+  }
+
   create(options) {
-    if (this.sessions.size >= SESSION_LIMITS.maxSessions) {
-      const oldest = [...this.sessions.values()].sort(
-        (a, b) => a.createdAt - b.createdAt,
-      )[0];
-      oldest?.end(true);
-    }
+    if (!this.makeRoom()) throw new SessionLimitError();
     const session = new ToolSession({
       ...options,
-      onEnd: (item) => this.sessions.delete(item.id),
+      onEnd: (item) => {
+        this.sessions.delete(item.id);
+        options.onEnd?.(item);
+      },
     });
     this.sessions.set(session.id, session);
     return session;

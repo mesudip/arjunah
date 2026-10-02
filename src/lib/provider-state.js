@@ -142,7 +142,7 @@ export function createProviderStateStore({ backend, now = Date.now } = {}) {
      * A round whose `signal` was aborted (revocation, navigation) stores
      * nothing, even when it was queued before the abort.
      */
-    store(entry, { keep = [], signal } = {}) {
+    store(entry, { keep = [], prune = true, signal } = {}) {
       return serial(async () => {
         if (signal?.aborted) return false;
         const bytes = byteLength(entry.state);
@@ -164,12 +164,36 @@ export function createProviderStateStore({ backend, now = Date.now } = {}) {
           record.callIdsKey,
           ...keep.map((callIds) => callIdsKey(callIds)),
         ]);
-        const outdated = (
-          await backend.conversationKeys(record.origin, record.conversationKey)
-        ).filter((key) => !wanted.has(key[2]));
-        if (outdated.length) await backend.remove(outdated);
+        // A document's one-off rounds can run several independent tool loops
+        // at once under the one document key, so there an entry this request
+        // does not name may be another loop's and is left alone.
+        if (prune) {
+          const outdated = (
+            await backend.conversationKeys(
+              record.origin,
+              record.conversationKey,
+            )
+          ).filter((key) => !wanted.has(key[2]));
+          if (outdated.length) await backend.remove(outdated);
+        }
         await backend.put(record);
         await enforceCaps(record.origin);
+        return true;
+      }, false);
+    },
+    /**
+     * Ends one tool loop's entries and nothing else: the final round of a
+     * one-off loop, which shares its document key with any loop running
+     * beside it.
+     */
+    forget(origin, conversationKey, callIdsList) {
+      return serial(async () => {
+        const keys = callIdsList.map((callIds) => [
+          origin,
+          conversationKey,
+          callIdsKey(callIds),
+        ]);
+        if (keys.length) await backend.remove(keys);
         return true;
       }, false);
     },

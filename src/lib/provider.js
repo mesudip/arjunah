@@ -20,6 +20,7 @@ import { opencodeProtocol, opencodeUnusableReason } from "./opencode.js";
 import {
   OLLAMA_CLOUD_UNREACHABLE,
   OLLAMA_ORIGIN_REFUSAL,
+  OLLAMA_PROXY_REFUSAL,
   OLLAMA_UNREACHABLE,
   ollamaDisplayName,
   ollamaCheckKey,
@@ -229,13 +230,32 @@ function streamFailure(error) {
 }
 
 /** Ollama's `{ "error": "..." }` text, read only to choose our own sentence. */
-async function errorText(response) {
+/**
+ * A refusal's body: Ollama's `error` string when it sent one, and whether
+ * anything came at all. Ollama's own Origin and Host checks answer 403 with an
+ * empty body; a proxy in front of it that refuses a key says something.
+ */
+async function errorBody(response) {
+  let raw = "";
   try {
-    const body = await readJson(response, 64_000, "PROVIDER_ERROR");
-    return typeof body?.error === "string" ? body.error.slice(0, 500) : "";
+    if (response.body)
+      for await (const chunk of responseChunks(
+        response,
+        64_000,
+        "PROVIDER_ERROR",
+      ))
+        raw += chunk;
   } catch {
-    return "";
+    return { text: "", empty: false };
   }
+  let text = "";
+  try {
+    const body = JSON.parse(raw);
+    if (typeof body?.error === "string") text = body.error.slice(0, 500);
+  } catch {
+    // Not JSON: the text only decides emptiness.
+  }
+  return { text, empty: !raw.trim() };
 }
 
 /**
@@ -260,8 +280,9 @@ async function providerResponse(
     });
     if (!response.ok) {
       if (config?.kind === "ollama") {
-        const text = await errorText(response);
+        const { text, empty } = await errorBody(response);
         const refusal = ollamaRefusal(response.status, text, config, {
+          emptyBody: empty,
           retryAfterMs: retryAfterHeader(response),
           listing: (init.method ?? "GET") === "GET",
         });
@@ -2317,7 +2338,8 @@ export async function listOllamaModels(
       if (
         signal?.aborted ||
         error?.code === "NOT_CONFIGURED" ||
-        error?.message === OLLAMA_ORIGIN_REFUSAL
+        error?.message === OLLAMA_ORIGIN_REFUSAL ||
+        error?.message === OLLAMA_PROXY_REFUSAL
       )
         throw error;
       if (error?.ollama?.status)

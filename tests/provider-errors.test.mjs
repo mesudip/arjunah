@@ -382,6 +382,20 @@ test("the desktop path carries the companion's classification in the extension's
     assert.deepEqual(error.details, details);
     assert.equal(error.message.includes("example.test"), false);
   }
+  // The companion's own limit on agent runs is not the subscription's, and
+  // says so in the extension's words.
+  const busy = await failure(t, config, 429, {
+    error: {
+      code: "RATE_LIMITED",
+      message: "The desktop app is already running 6 agent sessions.",
+      reason: "busy",
+      retryAfterMs: 5000,
+    },
+  });
+  assert.equal(busy.code, "RATE_LIMITED");
+  assert.deepEqual(busy.details, { retryAfterMs: 5000 });
+  assert.match(busy.message, /already running as many agent sessions/);
+  assert.doesNotMatch(busy.message, /subscription/);
   // A code the extension does not classify keeps the companion's own status
   // mapping, as before.
   const other = await failure(t, config, 502, {

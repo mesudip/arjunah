@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { Builder, Browser } from "selenium-webdriver";
+import { Builder, Browser, By, Key } from "selenium-webdriver";
 import firefox from "selenium-webdriver/firefox.js";
+import { CONSENT_ARM_WAIT } from "./consent.mjs";
 import {
   getInstalledBrowsers,
   detectBrowserPlatform,
@@ -58,6 +59,39 @@ export async function launchFirefox(addonPath) {
   }
 }
 
+/**
+ * Opens a settings view the way a person does: the sidebar link for its
+ * section, then a provider's row for that provider's own view. WebDriver will
+ * not run scripts in extension pages, so it cannot set the address hash, and
+ * rows redraw on every state change, so a click on a replaced one is retried.
+ */
+export async function openSettingsView(activeDriver, view) {
+  const [section, provider] = view.split("/");
+  const click = (css) =>
+    activeDriver.wait(
+      async () => {
+        try {
+          await activeDriver.findElement(By.css(css)).click();
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      10000,
+      `the settings link ${css}`,
+    );
+  await click(`a[data-nav="${section}"]`);
+  if (provider) await click(`#provider-list a[data-provider="${provider}"]`);
+  await activeDriver.wait(
+    async () =>
+      (await activeDriver
+        .findElement(By.css(`main > [data-view="${view}"]`))
+        .getProperty("hidden")) === false,
+    10000,
+    `the ${view} settings view`,
+  );
+}
+
 /** The tab the add-on opened its options page in on install. */
 export async function waitForExtensionOptions(activeDriver) {
   return activeDriver.wait(async () => {
@@ -68,4 +102,30 @@ export async function waitForExtensionOptions(activeDriver) {
     }
     return false;
   }, 10000);
+}
+
+/**
+ * Answer the consent sheet as a keyboard user does: it focuses itself and arms
+ * Allow only after it has been visible a while (tests/helpers/consent.mjs).
+ */
+export async function approveFirefoxConsent(activeDriver) {
+  await activeDriver.sleep(CONSENT_ARM_WAIT);
+  await activeDriver
+    .actions()
+    .keyDown(Key.SHIFT)
+    .sendKeys(Key.TAB)
+    .keyUp(Key.SHIFT)
+    .sendKeys(Key.ENTER)
+    .perform();
+}
+
+export async function denyFirefoxConsent(activeDriver) {
+  await activeDriver.sleep(200);
+  await activeDriver
+    .actions()
+    .keyDown(Key.SHIFT)
+    .sendKeys(Key.TAB, Key.TAB)
+    .keyUp(Key.SHIFT)
+    .sendKeys(Key.ENTER)
+    .perform();
 }

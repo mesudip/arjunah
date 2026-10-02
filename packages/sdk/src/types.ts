@@ -465,6 +465,12 @@ export interface AISiteLoop {
   fetch(path: string, init: AILoopFetchInit): Promise<Response>;
   /** The grant the first message asks for: 1 (default) or 2. */
   level?: 1 | 2;
+  /**
+   * The loop asks the visitor for values with `input.client`. Consent says so
+   * up front; without it the extension answers every `input.client` with a
+   * cancellation and never shows the prompt.
+   */
+  inputs?: boolean;
 }
 /** One of the site's own models (SPEC 15.2); only what is given is shown. */
 export interface AISiteModelEntry {

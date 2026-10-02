@@ -10,6 +10,7 @@
 // server through a recording pass-through proxy (Origin forwarded untouched,
 // so the real server's own check applies). ARJUNAH_E2E_OLLAMA_MODEL picks the
 // model; it must report vision and tools (default qwen3-vl:2b).
+import { approveConsent } from "../helpers/consent.mjs";
 import assert from "node:assert/strict";
 import { createServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -72,9 +73,10 @@ function ndjson(response, lines) {
 /** The mock: the API surface and the Origin rule of a real Ollama server. */
 async function mockOllama(request, response, raw) {
   const payload = raw.length ? JSON.parse(raw) : null;
+  // Like Ollama's own CORS check (gin's AbortWithStatus): 403, no body.
   if (request.headers.origin) {
-    response.writeHead(403, { "Content-Type": "text/plain" });
-    return response.end("Forbidden");
+    response.writeHead(403);
+    return response.end();
   }
   const json = (value) => {
     response.writeHead(200, { "Content-Type": "application/json" });
@@ -263,7 +265,9 @@ try {
   settings.on("pageerror", (error) =>
     errors.push(`settings: ${error.message}`),
   );
-  await settings.goto(`chrome-extension://${extensionId}/options.html`);
+  await settings.goto(
+    `chrome-extension://${extensionId}/options.html#providers/ollama`,
+  );
   await settings.waitForSelector("#ollama-form");
   await settings.type("#ollama-base-url", OLLAMA.replace("http://", ""));
   await settings.click("#ollama-form button[type=submit]");
@@ -381,7 +385,7 @@ try {
   await page.waitForFunction(
     () => document.activeElement?.id === "arjunah-extension",
   );
-  await page.keyboard.press("Enter");
+  await approveConsent(page);
   const listed = await page.evaluate(async () =>
     (await (await window.__session).models.list()).map((item) => item.id),
   );
@@ -458,7 +462,7 @@ try {
   );
   await page.keyboard.press("Enter");
   await new Promise((done) => setTimeout(done, 200));
-  await page.keyboard.press("Enter");
+  await approveConsent(page);
   await page.waitForFunction(() => window.toolCalls >= 1, {
     timeout: LIVE ? 180_000 : 10_000,
   });

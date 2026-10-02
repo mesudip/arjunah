@@ -24,6 +24,10 @@ export const OLLAMA_CLOUD_UNREACHABLE =
   "Ollama Cloud is not answering. Try again in a moment.";
 export const OLLAMA_ORIGIN_REFUSAL =
   "The Ollama server refused this browser extension (403). If it restricts origins, add chrome-extension://* and moz-extension://* to OLLAMA_ORIGINS and restart it.";
+export const OLLAMA_PROXY_REFUSAL =
+  "The server at this Ollama address refused the request (403). If a proxy in front of Ollama requires an API key, add one in extension settings; otherwise check its access rules.";
+export const OLLAMA_KEY_REFUSAL =
+  "The server at this Ollama address refused the request (403), which usually means it does not accept the API key. Check the key in extension settings, or the access rules of the proxy in front of Ollama.";
 
 function ipv4(hostname) {
   const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(hostname);
@@ -459,6 +463,9 @@ export function ollamaThink(config, effort) {
  * shown, since a server's prose can quote the request back.
  *
  * `retryAfterMs` is what the response's `Retry-After` said, if anything.
+ * `emptyBody` says the refusal came with no body at all, which is how
+ * Ollama's own Origin and Host checks answer; anything else that answers 403
+ * (an authenticating proxy, a firewall page) sends one.
  * `listing` marks a metadata read (`GET /api/tags`): a 404 there means the
  * address does not serve Ollama, not that a model is missing. `kind` tells
  * discovery and the catalog's self-correction which refusals are about the
@@ -468,7 +475,7 @@ export function ollamaRefusal(
   status,
   text,
   config,
-  { retryAfterMs = null, listing = false } = {},
+  { retryAfterMs = null, listing = false, emptyBody = false } = {},
 ) {
   const reason = String(text ?? "").slice(0, 500);
   const where = config?.cloud ? "Ollama Cloud" : "The Ollama server";
@@ -495,7 +502,11 @@ export function ollamaRefusal(
         : {}),
     };
   if (status === 403 && !config?.cloud)
-    return refuse("PROVIDER_ERROR", OLLAMA_ORIGIN_REFUSAL);
+    return emptyBody
+      ? refuse("PROVIDER_ERROR", OLLAMA_ORIGIN_REFUSAL)
+      : config?.apiKey
+        ? refuse("NOT_CONFIGURED", OLLAMA_KEY_REFUSAL)
+        : refuse("PROVIDER_ERROR", OLLAMA_PROXY_REFUSAL);
   // Seen live with `truncate: false`: "request (3009 tokens) exceeds the
   // available context size (2048 tokens)", type exceed_context_size_error.
   // With truncation on (Ollama's default) an overflow is silent instead.

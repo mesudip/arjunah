@@ -188,7 +188,28 @@ mountAssistant({
 
 The widget calls `window.ai.arjunah.enable()` on the visitor's first send, so
 the extension's consent follows a click, and keeps the session for the life of
-the mount. Every turn body then carries what the page can do:
+the mount. `bridge.arjunah` may be an access request, which reaches `enable()`
+unchanged apart from the `composer` default below: `{ level?, capabilities?,
+context?, reason?, require?, composer? }`, as in SPEC section 4. Page context
+needs the `context.read` capability beside the level, because neither level
+includes it; `context` alone is refused:
+
+```js
+bridge: {
+  arjunah: {
+    level: "completion", // or "catalog"
+    capabilities: ["context.read"],
+    context: ["title", "url"],
+    reason: "Answers questions about this page.",
+    require: { local: true }, // optional: only models that stay on the visitor's machine
+  },
+},
+```
+
+A refused request, or a session lost later, is shown to the visitor once as an
+error line ("अर्जुनः did not connect." with the extension's reason) and passed
+to `onError`; the widget does not ask again during that mount, and turns run
+with a `null` model. Every turn body then carries what the page can do:
 
 ```json
 "bridge": {
@@ -198,7 +219,7 @@ the mount. Every turn body then carries what the page can do:
 ```
 
 `model` is the visitor's model entry, or `null` when there is no extension, the
-visitor refused, or the session was lost; decide before composing whether to
+visitor refused or the request was invalid, or the session was lost; decide before composing whether to
 run, use a model of your own, or fail. `tools` are the page tools declared
 here, without handlers or `userInputs`, at most 32. The model picker shows the
 visitor's catalog instead of `widget.models`, and `setModels` is ignored.
@@ -267,14 +288,21 @@ What the function returns is held to every bound a server's answer is: a
 non-2xx status is a rejection, anything without an integer `status` and a
 readable `body` (or `null`) is refused, a turn stream is read incrementally
 and cut off at 2,000,000 bytes, other answers at 1,000,000, body chunks must be
-bytes, and malformed events are dropped. A function that throws fails the
+bytes, and malformed events are dropped. Turn streams are parsed as
+EventSource parses them: CRLF, LF or CR line ends, `:` comments, multi-line
+`data`, one leading space dropped from a value, a leading BOM ignored, and an
+event the stream ends inside discarded. `createEventStreamParser()` exports
+that parser (`push(bytes)` returns `{ type, data }` events) for checking your
+framing. A function that throws fails the
 request as "The in-page backend failed." without showing your error text.
 
 `eventStreamResponse(events)` turns an iterable or async iterable of
 `{ type, ...data }` events into a `text/event-stream` `Response`. It pulls one
 event at a time, so a generator can wait between yields, and when the widget
 stops reading (stop, `destroy()`, a bound) the iterator's `return()` runs, so a
-generator's `finally` sees the end. A page loop answering a turn, with one
+generator's `finally` sees the end. An item without a valid `type`, one that is
+not JSON, or a throwing `next()` fails the turn, and `return()` runs then too,
+once. A page loop answering a turn, with one
 `tool.client` round:
 
 ```js
@@ -384,7 +412,9 @@ to `backend.fetch`:
 | `entities?q={query}`                       | GET    | `Entity[]`, ≤ 20 (see below)  |
 
 `entities` is only called when you enable mentions without your own `search`.
-A turn answers with Server-Sent Events. Each event has an `event:` name and a
+`cancel` is posted when the visitor stops a turn or deletes the thread it runs
+in, and always names that turn's thread, even after the visitor has switched to
+another one. A turn answers with Server-Sent Events. Each event has an `event:` name and a
 JSON `data:` object:
 
 `turn.start`, `model.start`, `output.delta`, `reasoning.delta`, `tool.start`,

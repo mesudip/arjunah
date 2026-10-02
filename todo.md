@@ -3,7 +3,6 @@
 ## Now
 
 - [ ] Move the stale `latest` dist-tag off `1.0.0-alpha.1` on both npm packages (`npm dist-tag add <pkg>@1.0.0-beta.1 latest`); it needs a maintainer login. `v1.0.0-beta.1` itself is released: npm `beta`, GitHub pre-release with the Chrome zip and Firefox xpi.
-- [ ] Give the release workflow's registry verification a longer budget. On 2026-09-30 npm took 31 minutes to expose the beta versions and 39 to apply the `beta` dist-tag, so the 10-minute check failed and the GitHub release needed a rerun of the failed jobs.
 
 ## Next
 

@@ -294,7 +294,8 @@ try {
   const extensionId = new URL(workerTarget.url()).host;
 
   const settings = await browser.newPage();
-  await settings.goto(`chrome-extension://${extensionId}/options.html`);
+  // Settings show one view at a time; pairing is on the Desktop app view.
+  await settings.goto(`chrome-extension://${extensionId}/options.html#desktop`);
   await settings.waitForFunction(() =>
     /Desktop app v|not detected/.test(
       document.querySelector("#desktop-state").textContent,

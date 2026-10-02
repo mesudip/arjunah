@@ -1,4 +1,9 @@
 import { mockProviderExtension } from "../helpers/browser-extension.mjs";
+import {
+  approveConsent,
+  CONSENT_ARM_WAIT,
+  denyConsent,
+} from "../helpers/consent.mjs";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -139,7 +144,7 @@ try {
     assert.match(text, /Inspect sensitive site data/);
     assert.match(text, /Permissions after approval/);
     await cdp.detach();
-    await page.keyboard.press("Enter");
+    await approveConsent(page);
     await wait(() => Boolean(heldResponse));
     const before = requests.length;
     if (mode === "navigation") {
@@ -197,6 +202,73 @@ try {
       before,
       `${mode} must prevent another model request`,
     );
+    await page.close();
+  }
+  // A page may call enable() while the visitor is typing and cover the sheet
+  // with its own content: no key the visitor meant for the page, and nothing
+  // pressed while the sheet is hidden, may approve it.
+  {
+    await extensionCall("grants.clear");
+    const page = await browser.newPage();
+    await page.goto(`http://localhost:${port}/`);
+    await page.waitForFunction(() => Boolean(window.ai?.arjunah));
+    await page.focus("textarea");
+    const ask = () =>
+      page.evaluate(() => {
+        window.__consent = window.ai.arjunah.enable({ level: "catalog" }).then(
+          () => "granted",
+          (error) => error.code,
+        );
+      });
+    const answer = () => page.evaluate(() => window.__consent);
+    await ask();
+    await pause(150);
+    // The visitor's next keys land on the sheet, which is focused itself.
+    await page.keyboard.press("Enter");
+    await page.keyboard.press(" ");
+    await pause(CONSENT_ARM_WAIT);
+    await page.keyboard.press("Enter");
+    await page.keyboard.press(" ");
+    assert.equal(
+      await Promise.race([answer(), pause(300).then(() => "pending")]),
+      "pending",
+      "stray keys must not approve the consent sheet",
+    );
+    await denyConsent(page);
+    assert.equal(await answer(), "USER_DENIED");
+
+    // The page makes the extension's own UI transparent and draws its own.
+    await ask();
+    await page.evaluate(() =>
+      document
+        .getElementById("arjunah-extension")
+        .style.setProperty("opacity", "0.01", "important"),
+    );
+    await pause(CONSENT_ARM_WAIT);
+    await page.keyboard.down("Shift");
+    await page.keyboard.press("Tab");
+    await page.keyboard.up("Shift");
+    await page.keyboard.press("Enter");
+    assert.equal(
+      await Promise.race([answer(), pause(300).then(() => "pending")]),
+      "pending",
+      "a hidden consent sheet must not approve",
+    );
+    await page.evaluate(() =>
+      document
+        .getElementById("arjunah-extension")
+        .style.removeProperty("opacity"),
+    );
+    // Shown again, it waits the full delay before Allow works.
+    await page.keyboard.press("Enter");
+    assert.equal(
+      await Promise.race([answer(), pause(300).then(() => "pending")]),
+      "pending",
+      "Allow re-arms only after the sheet is visible again",
+    );
+    await pause(CONSENT_ARM_WAIT);
+    await page.keyboard.press("Enter");
+    assert.equal(await answer(), "granted");
     await page.close();
   }
   const page = await browser.newPage();

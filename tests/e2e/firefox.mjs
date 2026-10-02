@@ -1,5 +1,11 @@
 import { mockProviderExtension } from "../helpers/browser-extension.mjs";
-import { launchFirefox, waitForExtensionOptions } from "../helpers/firefox.mjs";
+import {
+  denyFirefoxConsent,
+  approveFirefoxConsent,
+  launchFirefox,
+  openSettingsView,
+  waitForExtensionOptions,
+} from "../helpers/firefox.mjs";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
@@ -186,6 +192,8 @@ try {
     await driver.findElement(By.id("base-url")).getProperty("value"),
     "https://api.openai.com/v1",
   );
+  // Settings show one view at a time; OpenAI's form is on its own view.
+  await openSettingsView(driver, "providers/openai");
   // The model field is a typable combobox (SPEC 8.2): the text box inside it is
   // what takes the name, and blurring it commits what was typed.
   const modelBox = await driver.findElement(By.css("#model .combo-input"));
@@ -207,6 +215,7 @@ try {
 
   // Firefox sends the extension's moz-extension:// Origin on every POST, which
   // Ollama refuses; the declarativeNetRequest rule must remove it.
+  await openSettingsView(driver, "providers/ollama");
   await driver
     .findElement(By.id("ollama-base-url"))
     .sendKeys(`127.0.0.1:${port}`);
@@ -228,6 +237,7 @@ try {
     "no Firefox request reached Ollama with an Origin",
   );
 
+  await openSettingsView(driver, "about");
   await driver.findElement(By.id("open-popup")).click();
   await driver.wait(until.urlContains("/popup.html"), 5000);
   await driver.wait(
@@ -270,7 +280,7 @@ try {
     "window.ai.arjunah.enable().then(s=>(window.__session=s,s.grant))",
   );
   await driver.sleep(150);
-  await driver.actions().sendKeys(Key.ENTER).perform();
+  await approveFirefoxConsent(driver);
   const grant = await result(driver, "grant");
   assert.equal(grant.ok, true);
   assert.equal(grant.value.origin, `http://localhost:${port}`);
@@ -406,7 +416,7 @@ try {
     "window.ai.arjunah.enable({capabilities:['context.read'],context:['title','url','selection','text']}).then(s=>(window.__ctx=s,s.grant))",
   );
   await driver.sleep(150);
-  await driver.actions().sendKeys(Key.ENTER).perform();
+  await approveFirefoxConsent(driver);
   assert.equal((await result(driver, "context")).ok, true);
   const context = await invoke(
     driver,
@@ -423,7 +433,7 @@ try {
     .sendKeys("Please use the echo tool", Key.ENTER)
     .perform();
   await driver.sleep(250);
-  await driver.actions().sendKeys(Key.ENTER).perform();
+  await approveFirefoxConsent(driver);
   await driver.wait(
     async () => (await driver.executeScript("return window.toolCalls")) === 1,
     10000,
@@ -444,13 +454,7 @@ try {
   await invoke(driver, "window.ai.arjunah.chat.open()", true);
   await driver.actions().sendKeys("This contract changed", Key.ENTER).perform();
   await driver.sleep(250);
-  await driver
-    .actions()
-    .keyDown(Key.SHIFT)
-    .sendKeys(Key.TAB)
-    .keyUp(Key.SHIFT)
-    .sendKeys(Key.ENTER)
-    .perform();
+  await denyFirefoxConsent(driver);
   await driver.sleep(250);
   assert.equal(
     modelRequests.length,
@@ -466,10 +470,10 @@ try {
   await invoke(driver, "window.ai.arjunah.chat.open()", true);
   await driver.actions().sendKeys("Use the MCP echo tool", Key.ENTER).perform();
   await driver.sleep(250);
-  await driver.actions().sendKeys(Key.ENTER).perform();
+  await approveFirefoxConsent(driver);
   await driver.wait(() => mcpMethods.includes("tools/list"), 10000);
   await driver.sleep(200);
-  await driver.actions().sendKeys(Key.ENTER).perform();
+  await approveFirefoxConsent(driver);
   await driver.wait(() => mcpMethods.includes("tools/call"), 10000);
   assert.deepEqual(mcpMethods, [
     "initialize",
@@ -503,13 +507,7 @@ try {
     "window.ai.arjunah.enable({capabilities:['models.list']})",
   );
   await driver.sleep(150);
-  await driver
-    .actions()
-    .keyDown(Key.SHIFT)
-    .sendKeys(Key.TAB)
-    .keyUp(Key.SHIFT)
-    .sendKeys(Key.ENTER)
-    .perform();
+  await denyFirefoxConsent(driver);
   const denied = await result(driver, "denied");
   assert.equal(denied.ok, false);
   assert.equal(denied.error, "USER_DENIED");
@@ -524,7 +522,7 @@ try {
   await invoke(driver, "window.ai.arjunah.chat.open()", true);
   await driver.actions().sendKeys("Delayed tool", Key.ENTER).perform();
   await driver.sleep(250);
-  await driver.actions().sendKeys(Key.ENTER).perform();
+  await approveFirefoxConsent(driver);
   await driver.wait(() => Boolean(heldResponse), 10000);
   const beforeNavigation = modelRequests.length;
   await driver.get(`http://127.0.0.1:${port}/site.html`);

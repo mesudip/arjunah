@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Store } from "./store.mjs";
 import { Pairing } from "./pairing.mjs";
-import { SessionRegistry } from "./sessions.mjs";
+import { SessionRegistry, SESSION_LIMITS } from "./sessions.mjs";
 import { LogBuffer } from "./logs.mjs";
 import {
   detectProviders,
@@ -22,7 +22,11 @@ import {
   IMAGE_LIMITS,
   IMAGE_MEDIA_TYPES,
 } from "./transcript.mjs";
-import { EFFORTS, scratchDirectory } from "./providers/common.mjs";
+import {
+  EFFORTS,
+  observeCommands,
+  scratchDirectory,
+} from "./providers/common.mjs";
 import {
   exchangePairingToken,
   fetchT3Providers,
@@ -38,6 +42,8 @@ export const PROTOCOL_VERSION = "1.0.0";
 // Matches the extension's own request ceiling (LIMITS.requestBytes), so a turn
 // carrying the maximum image payload is not cut off at this hop.
 const BODY_LIMIT = 12_000_000;
+// What a turn refused for want of a free agent run is told to wait.
+const BUSY_RETRY_MS = 5_000;
 const EXTENSION_ORIGIN = /^(chrome|moz|safari-web)-extension:\/\/[a-z0-9-]+$/i;
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const WS_PROTOCOL = "arjunah.v1";
@@ -97,10 +103,12 @@ function observeWebsocket(socket, onClose) {
 }
 
 class HttpError extends Error {
-  constructor(status, code, message) {
+  /** `extra` adds machine-readable members to the error body. */
+  constructor(status, code, message, extra = null) {
     super(message);
     this.status = status;
     this.code = code;
+    this.extra = extra;
   }
 }
 
@@ -142,6 +150,9 @@ export function createDesktopApp({
   // pair reading a cache its detection never wrote.
   refresh = detect === detectProviders ? refreshProviders : null,
   t3Fetch = fetchT3Providers,
+  // How old the provider view may be before an ordinary read refreshes it in
+  // the background (see the /api/providers route).
+  providerStaleMs = 30_000,
 } = {}) {
   const pairing = new Pairing();
   const sessions = new SessionRegistry();
@@ -224,6 +235,10 @@ export function createDesktopApp({
   let providerRefresh = null;
   let providerFingerprint = "";
   let providerTimer = null;
+  // When the view was last built, and from which settings: an ordinary read is
+  // answered from it at once (see the /api/providers route).
+  let providerViewAt = 0;
+  let providerViewSettings = "";
 
   // Providers are detected once at startup and then pushed: `publish` fires
   // whenever the view's fingerprint moves, so a connected browser learns about
@@ -342,10 +357,17 @@ export function createDesktopApp({
       return refreshProviderView({ force, refreshModels, light });
     }
     providerRefresh = (async () => {
+      const startedAt = Date.now();
+      const pass = light && !force && refresh ? "light pass" : "detection";
       const providers =
         light && !force && refresh
           ? await refresh(store.settings)
           : await detect(store.settings, { force });
+      note(
+        "info",
+        "discovery",
+        `${pass} took ${Date.now() - startedAt}ms (${providers.filter((item) => item.available).length} of ${providers.length} providers available)`,
+      );
       // The view is what a browser sees, with the binary path stripped. Keep
       // the unredacted results too: that is what a chat turn starts from, and
       // re-detecting to recover a path it already had is the whole cost this
@@ -359,6 +381,8 @@ export function createDesktopApp({
       const fingerprint = stableProviders(next);
       const changed = providerFingerprint !== fingerprint;
       providerView = next;
+      providerViewAt = Date.now();
+      providerViewSettings = JSON.stringify(store.settings ?? {});
       providerFingerprint = fingerprint;
       if (changed) publish("providers");
       return providerView;
@@ -391,10 +415,125 @@ export function createDesktopApp({
   const THREAD_SWEEP_MS = 60_000;
   const THREAD_ID = /^[A-Za-z0-9_-]{1,100}$/;
   const threadCleanups = new Set();
-  function endThread(id) {
-    const thread = threads.get(id);
-    if (!thread) return false;
-    threads.delete(id);
+  // Turns on one conversation run strictly one after another. A turn holds its
+  // thread's lane from admission until its agent session has ended and the
+  // process behind it has exited, across any tool rounds in between; only then
+  // is the next queued turn admitted. Without this a second turn could resume
+  // the same CLI session beside the first, or end the thread and delete its
+  // scratch directory (Codex's CODEX_HOME) under the first one's live process.
+  // A lane exists only while it is held, so idle conversations cost nothing.
+  const lanes = new Map(); // threadId -> { waiters: [{ grant, fail }] }
+  // Queued time counts against the same budget as the answer (the browser
+  // gives up on the whole request after 180 s), and a turn that could no
+  // longer get a fair share of it is refused without starting the agent.
+  const LANE_WAIT_MS = SESSION_LIMITS.eventMs - 30_000;
+  // How long a finished or killed agent may take to exit before its lane or
+  // scratch directory is handed on regardless (SIGKILL follows at 3 s).
+  const EXIT_WAIT_MS = 5_000;
+  function childAlive(child) {
+    return Boolean(
+      child &&
+        typeof child.once === "function" &&
+        child.exitCode == null &&
+        child.signalCode == null,
+    );
+  }
+  function exited(child) {
+    if (!childAlive(child)) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+        resolve();
+      }, EXIT_WAIT_MS);
+      timer.unref?.();
+      child.once("exit", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+  function laneRelease(id, lane) {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const next = lane.waiters.shift();
+      if (next) next.grant();
+      else if (lanes.get(id) === lane) lanes.delete(id);
+    };
+  }
+  /** Resolves with the lane's release once this turn may run on `id`. */
+  function acquireLane(id, signal, onQueued) {
+    const aborted = () =>
+      new HttpError(499, "ABORTED", "The browser closed the request.");
+    if (signal?.aborted) return Promise.reject(aborted());
+    const lane = lanes.get(id);
+    if (!lane) {
+      const fresh = { waiters: [] };
+      lanes.set(id, fresh);
+      return Promise.resolve(laneRelease(id, fresh));
+    }
+    onQueued?.();
+    return new Promise((resolve, reject) => {
+      const leave = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        const index = lane.waiters.indexOf(waiter);
+        if (index >= 0) lane.waiters.splice(index, 1);
+      };
+      const fail = (error) => {
+        leave();
+        reject(error);
+      };
+      const onAbort = () => fail(aborted());
+      const waiter = {
+        grant: () => {
+          leave();
+          resolve(laneRelease(id, lane));
+        },
+        fail,
+      };
+      const timer = setTimeout(
+        () =>
+          fail(
+            new HttpError(
+              504,
+              "TIMEOUT",
+              "An earlier turn of this conversation is still running.",
+            ),
+          ),
+        LANE_WAIT_MS,
+      );
+      timer.unref?.();
+      signal?.addEventListener("abort", onAbort, { once: true });
+      lane.waiters.push(waiter);
+    });
+  }
+  /** Turns still queued on `id` are refused; the running one is not touched. */
+  function dropWaiters(id, message) {
+    const lane = lanes.get(id);
+    if (!lane?.waiters.length) return false;
+    for (const waiter of [...lane.waiters])
+      waiter.fail(new HttpError(499, "ABORTED", message));
+    return true;
+  }
+  /**
+   * Hands a session's lane on once nothing is waiting on its events and its
+   * process has exited (Codex's app server is still shutting down when its
+   * answer arrives, and must not share CODEX_HOME with the next turn).
+   */
+  function releaseRun(session) {
+    const release = session.releaseLane;
+    if (!release || session.ended !== true || session.inFlight > 0) return;
+    session.releaseLane = null;
+    if (childAlive(session.child)) void exited(session.child).then(release);
+    else release();
+  }
+  function finishThread(thread) {
     try {
       const cleanup = () => thread.scratch.cleanup();
       const result = resolveAdapter(thread.providerId)?.endThread?.(
@@ -414,12 +553,42 @@ export function createDesktopApp({
     } catch {
       thread.scratch.cleanup();
     }
+  }
+  /**
+   * Ending a thread whose run is still live kills that run first, and the
+   * persisted session and scratch directory are deleted only once its process
+   * has exited: ending is what revoking a site or clearing conversations asks
+   * for, so the agent must stop rather than finish on the user's subscription,
+   * and nothing is deleted under a process still writing to it. `cancelQueued`
+   * (the browser ending a conversation, or shutdown) also refuses turns still
+   * queued behind it; generate's own calls hold the lane and pass false.
+   */
+  function endThread(id, { cancelQueued = false } = {}) {
+    const dropped = cancelQueued
+      ? dropWaiters(id, "The conversation was ended.")
+      : false;
+    const thread = threads.get(id);
+    if (!thread) return dropped;
+    threads.delete(id);
+    const run = thread.session ?? null;
+    if (run && !run.ended) {
+      run.threadEnded = true;
+      run.cancel();
+    }
+    if (childAlive(run?.child)) {
+      const pending = exited(run.child)
+        .then(() => finishThread(thread))
+        .finally(() => threadCleanups.delete(pending));
+      threadCleanups.add(pending);
+    } else finishThread(thread);
     record("thread-ended", `${thread.providerId} thread for ${id}`);
     return true;
   }
   function sweepThreads() {
+    // A conversation with a turn running or queued is not idle.
     for (const [id, thread] of threads)
-      if (Date.now() - thread.lastAt > THREAD_IDLE_MS) endThread(id);
+      if (!lanes.has(id) && Date.now() - thread.lastAt > THREAD_IDLE_MS)
+        endThread(id);
   }
   // Generate calls sweep before they run, but a conversation the user simply
   // walked away from must expire on time too: its CLI session data may not
@@ -450,7 +619,11 @@ export function createDesktopApp({
     };
   }
 
-  const WARNING_KINDS = new Set(["pair-failed", "t3-error"]);
+  // Each command discovery runs, with what it cost (see providers/common.mjs).
+  observeCommands(({ command, ms, outcome }) =>
+    note("debug", "discovery", `${command}: ${ms}ms, ${outcome}`),
+  );
+  const WARNING_KINDS = new Set(["pair-failed", "t3-error", "providers-error"]);
   function record(kind, detail) {
     activity.push({ at: new Date().toISOString(), kind, detail });
     if (activity.length > 100) activity.shift();
@@ -798,6 +971,20 @@ export function createDesktopApp({
    * written: the extension cancelled it, so the run behind it is stopped.
    */
   async function generate(body, client, closed) {
+    // The session this request ends up reading, so its lane can be handed on
+    // once the request is done with it (see releaseRun).
+    const turn = { session: null };
+    try {
+      return await runTurn(body, client, closed, turn);
+    } finally {
+      if (turn.session) {
+        turn.session.inFlight -= 1;
+        releaseRun(turn.session);
+      }
+    }
+  }
+
+  async function runTurn(body, client, closed, turn) {
     const { adapter, providerId, model, messages, tools, threadId, reasoning } =
       validateGenerate(body);
     sweepThreads();
@@ -807,6 +994,9 @@ export function createDesktopApp({
         ? body.progressId
         : null;
     const live = progressFor(progressId);
+    // What this request may wait for its next event, less any time it spent
+    // queued behind an earlier turn of the same conversation.
+    let eventMs = SESSION_LIMITS.eventMs;
     const results = trailingToolResults(messages);
     let session = results ? sessions.findByResults(results) : null;
     if (results && !session) {
@@ -827,6 +1017,12 @@ export function createDesktopApp({
         live,
         providerId,
         `Handing the tool result back to ${adapter.name}…`,
+      );
+      // The thread has now seen this turn's tool rounds as well, so the next
+      // turn sends only what follows them (see `seen` on the final answer).
+      session.conversationLength = Math.max(
+        session.conversationLength ?? 0,
+        splitMessages(messages).conversation.length,
       );
       session.resume(results);
     } else {
@@ -875,39 +1071,86 @@ export function createDesktopApp({
       // thread attaches only what arrived since the agent last saw the chat.
       let promptImages = collectImages(conversation);
       let resumeHandle = null;
+      let release = null;
       if (threadId && adapter.supportsThreads) {
-        const existing = threads.get(threadId);
-        if (
-          existing &&
-          (existing.providerId !== providerId ||
-            existing.model !== selectedModel ||
-            existing.systemHash !== systemHash ||
-            !existing.handle ||
-            conversation.length <= existing.seen)
-        )
-          endThread(threadId);
-        thread = threads.get(threadId) ?? null;
-        if (thread) {
-          resumeHandle = thread.handle;
-          prompt = buildContinuation(conversation.slice(thread.seen));
-          promptImages = collectImages(conversation.slice(thread.seen));
-        } else {
-          thread = {
+        const queuedAt = Date.now();
+        release = await acquireLane(threadId, closed, () =>
+          phase(
+            live,
             providerId,
-            model: selectedModel,
-            systemHash,
-            handle: null,
-            binary: info.binary,
-            scratch: scratchDirectory(`${providerId}-thread`),
-            seen: 0,
-            lastAt: Date.now(),
-          };
-          threads.set(threadId, thread);
-        }
-        thread.lastAt = Date.now();
+            "Waiting for the previous turn of this conversation to finish…",
+          ),
+        ).catch((error) => {
+          if (live) live.done = true;
+          throw error;
+        });
+        eventMs -= Date.now() - queuedAt;
       }
-      session = sessions.create({ tools, model: selectedModel, providerId });
+      // A place for the run, checked before the thread is touched. Nothing
+      // below awaits before sessions.create, so the place cannot be taken.
+      if (!sessions.makeRoom()) {
+        release?.();
+        if (live) live.done = true;
+        record(
+          "busy",
+          `${client.name} → ${adapter.name} refused: ${SESSION_LIMITS.maxSessions} agent runs are already working`,
+        );
+        throw new HttpError(
+          429,
+          "RATE_LIMITED",
+          `The desktop app is already running ${SESSION_LIMITS.maxSessions} agent sessions.`,
+          { reason: "busy", retryAfterMs: BUSY_RETRY_MS },
+        );
+      }
+      // Only the lane holder may read, end, or replace this conversation's thread.
+      if (release)
+        try {
+          const existing = threads.get(threadId);
+          if (
+            existing &&
+            (existing.providerId !== providerId ||
+              existing.model !== selectedModel ||
+              existing.systemHash !== systemHash ||
+              !existing.handle ||
+              conversation.length <= existing.seen)
+          )
+            endThread(threadId);
+          thread = threads.get(threadId) ?? null;
+          if (thread) {
+            resumeHandle = thread.handle;
+            prompt = buildContinuation(conversation.slice(thread.seen));
+            promptImages = collectImages(conversation.slice(thread.seen));
+          } else {
+            thread = {
+              providerId,
+              model: selectedModel,
+              systemHash,
+              handle: null,
+              binary: info.binary,
+              scratch: scratchDirectory(`${providerId}-thread`),
+              seen: 0,
+              lastAt: Date.now(),
+              session: null,
+            };
+            threads.set(threadId, thread);
+          }
+          thread.lastAt = Date.now();
+        } catch (error) {
+          release();
+          throw error;
+        }
+      session = sessions.create({
+        tools,
+        model: selectedModel,
+        providerId,
+        onEnd: releaseRun,
+      });
+      // From here the session owns the lane: it is released once the run has
+      // ended and no request is still reading its events (see releaseRun).
+      session.releaseLane = release;
+      session.inFlight = 0;
       session.thread = thread;
+      if (thread) thread.session = session;
       session.conversationLength = conversation.length;
       const mcp = tools.length
         ? {
@@ -964,12 +1207,14 @@ export function createDesktopApp({
         );
       }
     }
+    turn.session = session;
+    session.inFlight += 1;
     const stop = () => session.cancel();
     if (closed?.aborted) stop();
     else closed?.addEventListener("abort", stop, { once: true });
     let event;
     try {
-      event = await session.nextEvent();
+      event = await session.nextEvent(eventMs);
     } finally {
       closed?.removeEventListener("abort", stop);
     }
@@ -982,6 +1227,13 @@ export function createDesktopApp({
       for (const [id, item] of threads)
         if (item === session.thread) endThread(id);
     if (event.type === "cancelled") {
+      if (session.threadEnded) {
+        record(
+          "cancelled",
+          `${client.name} ended the conversation; ${adapter.name} was stopped`,
+        );
+        throw new HttpError(499, "ABORTED", "The conversation was ended.");
+      }
       record(
         "cancelled",
         `${client.name} closed the request; ${adapter.name} was stopped`,
@@ -1206,6 +1458,23 @@ export function createDesktopApp({
       // `?refresh=1` is the explicit Re-check, and only that re-verifies what
       // is installed and signed in.
       const force = url.searchParams.get("refresh") === "1";
+      // An ordinary read is answered from the view this app already has, and
+      // a view older than `providerStaleMs` is refreshed behind it: the light
+      // pass probes every signed-in CLI and could hold a settings page for
+      // half a minute. A refresh that changes anything is published, so a
+      // connected browser reads it again. A first read, a settings change,
+      // and the explicit Re-check still wait for fresh results.
+      if (
+        !force &&
+        providerViewAt &&
+        providerViewSettings === JSON.stringify(store.settings ?? {})
+      ) {
+        if (Date.now() - providerViewAt > providerStaleMs && !providerRefresh)
+          refreshProviderView({ light: true }).catch((error) =>
+            record("providers-error", String(error?.message ?? error)),
+          );
+        return send(response, 200, { providers: providerView, t3: t3Status() });
+      }
       return send(response, 200, {
         providers: await refreshProviderView({
           force,
@@ -1219,7 +1488,9 @@ export function createDesktopApp({
       requireClient(request);
       const id = path.slice("/api/threads/".length);
       return send(response, 200, {
-        ended: THREAD_ID.test(id) ? endThread(id) : false,
+        ended: THREAD_ID.test(id)
+          ? endThread(id, { cancelQueued: true })
+          : false,
       });
     }
     if (path.startsWith("/api/progress/") && request.method === "GET") {
@@ -1459,7 +1730,13 @@ export function createDesktopApp({
       // A request the browser already dropped has nobody left to answer.
       if (response.destroyed) return;
       if (!response.headersSent)
-        send(response, status, { error: { code, message } });
+        send(response, status, {
+          error: {
+            code,
+            message,
+            ...(error instanceof HttpError && error.extra ? error.extra : {}),
+          },
+        });
       else response.end();
     });
   });
@@ -1495,9 +1772,12 @@ export function createDesktopApp({
       clearTimeout(threadTimer);
       for (const client of eventClients) client.socket.destroy();
       eventClients.clear();
-      for (const id of [...threads.keys()]) endThread(id);
+      for (const id of [...new Set([...threads.keys(), ...lanes.keys()])])
+        endThread(id, { cancelQueued: true });
       sessions.endAll();
-      await Promise.all([...threadCleanups]);
+      // A cleanup that waited for a process to exit may queue the adapter's
+      // own asynchronous one behind it.
+      while (threadCleanups.size) await Promise.all([...threadCleanups]);
       return new Promise((resolve) => server.close(() => resolve()));
     },
   };

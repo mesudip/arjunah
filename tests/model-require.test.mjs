@@ -488,3 +488,29 @@ test("a grant whose pinned model went away refuses a fallback that does not qual
   assert.equal(b.requests.length, sent, "nothing was sent");
   assert.equal(chats.length, 0);
 });
+
+test("the hosted chat holds to require too, also after the pinned model went away", async (t) => {
+  const { b, chats } = await localSetup(t);
+  await b.approve(["models.list", "models.generate"], {
+    require: { local: true },
+    model: "ollama/qwen3-vl:2b",
+  });
+  const manifest = { name: "Local only" };
+  const params = await b.prepare(manifest);
+  await b.ok("chat.complete", params);
+  assert.equal(chats.length, 1, "the qualifying local model answered");
+  await b.ok("ollama.clear", { provider: "ollama" }, b.extension);
+  const sent = b.requests.length;
+  // Each turn prepares afresh; the grant (and its require) is unchanged.
+  const prep = await b.ok("chat.prepare", {
+    manifest,
+    registrationId: params.registrationId,
+  });
+  const refused = await b.call("chat.complete", {
+    ...params,
+    preparedId: prep.id,
+  });
+  assert.equal(refused.error.code, "NOT_SUPPORTED", refused.error.message);
+  assert.equal(b.requests.length, sent, "the cloud default was not asked");
+  assert.equal(chats.length, 1);
+});

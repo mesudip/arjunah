@@ -128,6 +128,77 @@ async function readBounded(response, maxBytes) {
 }
 
 /**
+ * An incremental `text/event-stream` parser, as the WHATWG EventSource
+ * algorithm interprets one: lines end in CRLF, LF, or CR; a blank line
+ * dispatches; `data` lines join with "\n"; a value loses one leading space;
+ * a line starting with ":" is a comment; a field without a colon has an empty
+ * value. `id` and `retry` are ignored because nothing here reconnects. An
+ * event still open when the stream ends is never dispatched.
+ *
+ * `push(bytes)` returns the events those bytes completed, as
+ * `{ type, data }` with `data` still a string. What is held between calls is
+ * one partial line and one event's data, so the caller's ceiling on bytes read
+ * also bounds them.
+ */
+export function createEventStreamParser() {
+  // A default TextDecoder drops one leading UTF-8 BOM, which is exactly what
+  // the algorithm asks for, and holds a split multi-byte character until the
+  // rest of it arrives.
+  const decoder = new TextDecoder("utf-8");
+  let line = "";
+  // A CR ended the last chunk; an LF opening the next one belongs to it.
+  let afterCR = false;
+  let type = "";
+  let data = null;
+
+  function field(text, events) {
+    if (text === "") {
+      if (data !== null)
+        events.push({ type: type || "message", data: data.join("\n") });
+      type = "";
+      data = null;
+      return;
+    }
+    if (text.charCodeAt(0) === 0x3a) return;
+    const colon = text.indexOf(":");
+    const name = colon === -1 ? text : text.slice(0, colon);
+    let value = colon === -1 ? "" : text.slice(colon + 1);
+    if (value.charCodeAt(0) === 0x20) value = value.slice(1);
+    if (name === "event") type = value;
+    else if (name === "data") (data ??= []).push(value);
+  }
+
+  return {
+    push(bytes) {
+      let text = decoder.decode(bytes, { stream: true });
+      const events = [];
+      if (afterCR && text) {
+        if (text.charCodeAt(0) === 0x0a) text = text.slice(1);
+        afterCR = false;
+      }
+      let start = 0;
+      const breaks = /[\r\n]/g;
+      let match;
+      while ((match = breaks.exec(text))) {
+        const end = match.index;
+        let next = end + 1;
+        if (text.charCodeAt(end) === 0x0d) {
+          if (next === text.length) afterCR = true;
+          else if (text.charCodeAt(next) === 0x0a) next++;
+        }
+        const complete = line + text.slice(start, end);
+        line = "";
+        field(complete, events);
+        start = next;
+        breaks.lastIndex = next;
+      }
+      line += text.slice(start);
+      return events;
+    },
+  };
+}
+
+/**
  * What a `backend.fetch` function resolved to, as the widget reads it. Only
  * `status` and `body` are used, so a `Response` from another realm works, and
  * `ok` is derived from the status rather than trusted.
@@ -448,7 +519,6 @@ export function mountAssistant(config = {}) {
   shadow.replaceChildren(style);
 
   let controller = null;
-  let currentBackendTurn = null;
   // The running turn's relay state: its outstanding completions and prompts.
   let liveTurn = null;
   let destroyed = false;
@@ -568,14 +638,16 @@ export function mountAssistant(config = {}) {
     host: {
       threads,
       submit: (content, context) => runTurn(content, context),
-      stop() {
-        endTurn(liveTurn);
+      // The cancel goes to the thread the running turn belongs to, which is
+      // not the one on screen once the visitor has switched away, nor when
+      // a busy thread is deleted from the list. A caller naming a thread
+      // stops only a turn running there.
+      stop(threadId) {
+        const turn = liveTurn;
+        if (!turn || (threadId != null && threadId !== turn.threadId)) return;
+        endTurn(turn);
         controller?.abort();
-        if (currentBackendTurn && view.activeThread())
-          void json(
-            `threads/${encodeURIComponent(view.activeThread())}/turns/${encodeURIComponent(currentBackendTurn)}/cancel`,
-            { method: "POST", body: "{}" },
-          ).catch(() => {});
+        if (turn.turnId) void post(turn, "cancel", {});
       },
       close() {
         config.onClose?.();
@@ -727,7 +799,6 @@ export function mountAssistant(config = {}) {
       endTurn(turn);
       if (liveTurn === turn) liveTurn = null;
       controller = null;
-      currentBackendTurn = null;
       view.setBusy(false);
     }
   }
@@ -786,8 +857,9 @@ export function mountAssistant(config = {}) {
       view.applyEvent({ type: "agent.phase", text: "Waiting for अर्जुनः…" });
       try {
         bridgeState.session = await api.enable(bridge.access);
-      } catch {
+      } catch (error) {
         bridgeState.refused = true;
+        sessionNotice("did not connect", error, "USER_DENIED");
         return null;
       }
     }
@@ -796,12 +868,13 @@ export function mountAssistant(config = {}) {
     let list;
     try {
       list = await session.models.list();
-    } catch {
+    } catch (error) {
       // Revoked or invalidated: the backend learns that from a null model.
       bridgeState.session = null;
       bridgeState.lost = true;
       bridgeState.entry = null;
       view.setModels([]);
+      sessionNotice("disconnected", error, "PERMISSION_DENIED");
       return null;
     }
     list = Array.isArray(list) ? list.filter((item) => plainObject(item)) : [];
@@ -815,6 +888,23 @@ export function mountAssistant(config = {}) {
     const entry = list.find((item) => item.id === chosen) ?? fallback ?? null;
     bridgeState.entry = entry ? copyJson(entry) : null;
     return bridgeState.entry;
+  }
+
+  /**
+   * A refused `enable()` or a lost session is said once, to the visitor and
+   * to `onError`, rather than leaving every later turn silently model-less.
+   * The turn still runs: the backend learns from the null model and decides.
+   * Only the extension's own page-API message is shown, bounded.
+   */
+  function sessionNotice(what, error, fallback) {
+    const code =
+      typeof error?.code === "string" && ERROR_CODE.test(error.code)
+        ? error.code
+        : fallback;
+    const reason = boundedText(error?.message, LIMITS.errorMessage).trim();
+    const message = `अर्जुनः ${what}.${reason ? ` ${reason}` : ""}`;
+    view.addBubble("assistant", message, { error: true, persist: false });
+    report(config.onError, { code, message });
   }
 
   function copyJson(value) {
@@ -1175,13 +1265,15 @@ export function mountAssistant(config = {}) {
     // not, so the stop cancels it, which also tells the page's loop.
     const stop = () => cancelReader(reader);
     signal?.addEventListener("abort", stop, { once: true });
-    const decoder = new TextDecoder();
-    let buffer = "";
+    // Everything the parser holds came from these bytes, so the ceiling on
+    // them bounds its partial line and pending event as well.
+    const parser = createEventStreamParser();
     let total = 0;
     let finished = false;
     try {
       for (;;) {
         const { done, value } = await reader.read();
+        // An event still open at the end is discarded, as EventSource does.
         if (done || signal?.aborted) break;
         const bytes = chunkBytes(value);
         total += bytes.byteLength;
@@ -1192,12 +1284,8 @@ export function mountAssistant(config = {}) {
             "The backend stream was too large.",
           );
         }
-        buffer += decoder.decode(bytes, { stream: true });
-        let split;
-        while ((split = buffer.indexOf("\n\n")) !== -1) {
-          const block = buffer.slice(0, split);
-          buffer = buffer.slice(split + 2);
-          const parsed = parseEvent(block);
+        for (const event of parser.push(bytes)) {
+          const parsed = parseEvent(event);
           if (!parsed) continue;
           if (await handleEvent(parsed, turn, context)) finished = true;
         }
@@ -1213,17 +1301,10 @@ export function mountAssistant(config = {}) {
     if (!finished) view.finishActivity(true);
   }
 
-  function parseEvent(block) {
-    let type = "message";
-    const data = [];
-    for (const line of block.split(/\r\n|\r|\n/)) {
-      if (line.startsWith("event:")) type = line.slice(6).trim();
-      else if (line.startsWith("data:"))
-        data.push(line.slice(5).replace(/^ /, ""));
-    }
-    if (!data.length) return null;
+  /** One dispatched event with its JSON data object, or null. */
+  function parseEvent({ type, data }) {
     try {
-      const parsed = JSON.parse(data.join("\n"));
+      const parsed = JSON.parse(data);
       return plainObject(parsed) ? { type, data: parsed } : null;
     } catch {
       return null;
@@ -1234,9 +1315,8 @@ export function mountAssistant(config = {}) {
   async function handleEvent({ type, data }, turn, context) {
     const threadId = turn.threadId;
     if (type === "turn.start") {
-      currentBackendTurn = boundedText(data.turnId, 100) || null;
-      turn.turnId = currentBackendTurn;
-      report(config.onTurnStart, { threadId, turnId: currentBackendTurn });
+      turn.turnId = boundedText(data.turnId, 100) || null;
+      report(config.onTurnStart, { threadId, turnId: turn.turnId });
       return false;
     }
     if (type === "error") {
@@ -1259,7 +1339,7 @@ export function mountAssistant(config = {}) {
       if (finished?.entry) context?.record(finished.entry);
       report(config.onTurnEnd, {
         threadId,
-        turnId: currentBackendTurn,
+        turnId: turn.turnId,
         usage: data.usage ?? null,
       });
       return true;
@@ -1456,7 +1536,8 @@ export function mountAssistant(config = {}) {
  * stream pulls one event at a time, so a generator can wait for a tool result
  * between yields; when the widget stops reading (stop, destroy, a bound) the
  * iterator's `return()` runs, so a generator's `finally` sees the end. An item
- * without a valid `type` errors the stream, which fails the turn.
+ * without a valid `type`, one that is not JSON, or a throwing `next()` errors
+ * the stream, which fails the turn, and `return()` runs then too.
  */
 export function eventStreamResponse(events) {
   const iterator =
@@ -1467,22 +1548,49 @@ export function eventStreamResponse(events) {
       "eventStreamResponse needs an iterable of events.",
     );
   const encoder = new TextEncoder();
+  // `return()` runs at most once, on every way the stream ends early: the
+  // widget cancelling it, or `pull` failing on an item, its encoding, or the
+  // iterator itself. Not awaited: a generator parked on a promise settles its
+  // return later, and the stream must not wait on that.
+  let ended = false;
+  function finish(reason) {
+    if (ended) return;
+    ended = true;
+    try {
+      void Promise.resolve(iterator.return?.(reason)).catch(() => {});
+    } catch {
+      // A throwing `return()` is the page's; the stream ends either way.
+    }
+  }
   const body = new ReadableStream({
     async pull(stream) {
-      const { done, value } = await iterator.next();
-      if (done) return stream.close();
-      if (!plainObject(value) || !EVENT_TYPE.test(String(value.type ?? "")))
-        throw new WidgetError("INVALID_REQUEST", "An event needs a type.");
-      const { type, ...data } = value;
-      stream.enqueue(
-        encoder.encode(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`),
-      );
+      if (ended) return;
+      try {
+        const { done, value } = await iterator.next();
+        if (done) {
+          // An exhausted iterator has nothing left to close.
+          ended = true;
+          return stream.close();
+        }
+        if (!plainObject(value) || !EVENT_TYPE.test(String(value.type ?? "")))
+          throw new WidgetError("INVALID_REQUEST", "An event needs a type.");
+        const { type, ...data } = value;
+        let json;
+        try {
+          json = JSON.stringify(data);
+        } catch {
+          json = undefined;
+        }
+        if (typeof json !== "string")
+          throw new WidgetError("INVALID_REQUEST", "An event is not JSON.");
+        stream.enqueue(encoder.encode(`event: ${type}\ndata: ${json}\n\n`));
+      } catch (error) {
+        finish(error);
+        throw error;
+      }
     },
     cancel(reason) {
-      // Not awaited: a generator parked on a promise settles its return later.
-      Promise.resolve()
-        .then(() => iterator.return?.(reason))
-        .catch(() => {});
+      finish(reason);
     },
   });
   return new Response(body, {

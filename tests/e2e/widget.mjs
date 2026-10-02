@@ -1223,6 +1223,19 @@ try {
   assert.deepEqual((await pLog()).generated, ["say hi"]);
   assert.equal((await pLog()).modelResults.at(-1).id, "m1");
 
+  // A stream framed as a real server may frame it: a BOM, comments, CRLF and
+  // bare CR line ends, a CR and its LF in separate chunks, multi-line data,
+  // and multi-byte characters split across chunks (WHATWG EventSource).
+  await pSend("framing");
+  await pSays("Framed héllo ✓ 𝄞");
+  assert.ok((await pLog()).framedChunks >= 10, (await pLog()).framedChunks);
+  assert.equal(
+    await p(
+      `return [...root.querySelectorAll(".msg.assistant")].filter((m) => m.textContent.includes("Fram")).length;`,
+    ),
+    1,
+  );
+
   // Bounds hold against the page exactly as against a server.
   const failures = [
     ["flood", "The backend stream was too large."],
@@ -1258,18 +1271,59 @@ try {
   );
 
   // Stop reaches a page-built stream: the body is cancelled, the loop's
-  // generator closes, and the cancel route goes through the function too.
+  // generator closes, and the cancel route goes through the function too. The
+  // visitor switched threads mid-turn, so the cancel names the thread the turn
+  // runs in, not the one on screen.
+  const lastTurnThread = async () =>
+    (await pLog()).calls
+      .findLast((call) => /\/turns$/.test(call.path))
+      .path.split("/")[1];
+  const cancels = async () =>
+    (await pLog()).calls
+      .filter((call) => /\/cancel$/.test(call.path))
+      .map((call) => call.path);
   await pSend("hang");
   await pWait(`!root.querySelector(".stop").hidden`, "the stop control");
+  const hangThread = await lastTurnThread();
+  const switched = await inpage.evaluate(
+    async () => (await window.assistant.newThread()).id,
+  );
+  assert.notEqual(switched, hangThread);
   await sleep(200);
   await p(`root.querySelector(".stop").click();`);
-  await until(async () => (await pLog()).hangClosed, "the closed loop");
-  await until(
-    async () =>
-      (await pLog()).calls.some((call) =>
-        /^threads\/[^/]+\/turns\/pt4\/cancel$/.test(call.path),
-      ),
-    "the cancel route",
+  await until(async () => (await pLog()).hangClosed === 1, "the closed loop");
+  await until(async () => (await cancels()).length === 1, "the cancel route");
+  assert.deepEqual(await cancels(), [`threads/${hangThread}/turns/pt4/cancel`]);
+  await pWait(`root.querySelector(".send:not(.stop)")`, "the idle composer");
+
+  // Deleting a busy thread that is not on screen cancels that thread's turn.
+  await pSend("hang");
+  await pWait(`!root.querySelector(".stop").hidden`, "the second hang");
+  const busyThread = await lastTurnThread();
+  assert.equal(busyThread, switched);
+  await inpage.evaluate(() => window.assistant.openThread("p1"));
+  await pWait(
+    `root.querySelector(".thread-row.current .thread-open")?.textContent === "In-page"`,
+    "the reopened first thread",
+  );
+  if (!(await p(`return Boolean(root.querySelector(".thread-busy"));`)))
+    await p(`root.querySelector(".thread-toggle").click();`);
+  await pWait(`root.querySelector(".thread-busy")`, "the busy thread row");
+  await p(
+    `root.querySelector(".thread-busy").closest(".thread-row").querySelector(".thread-act[aria-label^=Delete]").click();`,
+  );
+  await until(async () => (await pLog()).hangClosed === 2, "the deleted loop");
+  await until(async () => (await cancels()).length === 2, "the delete cancel");
+  assert.equal((await cancels())[1], `threads/${busyThread}/turns/pt5/cancel`);
+  assert.ok(
+    (await pLog()).calls.some(
+      (call) =>
+        call.method === "DELETE" && call.path === `threads/${busyThread}`,
+    ),
+  );
+  assert.equal(
+    await inpage.evaluate(() => window.assistant.view.activeThread()),
+    "p1",
   );
   await pWait(`root.querySelector(".send:not(.stop)")`, "the idle composer");
 
@@ -1307,6 +1361,18 @@ try {
     "the visitor-mount answer",
   );
   assert.deepEqual((await pLog()).enables, [{ composer: "webapp" }]);
+  // The refusal is said, to the visitor and to onError, not swallowed; the
+  // turn still runs with no model announced.
+  const refusal = "अर्जुनः did not connect. Refused.";
+  assert.equal(
+    await v(
+      `return [...root.querySelectorAll(".msg.assistant")].filter((m) => m.textContent.includes(${JSON.stringify(refusal)})).length;`,
+    ),
+    1,
+  );
+  assert.deepEqual((await pLog()).visitorErrors, [
+    { code: "PERMISSION_DENIED", message: refusal },
+  ]);
   assert.equal(
     (await pLog()).calls.findLast((call) => /\/turns$/.test(call.path)).body
       .bridge.model,

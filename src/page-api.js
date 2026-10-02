@@ -896,7 +896,13 @@
               }
             : {}),
           ...(loop
-            ? { loop: { composer: loop.composer, level: loop.level } }
+            ? {
+                loop: {
+                  composer: loop.composer,
+                  level: loop.level,
+                  ...(loop.inputs !== undefined ? { inputs: loop.inputs } : {}),
+                },
+              }
             : {}),
           ...(models
             ? {
