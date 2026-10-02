@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Bridged widget fixture</title>
+  </head>
+  <body>
+    <div id="assistant"></div>
+    <div id="gen"></div>
+    <script>
+      // Shortens the two-minute prompt timeout, and only while a test asks.
+      window.shrinkTimeouts = false;
+      const nativeSetTimeout = window.setTimeout.bind(window);
+      window.setTimeout = (callback, ms, ...rest) =>
+        nativeSetTimeout(
+          callback,
+          window.shrinkTimeouts && ms === 120000 ? 250 : ms,
+          ...rest,
+        );
+    </script>
+    <script type="module">
+      import { mountAssistant } from "/widget/index.js";
+
+      // A stand-in for the extension's page API: the public surface only, with
+      // conversations and round streaming as SPEC 5 describes them.
+      const log = (window.bridgeLog = {
+        enables: [],
+        created: [],
+        opened: [],
+        released: [],
+        rounds: [],
+        aborts: [],
+        generated: [],
+      });
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+      const MODEL = {
+        id: "openai/gpt-test",
+        provider: "openai",
+        displayName: "GPT Test",
+        default: true,
+        capabilities: { tools: true, vision: false, reasoning: true },
+        contextWindow: 128000,
+        reasoningLevels: [],
+      };
+      const result = (message, finishReason = "stop") => ({
+        id: "resp",
+        model: MODEL.id,
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [],
+          attachments: [],
+          reasoning: null,
+          ...message,
+        },
+        finishReason,
+        usage: { promptTokens: 5, completionTokens: 3, totalTokens: 8 },
+        contextWindow: MODEL.contextWindow,
+        providerState: "none",
+      });
+      const aborted = () =>
+        Object.assign(new Error("The page aborted the call."), {
+          name: "AIError",
+          code: "ABORTED",
+        });
+
+      async function* round(request, signal) {
+        const mode = request.messages.at(-1)?.content;
+        log.rounds.push(mode);
+        if (mode === "mode:text") {
+          yield { type: "reasoning.delta", text: "Weighing " };
+          yield { type: "reasoning.delta", text: "the dates" };
+          yield { type: "output.delta", text: "Hel" };
+          yield { type: "output.delta", text: "lo there" };
+          await wait(600);
+          yield { type: "result", result: result({ content: "Hello there" }) };
+        } else if (mode === "mode:tools") {
+          yield { type: "reasoning.delta", text: "Need a lookup" };
+          yield { type: "output.delta", text: "Provisional draft" };
+          await wait(600);
+          yield {
+            type: "result",
+            result: result(
+              {
+                toolCalls: [
+                  {
+                    id: "call_1",
+                    type: "function",
+                    function: { name: "lookup", arguments: "{}" },
+                  },
+                ],
+              },
+              "tool_calls",
+            ),
+          };
+        } else {
+          // Never answers: only the signal ends it, as the extension does.
+          await new Promise((_, reject) =>
+            signal.addEventListener(
+              "abort",
+              () => {
+                log.aborts.push(mode);
+                reject(aborted());
+              },
+              { once: true },
+            ),
+          );
+        }
+      }
+
+      const handle = (id) => ({
+        id,
+        async generate() {
+          throw new Error("stream is available and must be used");
+        },
+        stream: (request, { signal }) => round(request, signal),
+        async release() {
+          log.released.push(id);
+          return true;
+        },
+      });
+      let count = 0;
+      const session = {
+        grant: { level: "completion", model: MODEL.id },
+        models: {
+          list: async () => [MODEL],
+          async generate() {
+            throw new Error("conversations are available and must be used");
+          },
+        },
+        conversations: {
+          async create() {
+            const id = `conv${++count}.tag`;
+            log.created.push(id);
+            return handle(id);
+          },
+          async open(id) {
+            log.opened.push(id);
+            return handle(id);
+          },
+        },
+      };
+      window.ai = {
+        arjunah: {
+          async enable(request) {
+            log.enables.push(request);
+            return session;
+          },
+        },
+      };
+
+      window.assistant = mountAssistant({
+        mount: document.querySelector("#assistant"),
+        backend: { baseUrl: "/bridge-api/" },
+        widget: {
+          name: "Bridged desk",
+          // Ignored in bridged mode: the catalog is the visitor's.
+          models: [{ id: "site/own", displayName: "Site model" }],
+        },
+        bridge: { arjunah: true },
+        tools: [
+          {
+            name: "page_info",
+            description: "Reads the page title.",
+            inputSchema: { type: "object", additionalProperties: false },
+            handler: () => ({ title: document.title }),
+          },
+          {
+            name: "unlock",
+            inputSchema: { type: "object", additionalProperties: false },
+            userInputs: [
+              {
+                id: "passphrase",
+                label: "Passphrase",
+                schema: { type: "string" },
+                secret: true,
+              },
+            ],
+            handler: () => ({ ok: true }),
+          },
+        ],
+      });
+
+      // `generate` wins over `arjunah` when both are given (SPEC 14.7).
+      window.genAssistant = mountAssistant({
+        mount: document.querySelector("#gen"),
+        backend: { baseUrl: "/gen-api/" },
+        widget: { name: "Page model desk" },
+        bridge: {
+          arjunah: true,
+          async generate(request) {
+            log.generated.push(request.messages.at(-1)?.content);
+            return result({ content: "from the page" });
+          },
+        },
+      });
+    </script>
+  </body>
+</html>

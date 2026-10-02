@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 import { BrokerError } from "./errors.js";
+import { GENERATE_LIMITS } from "./constants.js";
 
 // Deliberately bounded JSON Schema subset; unsupported assertions are rejected,
 // never silently treated as validated. No references or executable regexes.
@@ -20,6 +21,19 @@ const annotations = new Set([
   "$schema",
   "$comment",
 ]);
+// Annotations that schema generators (Pydantic, FastAPI, zod-to-json-schema)
+// emit routinely, with the JSON type each value must have. They are accepted
+// so that one of them does not fail a whole catalog, are never enforced, and
+// are removed by `providerSchema` before any provider wire format, because
+// providers disagree about which of them they accept.
+const hints = new Map([
+  ["format", "string"],
+  ["contentMediaType", "string"],
+  ["contentEncoding", "string"],
+  ["readOnly", "boolean"],
+  ["writeOnly", "boolean"],
+  ["deprecated", "boolean"],
+]);
 const keywords = new Set([
   "type",
   "properties",
@@ -38,6 +52,7 @@ const keywords = new Set([
   "oneOf",
   "allOf",
 ]);
+const combinators = ["anyOf", "oneOf", "allOf"];
 const object = (value) =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 const fail = () => {
@@ -47,9 +62,67 @@ const fail = () => {
   );
 };
 
+// Keywords that constrain instances of one type only. A type list hands each
+// of them to the alternative of its own type, which leaves the meaning alone.
+const typedKeywords = {
+  object: ["properties", "required", "additionalProperties"],
+  array: ["items", "minItems", "maxItems"],
+  string: ["minLength", "maxLength"],
+  number: ["minimum", "maximum"],
+  integer: ["minimum", "maximum"],
+};
+
+/**
+ * `{ type: [a, b], ...rest }` rewritten with one type per schema: an `anyOf`
+ * of single-type alternatives, each carrying the keywords that constrain only
+ * its own type. That is the shape Pydantic emits for an optional field, the
+ * one providers already receive most. When `anyOf` is already taken the
+ * alternatives join `allOf` as one more member. A one-element list is a plain
+ * `type`. Only this level is rewritten; children are reached by validation.
+ */
+function expandTypeList(schema) {
+  const names = schema.type;
+  if (
+    !names.length ||
+    names.some((name) => typeof name !== "string" || !types.has(name)) ||
+    new Set(names).size !== names.length
+  )
+    fail();
+  if (names.length === 1) return { ...schema, type: names[0] };
+  const moved = new Set(names.flatMap((name) => typedKeywords[name] ?? []));
+  const rest = Object.fromEntries(
+    Object.entries(schema).filter(([key]) => key !== "type" && !moved.has(key)),
+  );
+  const branches = names.map((name) =>
+    Object.fromEntries([
+      ["type", name],
+      ...(typedKeywords[name] ?? [])
+        .filter((key) => Object.hasOwn(schema, key))
+        .map((key) => [key, schema[key]]),
+    ]),
+  );
+  if (!Object.hasOwn(rest, "anyOf")) return { ...rest, anyOf: branches };
+  if (Object.hasOwn(rest, "allOf") && !Array.isArray(rest.allOf)) fail();
+  return { ...rest, allOf: [...(rest.allOf ?? []), { anyOf: branches }] };
+}
+
+/**
+ * Checks a schema against the bounded subset and returns the copy the broker
+ * uses from then on; the input is never modified. A `type` list is rewritten
+ * first (see `expandTypeList`), so argument validation, the contract
+ * fingerprint, and every provider see one form, and the depth and combinator
+ * bounds apply to that form rather than to what was sent.
+ */
 export function validateSchema(schema, depth = 0) {
-  if (depth > 16 || !object(schema)) fail();
+  if (depth > GENERATE_LIMITS.schemaDepth || !object(schema)) fail();
+  if (Array.isArray(schema.type)) {
+    const expanded = expandTypeList(schema);
+    // Tool input schemas describe objects, so the root takes one type.
+    if (depth === 0 && !Object.hasOwn(expanded, "type")) fail();
+    return validateSchema(expanded, depth);
+  }
   if (depth === 0 && schema.type != null && schema.type !== "object") fail();
+  const entries = [];
   for (const [key, value] of Object.entries(schema)) {
     if (annotations.has(key)) {
       if (
@@ -58,15 +131,28 @@ export function validateSchema(schema, depth = 0) {
       )
         fail();
       if (key === "examples" && !Array.isArray(value)) fail();
+      entries.push([key, value]);
+      continue;
+    }
+    if (hints.has(key)) {
+      if (typeof value !== hints.get(key)) fail();
+      entries.push([key, value]);
       continue;
     }
     if (!keywords.has(key)) fail();
+    let next = value;
     if (key === "type" && !(typeof value === "string" && types.has(value)))
       fail();
     if (key === "properties") {
       if (!object(value)) fail();
-      for (const child of Object.values(value))
-        validateSchema(child, depth + 1);
+      // fromEntries, not assignment, so a property named `__proto__` stays
+      // an ordinary property.
+      next = Object.fromEntries(
+        Object.entries(value).map(([name, child]) => [
+          name,
+          validateSchema(child, depth + 1),
+        ]),
+      );
     }
     if (
       key === "required" &&
@@ -75,9 +161,9 @@ export function validateSchema(schema, depth = 0) {
         new Set(value).size !== value.length)
     )
       fail();
-    if (key === "items") validateSchema(value, depth + 1);
+    if (key === "items") next = validateSchema(value, depth + 1);
     if (key === "additionalProperties" && typeof value !== "boolean")
-      validateSchema(value, depth + 1);
+      next = validateSchema(value, depth + 1);
     if (["minimum", "maximum"].includes(key) && !Number.isFinite(value)) fail();
     if (
       ["minLength", "maxLength", "minItems", "maxItems"].includes(key) &&
@@ -85,12 +171,42 @@ export function validateSchema(schema, depth = 0) {
     )
       fail();
     if (key === "enum" && (!Array.isArray(value) || !value.length)) fail();
-    if (["anyOf", "oneOf", "allOf"].includes(key)) {
+    if (combinators.includes(key)) {
       if (!Array.isArray(value) || !value.length || value.length > 32) fail();
-      value.forEach((child) => validateSchema(child, depth + 1));
+      next = value.map((child) => validateSchema(child, depth + 1));
     }
+    entries.push([key, next]);
   }
-  return schema;
+  return Object.fromEntries(entries);
+}
+
+/**
+ * A validated schema as it may reach a provider: the `hints` are removed at
+ * every schema position and everything else is kept. Only schema positions
+ * are walked; property names and the values of `enum`, `const`, `default`
+ * and `examples` are data, so a property called `format` survives.
+ */
+export function providerSchema(schema) {
+  if (!object(schema)) return schema;
+  return Object.fromEntries(
+    Object.entries(schema)
+      .filter(([key]) => !hints.has(key))
+      .map(([key, value]) => [
+        key,
+        key === "properties"
+          ? Object.fromEntries(
+              Object.entries(value).map(([name, child]) => [
+                name,
+                providerSchema(child),
+              ]),
+            )
+          : key === "items" || key === "additionalProperties"
+            ? providerSchema(value)
+            : combinators.includes(key)
+              ? value.map(providerSchema)
+              : value,
+      ]),
+  );
 }
 
 function equal(a, b) {

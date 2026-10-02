@@ -1,10 +1,23 @@
 import { BrokerError, publicError } from "./lib/errors.js";
 import {
   generate,
+  continuationFormat,
   listProviderModels,
+  listOllamaModels,
+  ollamaLoadedState,
   ensureConfigured,
   providerLabel,
 } from "./lib/provider.js";
+import { providerStateStore } from "./lib/provider-state.js";
+import {
+  INSTALL_KEY_BYTES,
+  base64url,
+  fromBase64url,
+  importInstallKey,
+  desktopThreadId,
+  mintConversationId,
+  verifyConversationId,
+} from "./lib/conversations.js";
 import { providerIcon } from "./lib/provider-icons.js";
 import {
   buildCatalog,
@@ -16,9 +29,13 @@ import {
   parseModelId,
   publicProvider,
   publicModelEntry,
+  modelMatches,
+  traitsMatch,
   OPENAI_PROVIDER_ID,
   OPENCODE_PROVIDER_ID,
   OPENCODE_CLI_PROVIDER_ID,
+  OLLAMA_PROVIDER_ID,
+  OLLAMA_CLOUD_PROVIDER_ID,
   DESKTOP_DOWN,
   DESKTOP_UNPAIRED,
 } from "./lib/catalog.js";
@@ -38,17 +55,24 @@ import {
   desktopEventConnection,
 } from "./lib/desktop.js";
 import { callMcpTool, listMcpTools, clearMcpSessions } from "./lib/mcp.js";
-import { EFFORTS, LIMITS } from "./lib/constants.js";
-import { reasoningBatcher } from "./lib/reasoning.js";
+import { EFFORTS, GENERATE_LIMITS, LIMITS } from "./lib/constants.js";
+import { reasoningBatcher, roundBatcher } from "./lib/reasoning.js";
 import { validateArguments } from "./lib/schema.js";
 import {
   validateAccessRequest,
+  validateRequire,
+  requireOrNull,
   validateContextFields,
   validateContext,
   validateSiteManifest,
   validateControlValues,
   validateMessages,
   validateSiteToolResult,
+  validateSiteModelResult,
+  validateUserInputValue,
+  validateGenerateRequest,
+  hasImages,
+  SITE_MODEL_ID,
   levelOf,
   cloneJson,
   providerOrigin,
@@ -62,10 +86,25 @@ import {
   opencodePreferredModel,
   opencodeProtocol,
 } from "./lib/opencode.js";
+import {
+  OLLAMA_CLOUD_URL,
+  OLLAMA_ORIGIN_RULE_ID,
+  OLLAMA_REFRESH_MS,
+  normalizeOllamaModels,
+  normalizeOllamaSkipped,
+  normalizeOllamaIgnored,
+  OLLAMA_UNREACHABLE,
+  ollamaBaseUrl,
+  ollamaDisplayName,
+  ollamaOriginRule,
+  ollamaPreferredModel,
+} from "./lib/ollama.js";
 
 const STORAGE = {
   provider: "provider",
   opencode: "opencode",
+  ollama: "ollama",
+  ollamaCloud: "ollamaCloud",
   grants: "grants",
   desktop: "desktop",
   active: "active",
@@ -86,21 +125,42 @@ let desktopReconnectDelay = 500;
 let desktopReconcile = null;
 let pendingDesktopReason = null;
 const documentScopes = new Map();
+// Provider state between the rounds of a page's own tool loop (SPEC 5.4).
+const providerState = providerStateStore();
+// The per-install key conversation ids are minted and verified with. Not in
+// STORAGE: it is never synced, never shown, and its creation is not news.
+const INSTALL_KEY = "installKey";
+let installKeyRead = null;
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.storage.local
-    .get([STORAGE.provider, STORAGE.opencode])
-    .then(({ provider, opencode }) => {
-      if (!provider && !opencode) chrome.runtime.openOptionsPage();
+    .get([
+      STORAGE.provider,
+      STORAGE.opencode,
+      STORAGE.ollama,
+      STORAGE.ollamaCloud,
+    ])
+    .then(({ provider, opencode, ollama, ollamaCloud }) => {
+      if (!provider && !opencode && !ollama && !ollamaCloud)
+        chrome.runtime.openOptionsPage();
     });
 });
+// Dynamic rules outlive the worker, so this only repairs a rule that drifted
+// from the saved server address (an update, a sync applied while asleep).
+void syncOllamaOriginRule();
+// Expiry runs at startup as well as on access, so state idle past its limit
+// goes even when no page ever asks for it again.
+void providerState.sweep();
 void pullSync()
   .catch(() => {})
   .finally(() => ensureDesktopEvents());
 chrome.tabs.onRemoved.addListener((tabId) => {
   invalidate((turn) => turn.binding.tabId === tabId);
   const scope = documentScopes.get(tabId);
-  if (scope) clearMcpSessions(scope.origin, scope.session);
+  if (scope) {
+    clearMcpSessions(scope.origin, scope.session);
+    endDocumentConversation(scope);
+  }
   documentScopes.delete(tabId);
 });
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -110,16 +170,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     .catch((error) => {
       const shown = publicError(error);
       // Only the code and the public message; never the caller's parameters.
+      // The bridge request id is what the page sees in `details.requestId`,
+      // so an incident a site reports can be found here.
+      const request = pageRequestId(message.params?._request);
       if (!String(message.method).startsWith("logs."))
         logEvent(
           "warn",
           "broker",
-          `${message.method} failed (${shown.code}): ${shown.message}`,
+          `${message.method}${request ? ` ${request}` : ""} failed (${shown.code}): ${shown.message}`,
         );
       sendResponse({ ok: false, error: shown });
     });
   return true;
 });
+/** The page bridge id of a request, when the content script supplied one. */
+function pageRequestId(value) {
+  return typeof value === "string" && /^[A-Za-z0-9-]{1,100}$/.test(value)
+    ? value
+    : null;
+}
 chrome.runtime.onConnect?.addListener((port) => {
   if (port.name !== "arjunah-state") return;
   statePorts.add(port);
@@ -153,6 +222,7 @@ chrome.storage.onChanged?.addListener((changes, area) => {
     reachability.at = 0;
   broadcastState(`storage:${relevant.join(",")}`);
   if (link) void ensureDesktopEvents();
+  if (relevant.includes(STORAGE.ollama)) void syncOllamaOriginRule();
 });
 
 function broadcastState(reason, desktopRevision = null) {
@@ -288,6 +358,7 @@ async function handle(method, params, sender) {
     [
       "provider.",
       "opencode.",
+      "ollama.",
       "grants.",
       "desktop.",
       "catalog.",
@@ -395,6 +466,7 @@ async function handle(method, params, sender) {
       void pushSync().catch(() => {});
       return true;
     }
+    if (method.startsWith("ollama.")) return ollamaMethod(method, params);
     if (method === "provider.select" || method === "catalog.default") {
       const active = await validateActive(
         typeof params.model === "string" && params.type == null
@@ -416,6 +488,14 @@ async function handle(method, params, sender) {
         if (opencode && opencode.model !== active.model)
           await chrome.storage.local.set({
             [STORAGE.opencode]: { ...opencode, model: active.model },
+          });
+      }
+      if (OLLAMA_TYPES.includes(active.type) && active.model) {
+        const cloud = active.type === OLLAMA_CLOUD_PROVIDER_ID;
+        const ollama = await getOllama(cloud);
+        if (ollama && ollama.model !== active.model)
+          await chrome.storage.local.set({
+            [ollamaKey(cloud)]: { ...ollama, model: active.model },
           });
       }
       await setActive({
@@ -583,8 +663,11 @@ async function handle(method, params, sender) {
     if (method === "grants.clear") {
       invalidate();
       clearMcpSessions();
+      endDesktopThreads(() => true);
+      const cleared = providerState.clearAll();
       return mutateGrants(async () => {
         await chrome.storage.local.remove(STORAGE.grants);
+        await cleared;
         return true;
       });
     }
@@ -605,12 +688,31 @@ async function handle(method, params, sender) {
           turn.binding.session === params._session,
       );
       clearMcpSessions(scope.origin, scope.session);
+      endDocumentConversation(scope);
       documentScopes.delete(tabId);
       // The hosted conversation ended: release the agent thread behind it.
       if (typeof params.conversationId === "string")
         void getDesktop().then((link) =>
           desktopEndThread(link, params.conversationId),
         );
+    } else if (
+      !scope &&
+      params.generated === true &&
+      typeof params._session === "string"
+    ) {
+      // The worker restarted since this document's last request, so its
+      // scope is gone, but stored state outlives the worker. Only a document
+      // that called `models.generate` is flagged, so an ordinary page's
+      // pagehide costs nothing. The sender still names the origin unless the
+      // browser already replaced its URL, and then expiry removes the state.
+      try {
+        endDocumentConversation({
+          origin: senderOrigin(sender),
+          session: params._session,
+        });
+      } catch {
+        /* no usable origin */
+      }
     }
     return true;
   }
@@ -622,6 +724,8 @@ async function handle(method, params, sender) {
     await chrome.runtime.openOptionsPage();
     return true;
   }
+  if (method === "ui.openSettings") return openSettings(sender, origin);
+  if (method === "grant.state") return grantState(origin);
   if (method === "grant.preview") return validateAccessRequest(params);
   if (method === "grant.query")
     return publicGrant(await getGrant(origin), await getCatalog());
@@ -663,20 +767,32 @@ async function handle(method, params, sender) {
     // A card the page produced for an in-place update goes through the same
     // validator as one returned by a tool before the renderer draws it.
     pageBinding(sender, params);
-    await requireCapabilities(origin, ["chat.hosted"]);
+    // The extension's panel draws cards for hosted chat and for a hosted
+    // external loop (SPEC 15.1), whose grant is level 1 or 2.
+    await panelGrant(origin, params.fingerprint);
     return validateCard(params.card, "card");
   }
   if (method === "hosted.settings") return hostedSettings(origin);
   if (method === "hosted.model") {
     // The user changed the model or the thinking effort in the widget header
     // (broker-owned UI). Both are the site's saved choice, so both are stored.
-    await requireCapabilities(origin, ["chat.hosted"]);
-    await updateSiteSettings(origin, {
-      model: params.model,
-      ...(Object.hasOwn(params, "reasoning")
-        ? { reasoning: params.reasoning ?? null }
-        : {}),
-    });
+    // A hosted external loop's grant is level 1 or 2 (SPEC 15.1) and its
+    // panel switches the same site model. Choosing one of the site's own
+    // models (SPEC 15.2) stores that choice instead and leaves the visitor's
+    // model as it was.
+    await panelGrant(origin, params.fingerprint);
+    await updateSiteSettings(
+      origin,
+      params.siteModel != null
+        ? { siteModel: params.siteModel }
+        : {
+            model: params.model,
+            ...(Object.hasOwn(params, "siteModel") ? { siteModel: null } : {}),
+            ...(Object.hasOwn(params, "reasoning")
+              ? { reasoning: params.reasoning ?? null }
+              : {}),
+          },
+    );
     return hostedSettings(origin);
   }
   if (method === "models.list") {
@@ -690,73 +806,84 @@ async function handle(method, params, sender) {
       );
     if (levelOf(grant.capabilities) !== "catalog")
       return [publicModelEntry(site.provider, site.model, true)];
-    return exposedProviders(grant, catalog).flatMap((provider) =>
-      provider.models.map((model) =>
+    // A site that restricted the visitor's models (SPEC 4) is shown only the
+    // ones that qualify, so it never offers a choice generate would refuse.
+    return acceptedProviders(grant, catalog).flatMap(({ provider, models }) =>
+      models.map((model) =>
         publicModelEntry(provider, model, model.id === site.model.id),
       ),
     );
   }
   if (method === "providers.list") {
     const grant = await requireCapabilities(origin, ["models.catalog"]);
-    return exposedProviders(grant, await getCatalog()).map(publicProvider);
+    return acceptedProviders(grant, await getCatalog()).map(
+      ({ provider, models }) => ({
+        ...publicProvider(provider),
+        models: models.map((model) => model.id),
+      }),
+    );
+  }
+  if (method === "models.cancel") {
+    // The page aborted its own call (SPEC 10). Only a direct turn of this very
+    // document, under the id the content script recorded for it, can match:
+    // origin and tab come from the sender and the session from the content
+    // script's nonce, so a page reaches no request but its own.
+    const binding = pageBinding(sender, params);
+    const request = pageRequestId(params.request);
+    if (!request) throw new BrokerError("INVALID_REQUEST", "Invalid request.");
+    let cancelled = false;
+    for (const turn of turns)
+      if (
+        turn.kind === "direct" &&
+        turn.requestId === request &&
+        turn.binding.origin === binding.origin &&
+        turn.binding.tabId === binding.tabId &&
+        turn.binding.session === binding.session &&
+        !turn.controller.signal.aborted
+      ) {
+        turn.endedBy = "page";
+        turn.controller.abort();
+        cancelled = true;
+      }
+    if (cancelled)
+      logEvent(
+        "info",
+        "broker",
+        `${binding.origin}: models.generate ${request} cancelled by the page`,
+      );
+    return cancelled;
+  }
+  if (method.startsWith("conversations.")) {
+    // A conversation (SPEC 5.4) is minted here for the sender's origin and
+    // verified against it on every later use, so a page can neither choose
+    // an id nor use one another origin was given.
+    await requireCapabilities(origin, ["models.generate"]);
+    if (method === "conversations.create")
+      return { id: await mintConversationId(await installKey(), origin) };
+    const id = await verifiedConversation(origin, params.id);
+    if (method === "conversations.open") return { id };
+    if (method === "conversations.release") {
+      await releaseConversation(origin, id);
+      return true;
+    }
+    throw new BrokerError("NOT_SUPPORTED", "Unknown conversation operation.");
   }
   if (method === "models.generate") {
     return withTurn(pageBinding(sender, params), async (turn) => {
       turn.kind = "direct";
+      turn.requestId = pageRequestId(params._request);
       // The page gave up at this deadline, so finishing the round would spend
       // the user's subscription on an answer with nowhere to go.
-      const orphaned = setTimeout(
-        () => turn.controller.abort(),
-        LIMITS.directGenerateMs,
-      );
+      const orphaned = setTimeout(() => {
+        turn.endedBy = "deadline";
+        turn.controller.abort();
+      }, LIMITS.directGenerateMs);
       turn.onSettled = () => clearTimeout(orphaned);
-      const grant = await guard(turn, ["models.generate"]);
-      const config = await resolveSiteConfig(grant, params.model);
-      turn.providerId = config.catalogProviderId ?? config.providerId;
-      turn.usesExposedModel =
-        params.model != null && params.model !== "default";
-      const { model: _model, ...request } = params;
-      const result = await generate(
-        config,
-        request,
-        turn.controller.signal,
-      ).catch((error) => {
-        if (config.kind === "desktop" && error?.code === "NOT_CONFIGURED")
-          reachability = {
-            at: 0,
-            baseUrl: null,
-            running: false,
-            accepted: false,
-          };
-        throw error;
-      });
-      await guard(turn, ["models.generate"]);
-      // The broker repairs unusable tool calls when it owns the loop and can
-      // answer them itself (section 7.3). Here the page owns the loop, and
-      // handing it a call whose name was rewritten to stay representable would
-      // be silent corruption: it would look up a tool that was never declared.
-      if (result.rejectedToolCalls?.size)
-        throw new BrokerError(
-          "PROVIDER_ERROR",
-          `The provider returned a tool call that could not be used: ${[...result.rejectedToolCalls.values()][0]}`,
-        );
-      await recordUsage(config, result);
-      // Subscription agents expose no sampling controls (SPEC 12.3). Dropping
-      // them silently would be a trap for the site author, so the page console
-      // says so; the request itself still succeeds.
-      const dropped =
-        config.kind === "desktop"
-          ? ["temperature", "maxTokens"].filter((name) => params[name] != null)
-          : [];
-      return dropped.length
-        ? {
-            ...stripRaw(result),
-            _warnings: dropped.map(
-              (name) =>
-                `${name} was ignored: ${config.providerName} is a subscription agent and accepts no sampling controls.`,
-            ),
-          }
-        : stripRaw(result);
+      try {
+        return await directGenerate(turn, params);
+      } catch (error) {
+        throw directFailure(turn, error);
+      }
     });
   }
   if (method === "context.authorize") {
@@ -779,6 +906,13 @@ async function handle(method, params, sender) {
   }
   if (method === "chat.prepare") {
     const manifest = validateSiteManifest(params.manifest);
+    // With a loop the site composes (SPEC 15.1); the extension's own loop
+    // never runs that contract.
+    if (manifest.loop)
+      throw new BrokerError(
+        "NOT_SUPPORTED",
+        "This assistant runs its own conversation loop.",
+      );
     const contractFingerprint = await fingerprint(manifest);
     const binding = pageBinding(sender, params, contractFingerprint);
     return withTurn(binding, async (turn) => {
@@ -856,8 +990,14 @@ async function handle(method, params, sender) {
           : null;
       if (params.reasoning != null && !EFFORTS.includes(params.reasoning))
         throw new BrokerError("INVALID_REQUEST", "reasoning is invalid.");
+      // One of the site's own models answers (SPEC 15.2): no visitor model,
+      // provider, credential, or `require` is involved.
+      const site =
+        params.siteModel != null
+          ? siteModelConfig(item.manifest, params.siteModel)
+          : null;
       return hostedChat(
-        await resolveSiteConfig(grant),
+        site ?? (await resolveSiteConfig(grant)),
         item,
         chatHistory(params.history),
         context,
@@ -866,10 +1006,75 @@ async function handle(method, params, sender) {
         controls,
         {
           conversationId,
-          reasoning: params.reasoning ?? null,
+          reasoning:
+            site && !site.reasoningLevels.includes(params.reasoning)
+              ? null
+              : (params.reasoning ?? null),
           untrustedPrefix: params.untrustedPrefix,
         },
       );
+    });
+  }
+  if (method === "loop.tool") {
+    // A hosted external loop asked the page to run one of its site tools
+    // (`tool.client`, SPEC 15.1). The contract comes from the content script
+    // and is validated and fingerprinted again here; it must be the one the
+    // visitor approved. Arguments are checked against the declared schema and
+    // the result as any site tool's, exactly as in hosted chat.
+    const manifest = validateSiteManifest(params.manifest);
+    const contractFingerprint = await fingerprint(manifest);
+    if (!manifest.loop || contractFingerprint !== params.fingerprint)
+      throw new BrokerError(
+        "PERMISSION_REQUIRED",
+        "The assistant contract changed. Start a new turn.",
+      );
+    const binding = pageBinding(sender, params, contractFingerprint);
+    return withTurn(binding, async (turn) => {
+      turn.kind = "loop";
+      await assertBinding(binding);
+      const grant = await getGrant(origin);
+      if (
+        !grant?.resources?.contractFingerprints?.includes(contractFingerprint)
+      )
+        throw new BrokerError(
+          "PERMISSION_REQUIRED",
+          "The assistant contract needs approval.",
+        );
+      const tool = manifest.tools.find((item) => item.name === params.name);
+      if (!tool)
+        throw new BrokerError(
+          "TOOL_ERROR",
+          "The loop asked for a tool this site did not declare.",
+        );
+      const id =
+        typeof params.invocationId === "string"
+          ? params.invocationId.slice(0, 128)
+          : null;
+      let args;
+      try {
+        args = cloneJson(
+          typeof params.arguments === "string"
+            ? JSON.parse(params.arguments)
+            : (params.arguments ?? {}),
+          "tool arguments",
+        );
+      } catch {
+        throw new BrokerError("TOOL_ERROR", "The tool arguments are invalid.");
+      }
+      validateArguments(args, tool.inputSchema);
+      if (tool.requiresApproval) {
+        const approved = await askApproval(turn, {
+          toolId: id,
+          toolName: tool.name,
+          summary: `${manifest.name} wants to run this tool on this page.`,
+          detail: approvalDetail(args),
+        });
+        if (!approved || turn.controller.signal.aborted)
+          throw new BrokerError("TOOL_ERROR", NOT_APPROVED);
+      }
+      await assertBinding(binding);
+      const output = await invokeSiteTool(binding, tool.name, args, id);
+      return validateSiteToolResult(output, tool.outputContent, new Set());
     });
   }
   throw new BrokerError(
@@ -877,7 +1082,513 @@ async function handle(method, params, sender) {
     "The requested AI operation is not supported.",
   );
 }
+/** What the model is told when the visitor did not approve a call (SPEC 7.8). */
+const NOT_APPROVED =
+  "The visitor did not approve this call, so it was not run.";
+/**
+ * The configuration for a round one of the site's own models answers (SPEC
+ * 15.2): only in mode 1, where the manifest supplies `generate`, and only for
+ * an id the contract declares.
+ */
+function siteModelConfig(manifest, id) {
+  const entry = manifest.models?.list.find((model) => model.id === id);
+  if (!manifest.models?.generate || manifest.loop || !entry)
+    throw new BrokerError(
+      "INVALID_REQUEST",
+      "This site does not offer that model.",
+    );
+  return {
+    kind: "site",
+    model: entry.id,
+    providerId: "site",
+    catalogProviderId: "site",
+    providerName: manifest.name,
+    capabilities: entry.capabilities,
+    contextWindow: entry.contextWindow,
+    reasoningLevels: entry.reasoningLevels,
+  };
+}
+/** The model's arguments as an approval prompt shows them, bounded to 4,000 code points. */
+function approvalDetail(args) {
+  let text;
+  try {
+    text = JSON.stringify(args, null, 2);
+  } catch {
+    text = "";
+  }
+  return [...String(text ?? "")].slice(0, 4000).join("");
+}
+/**
+ * Waits for the content script of the turn's own document to answer, racing
+ * the turn's abort and a deadline. A turn that ended, a document that is gone,
+ * or the deadline all answer `null`.
+ */
+async function askDocument(turn, message, deadlineMs) {
+  const { signal } = turn.controller;
+  if (signal.aborted) return null;
+  let timer = 0;
+  let onAbort = null;
+  try {
+    return await Promise.race([
+      chrome.tabs
+        .sendMessage(
+          turn.binding.tabId,
+          { ...message, ...turn.binding },
+          { frameId: 0 },
+        )
+        .catch(() => null),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(null), deadlineMs);
+        onAbort = () => resolve(null);
+        signal.addEventListener("abort", onAbort, { once: true });
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
+/**
+ * The approval prompt of SPEC 7.8 for one call: the tool's name as title, the
+ * model's arguments as detail, the site's origin. Only an explicit Approve in
+ * the extension's own panel answers true; everything else is a denial.
+ */
+async function askApproval(
+  turn,
+  { toolId, toolName, summary, target, detail },
+) {
+  const reply = await askDocument(
+    turn,
+    {
+      kind: "arjunah-approval",
+      toolId: toolId ?? null,
+      toolName: String(toolName).slice(0, 64),
+      approval: {
+        title: [...String(toolName)].slice(0, 80).join(""),
+        summary: [...String(summary)].slice(0, 280).join(""),
+        ...(target
+          ? { target: [...String(target)].slice(0, 80).join("") }
+          : {}),
+        ...(detail ? { detail } : {}),
+      },
+    },
+    LIMITS.approvalTimeoutMs + 5000,
+  );
+  return reply?.ok === true && reply.approved === true;
+}
+/**
+ * One extension-collected input of a declared remote tool (SPEC 7.3, 7.8),
+ * asked in the panel and validated here before it is forwarded to the server
+ * in `params._meta.arjunah.inputs`. The value is never logged or kept.
+ */
+async function askInput(turn, { toolName, definition, recipient }) {
+  const reply = await askDocument(
+    turn,
+    {
+      kind: "arjunah-tool-input",
+      toolName: String(toolName).slice(0, 64),
+      definition,
+      recipient,
+    },
+    LIMITS.toolUserInputTimeoutMs + 5000,
+  );
+  if (reply?.ok !== true || !Object.hasOwn(reply, "value"))
+    throw new BrokerError(
+      "TOOL_ERROR",
+      `The visitor did not provide ${String(definition.label).slice(0, 80)}, so the tool was not run.`,
+    );
+  return validateUserInputValue(definition, reply.value);
+}
+/**
+ * One round answered by the site's own `models.generate` (SPEC 15.2), run in
+ * the page through its content script and abortable with the turn. What it
+ * returns is validated like a provider's answer; any failure is a
+ * PROVIDER_ERROR for the round, a timeout a TIMEOUT.
+ */
+async function siteRound(turn, config, request, offered) {
+  const id = crypto.randomUUID();
+  const { signal } = turn.controller;
+  const cancel = () =>
+    chrome.tabs
+      .sendMessage(
+        turn.binding.tabId,
+        { kind: "arjunah-site-generate-cancel", ...turn.binding, id },
+        { frameId: 0 },
+      )
+      .catch(() => {});
+  signal.addEventListener("abort", cancel, { once: true });
+  let reply;
+  try {
+    reply = await chrome.tabs.sendMessage(
+      turn.binding.tabId,
+      { kind: "arjunah-site-generate", ...turn.binding, id, request },
+      { frameId: 0 },
+    );
+  } catch {
+    reply = null;
+  } finally {
+    signal.removeEventListener("abort", cancel);
+  }
+  if (signal.aborted)
+    throw new BrokerError(
+      "PERMISSION_REQUIRED",
+      "This request was cancelled or its access was revoked.",
+    );
+  if (!reply?.ok) {
+    const detail = reply?.error?.message;
+    throw new BrokerError(
+      reply?.error?.code === "TIMEOUT" ? "TIMEOUT" : "PROVIDER_ERROR",
+      typeof detail === "string" && detail.trim()
+        ? `The site's model failed: ${detail.trim().slice(0, 300)}`
+        : "The site's model failed.",
+    );
+  }
+  const valid = validateSiteModelResult(reply.result, offered);
+  return {
+    ...valid,
+    model: config.model,
+    contextWindow: config.contextWindow ?? null,
+    thread: false,
+    rawMessage: {
+      role: "assistant",
+      content: valid.message.content,
+      tool_calls: valid.message.toolCalls.map((call) => ({
+        id: call.id,
+        type: "function",
+        function: { name: call.name, arguments: call.arguments },
+      })),
+    },
+  };
+}
 
+/** One page `models.generate`, run inside its direct turn. */
+async function directGenerate(turn, params) {
+  const grant = await guard(turn, ["models.generate"]);
+  const config = await resolveSiteConfig(grant, params.model);
+  // The site's own constraint on the visitor's models (SPEC 4), checked
+  // before any provider is contacted, whichever way the model was chosen.
+  if (!traitsMatch(requireOrNull(grant.require ?? null), config.traits))
+    throw new BrokerError(
+      "NOT_SUPPORTED",
+      "The model answering this request is not one this site accepts (see require in enable()). The user can choose another in the extension.",
+    );
+  turn.providerId = config.catalogProviderId ?? config.providerId;
+  turn.usesExposedModel = params.model != null && params.model !== "default";
+  const { origin } = turn.binding;
+  const conversation = await conversationKey(
+    params.conversationId,
+    turn.binding,
+  );
+  // A conversation's rounds on a desktop agent resume one agent session
+  // (SPEC 12.3.1); a one-off completion keeps running fresh.
+  const thread =
+    config.kind === "desktop" &&
+    config.supportsThreads &&
+    params.conversationId != null
+      ? await conversationThread(origin, conversation)
+      : null;
+  const {
+    model: _model,
+    conversationId: _conversation,
+    _stream: _wanted,
+    ...request
+  } = params;
+  // State from earlier rounds of this turn goes back only to the model and
+  // the provider configuration that issued it (SPEC 5.4).
+  const current = currentTurn(params.messages);
+  const issuer = continuationFormat(config)
+    ? {
+        model: `${turn.providerId}/${config.model}`,
+        providerId: turn.providerId,
+        revision: await providerRevision(config),
+      }
+    : null;
+  const continuation =
+    issuer && current.length
+      ? await providerState.lookup(origin, conversation, current, issuer)
+      : new Map();
+  // A page that asked for its round's deltas (SPEC 5.3) gets them over the
+  // extension's own messaging, bound to this document and this request id.
+  const live =
+    params._stream === true && turn.requestId ? roundStream(turn) : null;
+  const result = await generate(
+    config,
+    request,
+    turn.controller.signal,
+    false,
+    { continuation, thread, ...(live ? { progress: live.progress } : {}) },
+  )
+    .catch((error) => {
+      void noteOllamaFailure(config, error).catch(() => {});
+      if (config.kind === "desktop" && error?.code === "NOT_CONFIGURED")
+        reachability = {
+          at: 0,
+          baseUrl: null,
+          running: false,
+          accepted: false,
+        };
+      throw error;
+    })
+    // Every delta reaches the content script before the answer or the error
+    // does, so the page reads them in order and the result last.
+    .finally(() => live?.close(!turn.controller.signal.aborted));
+  await guard(turn, ["models.generate"]);
+  // The broker repairs unusable tool calls when it owns the loop and can
+  // answer them itself (section 7.3). Here the page owns the loop, and
+  // handing it a call whose name was rewritten to stay representable would
+  // be silent corruption: it would look up a tool that was never declared.
+  if (result.rejectedToolCalls?.size)
+    throw new BrokerError(
+      "PROVIDER_ERROR",
+      `The provider returned a tool call that could not be used: ${[...result.rejectedToolCalls.values()][0]}`,
+    );
+  await recordUsage(config, result);
+  // A reply without tool calls ends the turn, and with it the state kept for
+  // the turn; the conversation itself goes on. One with them keeps its state
+  // under the ids the page is about to receive, which it will send back.
+  if (!result.message.toolCalls.length)
+    await providerState.release(origin, conversation);
+  else if (issuer && result.rawMessage?.state)
+    await providerState.store(
+      {
+        origin,
+        conversationKey: conversation,
+        callIds: result.message.toolCalls.map((call) => call.id),
+        ...issuer,
+        state: result.rawMessage.state,
+      },
+      {
+        keep: current.map((message) => message.callIds),
+        signal: turn.controller.signal,
+      },
+    );
+  const shown = {
+    ...stripRaw(result),
+    // Where the answer came from, in the vocabulary of `models.list()`.
+    ...config.traits,
+    providerState: continuation.size ? "reused" : "none",
+  };
+  // Subscription agents expose no sampling controls (SPEC 12.3). Dropping
+  // them silently would be a trap for the site author, so the page console
+  // says so; the request itself still succeeds.
+  const dropped =
+    config.kind === "desktop"
+      ? ["temperature", "maxTokens"].filter((name) => params[name] != null)
+      : [];
+  return dropped.length
+    ? {
+        ...shown,
+        _warnings: dropped.map(
+          (name) =>
+            `${name} was ignored: ${config.providerName} is a subscription agent and accepts no sampling controls.`,
+        ),
+      }
+    : shown;
+}
+/**
+ * The conversation a page request continues (SPEC 5.4): the conversation
+ * the request was sent through, or the document it runs in for a one-off
+ * completion. Always paired with the origin the sender proves.
+ */
+async function conversationKey(value, binding) {
+  if (value == null) return documentConversation(binding.session);
+  return verifiedConversation(binding.origin, value);
+}
+/** A minted id has no ":", so this never collides with one. */
+function documentConversation(session) {
+  return `document:${session}`;
+}
+/**
+ * One random HMAC key per install for conversation ids (SPEC 5.4), made on
+ * first use and kept in `chrome.storage.local`. Shared by concurrent first
+ * uses, and read again after a failure rather than remembered as one.
+ */
+function installKey() {
+  return (installKeyRead ??= (async () => {
+    const stored = (await chrome.storage.local.get(INSTALL_KEY))[INSTALL_KEY];
+    let raw = fromBase64url(stored);
+    if (raw?.length !== INSTALL_KEY_BYTES) {
+      raw = crypto.getRandomValues(new Uint8Array(INSTALL_KEY_BYTES));
+      await chrome.storage.local.set({ [INSTALL_KEY]: base64url(raw) });
+    }
+    return importInstallKey(raw);
+  })().catch((error) => {
+    installKeyRead = null;
+    throw error;
+  }));
+}
+/** The id itself, when this install minted it for this origin. */
+async function verifiedConversation(origin, id) {
+  if (!(await verifyConversationId(await installKey(), origin, id)))
+    throw new BrokerError(
+      "INVALID_REQUEST",
+      "This conversation was not created for this site. Create one with session.conversations.create().",
+    );
+  return id;
+}
+/**
+ * The assistant messages with tool calls after the last user message: the
+ * turn in progress, and the only messages stored state is reattached to.
+ * Read before validation, so anything malformed is skipped here and refused
+ * by validation before a provider is contacted.
+ */
+function currentTurn(messages) {
+  if (!Array.isArray(messages)) return [];
+  const bounded = messages.slice(0, GENERATE_LIMITS.messages);
+  let start = 0;
+  for (let index = bounded.length - 1; index >= 0; index--)
+    if (bounded[index]?.role === "user") {
+      start = index + 1;
+      break;
+    }
+  const found = [];
+  for (let index = start; index < bounded.length; index++) {
+    const message = bounded[index];
+    if (
+      message?.role !== "assistant" ||
+      !Array.isArray(message.toolCalls) ||
+      !message.toolCalls.length
+    )
+      continue;
+    const callIds = message.toolCalls.map((call) => call?.id);
+    if (
+      callIds.every(
+        (id) => typeof id === "string" && id.length > 0 && id.length <= 128,
+      )
+    )
+      found.push({ index, callIds });
+  }
+  return found;
+}
+/**
+ * Changes when the key, the address, or the provider changes, so state one
+ * account issued never reaches another. The key itself is not stored.
+ */
+function providerRevision(config) {
+  return fingerprint([
+    config.catalogProviderId ?? config.providerId,
+    config.baseUrl ?? null,
+    config.apiKey ?? null,
+  ]);
+}
+/**
+ * A page conversation ends here (SPEC 5.4): its handle's `release()`, or the
+ * end of the document a one-off conversation belonged to. That drops its
+ * provider state and ends the desktop agent session its rounds resumed
+ * (`revokeGrant` ends an origin's sessions the same way). A finished turn is
+ * not an ended conversation, so a final round does not come through here.
+ */
+function releaseConversation(origin, conversation) {
+  // A one-off completion never runs on a thread, so a document's end has
+  // nothing to end at the companion; a released handle may, even when the
+  // record of it was lost with a worker restart.
+  if (!conversation.startsWith("document:"))
+    void installKey()
+      .then((key) => desktopThreadId(key, origin, conversation))
+      .then((thread) => endDesktopThread(thread, { always: true }))
+      .catch(() => {});
+  return providerState.release(origin, conversation);
+}
+// Companion threads this background started for page conversations, by
+// thread id, with the origin each belongs to, so revoking a site can end
+// exactly its own. Mirrored to `chrome.storage.session` where the browser has
+// it, since the worker can stop between a conversation's turns; a thread the
+// record lost still ends on the companion's own 10-minute idle expiry.
+const DESKTOP_THREADS = "desktopThreads";
+const desktopThreads = new Map();
+let desktopThreadsRead = null;
+function readDesktopThreads() {
+  return (desktopThreadsRead ??= (async () => {
+    try {
+      const stored = (await chrome.storage.session?.get(DESKTOP_THREADS))?.[
+        DESKTOP_THREADS
+      ];
+      for (const [id, origin] of Object.entries(stored ?? {}))
+        if (!desktopThreads.has(id)) desktopThreads.set(id, origin);
+    } catch {
+      /* memory only */
+    }
+  })());
+}
+function writeDesktopThreads() {
+  try {
+    void chrome.storage.session
+      ?.set({ [DESKTOP_THREADS]: Object.fromEntries(desktopThreads) })
+      ?.catch(() => {});
+  } catch {
+    /* memory only */
+  }
+}
+/**
+ * The companion thread id for one page conversation (SPEC 12.3.1). Companion
+ * thread ids are not origin-scoped, so the id is derived from the origin and
+ * the conversation under the install key rather than being the conversation
+ * id itself: one origin cannot name, resume, or end another's agent session.
+ */
+async function conversationThread(origin, conversation) {
+  const id = await desktopThreadId(await installKey(), origin, conversation);
+  await readDesktopThreads();
+  if (!desktopThreads.has(id)) {
+    desktopThreads.set(id, origin);
+    // Bounded: the companion expires idle threads itself, so only the most
+    // recent few hundred can still be alive.
+    while (desktopThreads.size > 256)
+      desktopThreads.delete(desktopThreads.keys().next().value);
+    writeDesktopThreads();
+  }
+  return id;
+}
+/**
+ * `DELETE /api/threads/<id>` for a thread this background started, or with
+ * `always` for one it may have started before its record was lost.
+ */
+async function endDesktopThread(id, { always = false } = {}) {
+  await readDesktopThreads();
+  const known = desktopThreads.delete(id);
+  if (known) writeDesktopThreads();
+  if (!known && !always) return false;
+  return desktopEndThread(await getDesktop(), id);
+}
+/** Ends every recorded page-conversation thread whose origin matches. */
+function endDesktopThreads(matches) {
+  void readDesktopThreads()
+    .then(async () => {
+      const ended = [...desktopThreads].filter(([, origin]) => matches(origin));
+      if (!ended.length) return;
+      for (const [id] of ended) desktopThreads.delete(id);
+      writeDesktopThreads();
+      const link = await getDesktop();
+      await Promise.all(ended.map(([id]) => desktopEndThread(link, id)));
+    })
+    .catch(() => {});
+}
+/** A document's own conversation ends with the document. */
+function endDocumentConversation(scope) {
+  void releaseConversation(scope.origin, documentConversation(scope.session));
+}
+/**
+ * What a direct `models.generate` reports once its turn was aborted. Whichever
+ * layer noticed the abort first (a guard, the provider fetch, the companion
+ * client) says so in its own words, so the outcome is decided here from who
+ * aborted it (SPEC 10): the page, the deadline it stopped waiting at, or
+ * anything else, which is always a change of the page's access.
+ */
+function directFailure(turn, error) {
+  if (!turn.controller.signal.aborted) return error;
+  if (turn.endedBy === "page")
+    return new BrokerError("ABORTED", "The page cancelled this request.");
+  if (turn.endedBy === "deadline")
+    return new BrokerError(
+      "TIMEOUT",
+      `The model did not answer within ${LIMITS.directGenerateMs / 1000} seconds.`,
+    );
+  return error?.code === "PERMISSION_REQUIRED"
+    ? error
+    : new BrokerError(
+        "PERMISSION_REQUIRED",
+        "This request was cancelled or its access was revoked.",
+      );
+}
 function assertExtensionPage(sender) {
   if (!sender.url?.startsWith(chrome.runtime.getURL("")))
     throw new BrokerError(
@@ -919,8 +1630,11 @@ function pageBinding(sender, params, contractFingerprint = null) {
   if (
     previous &&
     (previous.origin !== origin || previous.session !== params._session)
-  )
+  ) {
+    // A new document in this tab means the previous one ended.
     clearMcpSessions(previous.origin, previous.session);
+    endDocumentConversation(previous);
+  }
   documentScopes.set(sender.tab.id, { origin, session: params._session });
   return {
     origin,
@@ -1010,14 +1724,28 @@ async function getOpenAI() {
 async function getOpenCode() {
   return (await chrome.storage.local.get(STORAGE.opencode)).opencode ?? null;
 }
+const OLLAMA_TYPES = Object.freeze([
+  OLLAMA_PROVIDER_ID,
+  OLLAMA_CLOUD_PROVIDER_ID,
+]);
+function ollamaKey(cloud) {
+  return cloud ? STORAGE.ollamaCloud : STORAGE.ollama;
+}
+async function getOllama(cloud) {
+  const key = ollamaKey(cloud);
+  return (await chrome.storage.local.get(key))[key] ?? null;
+}
 async function getDesktop() {
   return (await chrome.storage.local.get(STORAGE.desktop)).desktop ?? null;
 }
 async function getActive() {
   const active = (await chrome.storage.local.get(STORAGE.active)).active;
-  if (["desktop", "openai", "opencode"].includes(active?.type)) return active;
+  if (["desktop", "openai", "opencode", ...OLLAMA_TYPES].includes(active?.type))
+    return active;
   if (await getOpenAI()) return { type: "openai" };
-  return (await getOpenCode()) ? { type: "opencode" } : {};
+  if (await getOpenCode()) return { type: "opencode" };
+  if (await getOllama(false)) return { type: OLLAMA_PROVIDER_ID };
+  return (await getOllama(true)) ? { type: OLLAMA_CLOUD_PROVIDER_ID } : {};
 }
 function setActive(active) {
   return chrome.storage.local.set({ [STORAGE.active]: active });
@@ -1063,21 +1791,32 @@ async function desktopReachable(link, { force = false } = {}) {
 function catalogInputs(state) {
   return { desktopRunning: state.running, desktopAccepted: state.accepted };
 }
-async function getCatalog({ forcePing = false } = {}) {
-  const [openai, opencode, desktop, active, usage] = await Promise.all([
+/** Every stored provider configuration `buildCatalog` and `configForModel` read. */
+async function providerSettings() {
+  const [openai, opencode, ollama, ollamaCloud, desktop] = await Promise.all([
     getOpenAI(),
     getOpenCode(),
+    getOllama(false),
+    getOllama(true),
     getDesktop(),
+  ]);
+  scheduleOllamaRefresh(false, ollama);
+  scheduleOllamaRefresh(true, ollamaCloud);
+  return { openai, opencode, ollama, ollamaCloud, desktop };
+}
+async function getCatalog({ forcePing = false } = {}) {
+  const [settings, active, usage] = await Promise.all([
+    providerSettings(),
     getActive(),
     getUsage(),
   ]);
   return buildCatalog({
-    openai,
-    opencode,
-    desktop,
+    ...settings,
     active,
     usage,
-    ...catalogInputs(await desktopReachable(desktop, { force: forcePing })),
+    ...catalogInputs(
+      await desktopReachable(settings.desktop, { force: forcePing }),
+    ),
   });
 }
 /** The provider configuration that answers requests for the global default. */
@@ -1085,35 +1824,29 @@ async function getProvider() {
   return resolveConfig(await getActive());
 }
 async function resolveConfig(active) {
-  const [openai, opencode, desktop] = await Promise.all([
-    getOpenAI(),
-    getOpenCode(),
-    getDesktop(),
-  ]);
+  const settings = await providerSettings();
   const catalog = buildCatalog({
-    openai,
-    opencode,
-    desktop,
+    ...settings,
     active,
-    ...catalogInputs(await desktopReachable(desktop)),
+    ...catalogInputs(await desktopReachable(settings.desktop)),
   });
-  const id = activeModelId(active, openai, opencode);
-  return id ? configForModel(catalog, id, { openai, opencode, desktop }) : null;
+  const id = activeModelId(
+    active,
+    settings.openai,
+    settings.opencode,
+    settings.ollama,
+    settings.ollamaCloud,
+  );
+  return id ? configForModel(catalog, id, settings) : null;
 }
 async function configFor(modelId) {
-  const [openai, opencode, desktop] = await Promise.all([
-    getOpenAI(),
-    getOpenCode(),
-    getDesktop(),
-  ]);
+  const settings = await providerSettings();
   const catalog = buildCatalog({
-    openai,
-    opencode,
-    desktop,
+    ...settings,
     active: await getActive(),
-    ...catalogInputs(await desktopReachable(desktop)),
+    ...catalogInputs(await desktopReachable(settings.desktop)),
   });
-  return configForModel(catalog, modelId, { openai, opencode, desktop });
+  return configForModel(catalog, modelId, settings);
 }
 /**
  * The model that answers this site: its stored choice when still available,
@@ -1164,6 +1897,55 @@ function pickableProviders(grant, catalog) {
   const allowed = selectedProviderIds(grant);
   return catalog.providers.filter(
     (provider) => provider.available && (!allowed || allowed.has(provider.id)),
+  );
+}
+/**
+ * The exposed providers with only the models the site's `require` accepts
+ * (SPEC 4), dropping a provider none of whose models qualify.
+ */
+function acceptedProviders(grant, catalog) {
+  const constraint = requireOrNull(grant?.require ?? null);
+  return exposedProviders(grant, catalog)
+    .map((provider) => ({
+      provider,
+      models: provider.models.filter((model) =>
+        modelMatches(constraint, provider, model),
+      ),
+    }))
+    .filter(({ models }) => models.length);
+}
+/** Every available model a `require` accepts, as { provider, model } pairs. */
+function acceptedModels(constraint, catalog) {
+  return catalog.providers
+    .filter((provider) => provider.available)
+    .flatMap((provider) =>
+      provider.models
+        .filter((model) => modelMatches(constraint, provider, model))
+        .map((model) => ({ provider, model })),
+    );
+}
+/**
+ * The model id a grant with `require` is pinned to after a choice (SPEC 4).
+ * `null` (follow the global default) pins the current default, because a
+ * later default may not qualify; a choice that does not qualify is refused,
+ * whichever surface made it (consent, popup, options, hosted header).
+ */
+function acceptedPin(constraint, catalog, model) {
+  const id = model ?? catalog.defaultModel;
+  const found = id ? findModel(catalog, id) : null;
+  if (
+    found?.provider.available &&
+    modelMatches(constraint, found.provider, found.model)
+  )
+    return found.model.id;
+  if (!acceptedModels(constraint, catalog).length)
+    throw new BrokerError(
+      "NOT_CONFIGURED",
+      "None of the configured models is one this site accepts.",
+    );
+  throw new BrokerError(
+    "NOT_SUPPORTED",
+    "This site accepts only some kinds of model, and the chosen one does not qualify.",
   );
 }
 /** Provider configuration for a page request, enforcing the site's level. */
@@ -1241,6 +2023,17 @@ async function validateSiteChoices(params, catalog) {
       throw new BrokerError("INVALID_REQUEST", "reasoning is invalid.");
     choices.reasoning = params.reasoning;
   }
+  // The visitor's choice of one of the site's own models (SPEC 15.2). Only the
+  // id is kept; which ids exist is the contract's, checked when a turn runs.
+  if (Object.hasOwn(params, "siteModel")) {
+    if (
+      params.siteModel !== null &&
+      (typeof params.siteModel !== "string" ||
+        !SITE_MODEL_ID.test(params.siteModel))
+    )
+      throw new BrokerError("INVALID_REQUEST", "siteModel is invalid.");
+    choices.siteModel = params.siteModel;
+  }
   if (params.providers != null) {
     if (
       !Array.isArray(params.providers) ||
@@ -1270,9 +2063,14 @@ async function updateSiteSettings(origin, params) {
         "PERMISSION_REQUIRED",
         "This site has no grant to update.",
       );
+    const constraint = requireOrNull(stored[origin].require ?? null);
+    if (constraint && Object.hasOwn(choices, "model"))
+      choices.model = acceptedPin(constraint, catalog, choices.model);
     modelMoved =
-      Object.hasOwn(choices, "model") &&
-      (stored[origin].model ?? null) !== (choices.model ?? null);
+      (Object.hasOwn(choices, "model") &&
+        (stored[origin].model ?? null) !== (choices.model ?? null)) ||
+      (Object.hasOwn(choices, "siteModel") &&
+        (stored[origin].siteModel ?? null) !== (choices.siteModel ?? null));
     const next = {
       ...stored[origin],
       ...choices,
@@ -1344,6 +2142,14 @@ async function siteSummary(origin) {
       selectedProviderIds(grant) == null
         ? null
         : [...selectedProviderIds(grant)],
+    // The site restricted which models may answer it (SPEC 4): the popup
+    // offers only these, and `site.update` refuses any other.
+    require: requireOrNull(grant.require ?? null),
+    acceptedModels: requireOrNull(grant.require ?? null)
+      ? acceptedModels(requireOrNull(grant.require), catalog).map(
+          ({ model }) => model.id,
+        )
+      : null,
   };
 }
 /**
@@ -1367,10 +2173,15 @@ async function hostedSettings(origin) {
   const visibleProviders = grant
     ? pickableProviders(grant, catalog)
     : catalog.providers;
+  // A site's `require` (SPEC 4) narrows the switcher too, since the header
+  // changes the same site model a page completion answers with.
+  const constraint = requireOrNull(grant?.require ?? null);
   const pickerModels = visibleProviders
     .filter((provider) => provider.available)
     .flatMap((provider) =>
-      provider.models.map((model) => ({ provider, model })),
+      provider.models
+        .filter((model) => modelMatches(constraint, provider, model))
+        .map((model) => ({ provider, model })),
     );
   // The answering model must remain visible in broker-owned UI even when its
   // provider is not exposed to page code. That exception is model-sized: it
@@ -1380,6 +2191,14 @@ async function hostedSettings(origin) {
     !visibleProviders.some((provider) => provider.id === site.provider.id)
   )
     pickerModels.unshift({ provider: site.provider, model: site.model });
+  // A self-hosted model that is already loaded says where it runs and with
+  // what context before the visitor sends anything. One cached `/api/ps` read.
+  const loaded =
+    site?.provider.id === OLLAMA_PROVIDER_ID
+      ? await configFor(site.model.id)
+          .then((config) => ollamaLoadedState(config))
+          .catch(() => null)
+      : null;
   return {
     level: levelOf(grant?.capabilities ?? []),
     desktop: catalog.desktop,
@@ -1390,7 +2209,11 @@ async function hostedSettings(origin) {
           providerId: site.provider.id,
           providerName: site.provider.name,
           capabilities: site.model.capabilities,
-          contextWindow: site.model.contextWindow ?? null,
+          contextWindow:
+            loaded?.contextLength ?? site.model.contextWindow ?? null,
+          processor: loaded?.processor
+            ? { ...loaded.processor, until: loaded.until }
+            : null,
           reasoningLevels: site.model.reasoningLevels ?? [],
           defaultReasoning: site.model.defaultReasoning ?? null,
           threads: site.provider.supportsThreads === true,
@@ -1415,23 +2238,39 @@ async function hostedSettings(origin) {
       contextWindow: model.contextWindow ?? null,
       reasoningLevels: model.reasoningLevels ?? [],
     })),
+    // The visitor's stored choice of one of the site's own models, if any
+    // (SPEC 15.2); the panel checks it against the contract it shows.
+    siteModel: grant?.siteModel ?? null,
     grant: publicGrant(grant, catalog),
   };
 }
 async function brokerStatus(origin, params) {
   const catalog = await getCatalog();
   const grant = await getGrant(origin);
+  // The site's constraint on the visitor's models (SPEC 4): the one this
+  // request carries, else the one the grant already holds. Consent offers
+  // only the models it accepts.
+  const constraint = requireOrNull(
+    Object.hasOwn(params, "require") && params.require !== undefined
+      ? (validateRequire(params.require) ?? null)
+      : (grant?.require ?? null),
+  );
+  const accepted = acceptedModels(constraint, catalog);
+  const fits = (found) =>
+    found?.provider.available &&
+    modelMatches(constraint, found.provider, found.model);
   // Consent lists everything the user has configured, never just what the site
   // already holds: this dialog is how a grant gets widened, and it is broker UI
   // the page cannot read.
-  const visibleProviders = catalog.providers;
   // Consent previews the model that would answer: the site's current choice
   // when it has one, or the model the widget preselected, else the default.
   const preview =
     typeof params.model === "string" ? findModel(catalog, params.model) : null;
+  const current = siteModel(grant, catalog);
   const site =
-    (preview?.provider.available ? { ...preview, fallback: false } : null) ??
-    siteModel(grant, catalog);
+    (fits(preview) ? { ...preview, fallback: false } : null) ??
+    (fits(current) ? current : null) ??
+    (constraint && accepted[0] ? { ...accepted[0], fallback: false } : null);
   const label = site
     ? `${site.provider.name}${site.provider.kind === "subscription" ? " on this computer" : ""} (${site.model.displayName})`
     : null;
@@ -1440,21 +2279,83 @@ async function brokerStatus(origin, params) {
     provider: label,
     model: site ? site.model.id : null,
     defaultModel: catalog.defaultModel,
-    models: visibleProviders
-      .filter((provider) => provider.available)
-      .flatMap((provider) =>
-        provider.models.map((model) => ({
-          id: model.id,
-          displayName: model.displayName,
-          providerId: provider.id,
-          providerName: provider.name,
-        })),
-      ),
-    providers: visibleProviders
-      .filter((provider) => provider.available)
-      .map((provider) => ({ id: provider.id, name: provider.name })),
+    // Set when the site restricted the choice; the sheet says so.
+    require: constraint,
+    models: accepted.map(({ provider, model }) => ({
+      id: model.id,
+      displayName: model.displayName,
+      providerId: provider.id,
+      providerName: provider.name,
+    })),
+    providers: [
+      ...new Map(
+        accepted.map(({ provider }) => [
+          provider.id,
+          { id: provider.id, name: provider.name },
+        ]),
+      ).values(),
+    ],
     grant: publicGrant(grant, catalog),
   };
+}
+/**
+ * What the content script compares to tell its page that the origin's grant
+ * or site model changed (`arjunah:grantchange`, SPEC 3). Only this origin's
+ * grant is read, and only `level`, `model`, and `revoked` reach the page; the
+ * revision covers the rest of the grant so any change of it is noticed.
+ */
+async function grantState(origin) {
+  const grant = await getGrant(origin);
+  if (!grant) return { level: null, model: null, revoked: true, revision: "" };
+  const catalog = await getCatalog();
+  const shown = publicGrant(grant, catalog);
+  return {
+    level: shown.level,
+    model: shown.model,
+    revoked: false,
+    revision: await fingerprint([
+      shown,
+      grant.require ?? null,
+      grant.providers ?? null,
+    ]),
+  };
+}
+const settingsOpenedAt = new Map();
+/**
+ * `window.ai.arjunah.openSettings()` (SPEC 3): the toolbar popup, which shows
+ * the sender's tab, where the browser lets an extension open it; otherwise
+ * the options page at its site list. The content script has already checked
+ * that the page has a user gesture; one opening per tab per second keeps a
+ * page from flooding the user with tabs on every click.
+ */
+async function openSettings(sender, origin) {
+  const tabId = sender.tab.id;
+  const last = settingsOpenedAt.get(tabId) ?? 0;
+  if (Date.now() - last < 1000) return true;
+  settingsOpenedAt.set(tabId, Date.now());
+  if (settingsOpenedAt.size > 64)
+    settingsOpenedAt.delete(settingsOpenedAt.keys().next().value);
+  try {
+    if (typeof chrome.action?.openPopup === "function") {
+      await chrome.action.openPopup(
+        Number.isInteger(sender.tab.windowId)
+          ? { windowId: sender.tab.windowId }
+          : {},
+      );
+      logEvent("info", "broker", `${origin}: settings opened (popup)`);
+      return true;
+    }
+  } catch {
+    /* not allowed here; the options page always is */
+  }
+  await chrome.tabs.create({
+    url: chrome.runtime.getURL("options.html#grants"),
+    ...(Number.isInteger(sender.tab.windowId)
+      ? { windowId: sender.tab.windowId }
+      : {}),
+  });
+  logEvent("info", "broker", `${origin}: settings opened (options page)`);
+  return true;
 }
 /** Local usage ledger (SPEC 11.1): per provider, per day and all time. */
 async function recordUsage(config, result) {
@@ -1531,6 +2432,19 @@ async function validateActive(input) {
     const model =
       typeof input.model === "string" ? input.model.trim().slice(0, 200) : "";
     return model ? { type: "opencode", model } : { type: "opencode" };
+  }
+  if (OLLAMA_TYPES.includes(input?.type)) {
+    const cloud = input.type === OLLAMA_CLOUD_PROVIDER_ID;
+    if (!(await getOllama(cloud)))
+      throw new BrokerError(
+        "NOT_CONFIGURED",
+        cloud
+          ? "Save an Ollama Cloud API key before selecting it."
+          : "Connect an Ollama server before selecting it.",
+      );
+    const model =
+      typeof input.model === "string" ? input.model.trim().slice(0, 200) : "";
+    return model ? { type: input.type, model } : { type: input.type };
   }
   if (input?.type !== "desktop")
     throw new BrokerError("INVALID_REQUEST", "Unknown provider selection.");
@@ -1707,8 +2621,14 @@ function browserName() {
 async function pushSync() {
   const link = await getDesktop();
   if (!link?.token) return;
-  const openai = await getOpenAI();
-  const opencode = await getOpenCode();
+  const [openai, opencode, ollamaLocal, ollamaCloud, active] =
+    await Promise.all([
+      getOpenAI(),
+      getOpenCode(),
+      getOllama(false),
+      getOllama(true),
+      getActive(),
+    ]);
   const config = {
     openai: openai ? { model: openai.model, apiKey: openai.apiKey } : null,
     opencode: opencode
@@ -1718,7 +2638,19 @@ async function pushSync() {
           apiKey: opencode.apiKey,
         }
       : null,
-    active: await getActive(),
+    // The discovered catalog is not synced: each browser reads it from the
+    // server itself, and trusts only what its own request reported.
+    ollama: ollamaLocal
+      ? {
+          baseUrl: ollamaLocal.baseUrl,
+          model: ollamaLocal.model,
+          apiKey: ollamaLocal.apiKey ?? null,
+        }
+      : null,
+    ollamaCloud: ollamaCloud
+      ? { model: ollamaCloud.model, apiKey: ollamaCloud.apiKey }
+      : null,
+    active,
   };
   const sync = await desktopSyncPut(link, config);
   await chrome.storage.local.set({
@@ -1775,8 +2707,15 @@ async function applySync(remote) {
     });
   else if (opencode === null)
     await chrome.storage.local.remove(STORAGE.opencode);
+  await applyOllamaSync(config.ollama, false);
+  await applyOllamaSync(config.ollamaCloud, true);
   const active = config.active;
-  if (active?.type === "openai" && (await getOpenAI()))
+  if (
+    OLLAMA_TYPES.includes(active?.type) &&
+    (await getOllama(active.type === OLLAMA_CLOUD_PROVIDER_ID))
+  )
+    await setActive({ type: active.type });
+  else if (active?.type === "openai" && (await getOpenAI()))
     await setActive({ type: "openai" });
   else if (active?.type === "opencode" && (await getOpenCode()))
     await setActive({ type: "opencode" });
@@ -1793,6 +2732,56 @@ async function applySync(remote) {
       revision: Number(remote.revision) || 0,
     },
   });
+}
+/**
+ * One synced Ollama entry, validated as if the user had typed it. A server
+ * address or model from the companion goes through the same checks as one
+ * from settings, and an entry that fails them is ignored rather than stored.
+ * The local catalog survives when the server and key did not change.
+ */
+async function applyOllamaSync(entry, cloud) {
+  const key = ollamaKey(cloud);
+  if (entry === null) {
+    await chrome.storage.local.remove(key);
+    ollamaRefreshedAt.delete(cloud);
+    return;
+  }
+  if (!entry || typeof entry !== "object") return;
+  let baseUrl;
+  try {
+    baseUrl = cloud ? OLLAMA_CLOUD_URL : ollamaBaseUrl(entry.baseUrl);
+  } catch {
+    return;
+  }
+  const apiKey =
+    typeof entry.apiKey === "string" &&
+    entry.apiKey &&
+    entry.apiKey.length <= 10000 &&
+    !/[\r\n]/.test(entry.apiKey)
+      ? entry.apiKey
+      : null;
+  if (cloud && !apiKey) return;
+  const model =
+    typeof entry.model === "string" && entry.model
+      ? entry.model.slice(0, 200)
+      : null;
+  if (!model) return;
+  const current = await getOllama(cloud);
+  const same =
+    current?.baseUrl === baseUrl && (current?.apiKey ?? null) === apiKey;
+  await chrome.storage.local.set({
+    [key]: {
+      baseUrl,
+      apiKey,
+      model,
+      models: same ? (current.models ?? []) : [],
+      skipped: same ? (current.skipped ?? []) : [],
+      ignored: same ? (current.ignored ?? []) : [],
+      lastError: same ? (current.lastError ?? null) : null,
+    },
+  });
+  // A new server or key has no catalog yet; read it on the next catalog use.
+  if (!same) ollamaRefreshedAt.delete(cloud);
 }
 async function providerInput(input) {
   const baseUrl = String(input.baseUrl ?? "").replace(/\/$/, "");
@@ -1896,6 +2885,409 @@ async function opencodeDiscover(input) {
   const model = requested || opencodePreferredModel(models);
   return { config: opencodeConfig(credential, model), models };
 }
+/**
+ * The private rule ids for the Origin-stripping rule: one for the saved server
+ * and one for an address being tested or saved before it is stored.
+ */
+const OLLAMA_PROBE_RULE_ID = OLLAMA_ORIGIN_RULE_ID + 1;
+let originRuleQueue = Promise.resolve();
+/**
+ * Point the declarativeNetRequest rule at the given self-hosted servers. The
+ * rule exists because Ollama answers 403 to the Origin a browser extension
+ * sends; see `ollamaOriginRule`. Browsers without the API, and the unit tests,
+ * simply keep the header, and a refusal then explains OLLAMA_ORIGINS.
+ */
+function setOllamaOriginRules(entries) {
+  const api = globalThis.chrome?.declarativeNetRequest;
+  if (!api?.updateDynamicRules) return Promise.resolve(false);
+  const run = originRuleQueue.then(async () => {
+    let host = "";
+    try {
+      host = new URL(chrome.runtime.getURL("")).hostname;
+    } catch {
+      return false;
+    }
+    const ids = [OLLAMA_ORIGIN_RULE_ID, OLLAMA_PROBE_RULE_ID];
+    const addRules = entries
+      .filter(([id, baseUrl]) => ids.includes(id) && baseUrl)
+      .map(([id, baseUrl]) => {
+        const rule = ollamaOriginRule(baseUrl, host);
+        return rule ? { ...rule, id } : null;
+      })
+      .filter(Boolean);
+    try {
+      await api.updateDynamicRules({
+        removeRuleIds: entries.map(([id]) => id),
+        addRules,
+      });
+      return true;
+    } catch (error) {
+      logEvent(
+        "warn",
+        "ollama",
+        `could not update the Origin rule: ${String(error?.message ?? error).slice(0, 200)}`,
+      );
+      return false;
+    }
+  });
+  originRuleQueue = run.catch(() => false);
+  return run;
+}
+async function syncOllamaOriginRule() {
+  const saved = await getOllama(false).catch(() => null);
+  return setOllamaOriginRules([
+    [OLLAMA_ORIGIN_RULE_ID, saved?.baseUrl ?? null],
+  ]);
+}
+
+/** The extension-page view of a saved Ollama configuration: never the key. */
+function ollamaSummary(cloud, stored) {
+  if (!stored) return null;
+  return {
+    provider: cloud ? OLLAMA_CLOUD_PROVIDER_ID : OLLAMA_PROVIDER_ID,
+    baseUrl: stored.baseUrl,
+    model: stored.model,
+    models: (stored.models ?? []).map((model) => ({
+      id: model.id,
+      displayName: ollamaDisplayName(model.id, model.remote),
+      capabilities: model.capabilities,
+      contextWindow: model.contextWindow ?? null,
+      reasoningLevels: model.reasoningLevels ?? [],
+      parameterSize: model.parameterSize ?? null,
+      quantization: model.quantization ?? null,
+      remote: model.remote === true,
+    })),
+    skipped: (stored.skipped ?? []).map(({ id, reason }) => ({ id, reason })),
+    hasApiKey: Boolean(stored.apiKey),
+    lastError: stored.lastError ?? null,
+  };
+}
+function ollamaTarget(params) {
+  const provider = params.provider ?? OLLAMA_PROVIDER_ID;
+  if (!OLLAMA_TYPES.includes(provider))
+    throw new BrokerError("INVALID_REQUEST", "Unknown Ollama provider.");
+  return provider === OLLAMA_CLOUD_PROVIDER_ID;
+}
+
+/**
+ * The credential half of an Ollama configuration. A self-hosted server needs
+ * only its address; a key there is optional (an authenticating proxy). A saved
+ * key is reused only for the same origin, and for a self-hosted server only
+ * when asked, since "no key" is a valid choice there too.
+ */
+async function ollamaCredential(input, cloud) {
+  const previous = await getOllama(cloud);
+  const baseUrl = cloud ? OLLAMA_CLOUD_URL : ollamaBaseUrl(input.baseUrl);
+  let apiKey = String(input.apiKey ?? "").trim();
+  if (apiKey.length > 10000 || /[\r\n]/.test(apiKey))
+    throw new BrokerError("INVALID_REQUEST", "Provider API key is invalid.");
+  const reuse = cloud ? input.keepApiKey !== false : input.keepApiKey === true;
+  if (
+    !apiKey &&
+    reuse &&
+    previous?.apiKey &&
+    new URL(previous.baseUrl).origin === new URL(baseUrl).origin
+  )
+    apiKey = previous.apiKey;
+  if (cloud && !apiKey)
+    throw new BrokerError(
+      "INVALID_REQUEST",
+      "An Ollama Cloud API key is required. Create one at ollama.com/settings/keys.",
+    );
+  return {
+    kind: "ollama",
+    cloud,
+    providerId: cloud ? OLLAMA_CLOUD_PROVIDER_ID : OLLAMA_PROVIDER_ID,
+    providerName: cloud ? "Ollama Cloud" : "Ollama (self-hosted)",
+    baseUrl,
+    apiKey: apiKey || null,
+  };
+}
+
+/** A credential plus one discovered model, ready to generate with. */
+function ollamaConfig(credential, model) {
+  return {
+    ...credential,
+    model: model.id,
+    displayName: ollamaDisplayName(model.id),
+    capabilities: model.capabilities,
+    contextWindow: model.contextWindow,
+    reasoningLevels: model.reasoningLevels,
+    think: model.think,
+  };
+}
+
+/**
+ * Discover the server's chat models and settle on one: the requested model
+ * when the server has it, else the previous choice, else the first. For a
+ * self-hosted server the Origin rule is pointed at the address first, since
+ * discovery itself POSTs to `/api/show`.
+ */
+async function ollamaDiscover(input, cloud) {
+  const credential = await ollamaCredential(input, cloud);
+  const previous = await getOllama(cloud);
+  const where = cloud ? "Ollama Cloud" : "The Ollama server";
+  if (!cloud)
+    await setOllamaOriginRules([[OLLAMA_PROBE_RULE_ID, credential.baseUrl]]);
+  let models;
+  let skipped;
+  let ignored;
+  try {
+    // Saving or testing is an explicit request, so nothing cached is trusted.
+    const found = await listOllamaModels(credential, {}, { force: true });
+    models = normalizeOllamaModels(found.models);
+    skipped = normalizeOllamaSkipped(found.skipped);
+    ignored = normalizeOllamaIgnored(found.ignored);
+  } catch (error) {
+    if (error?.message === OLLAMA_UNREACHABLE)
+      throw new BrokerError(
+        "PROVIDER_ERROR",
+        `Could not reach an Ollama server at ${credential.baseUrl}. Check that it is running and that the address is right (Ollama listens on port 11434; for another computer, start it with OLLAMA_HOST=0.0.0.0).`,
+      );
+    throw error;
+  }
+  if (!models.length)
+    throw new BrokerError(
+      "NOT_SUPPORTED",
+      skipped.length
+        ? `${where} lists ${skipped.length} model${skipped.length === 1 ? "" : "s"} but can run none of them. ${skipped[0].id}: ${skipped[0].reason}`
+        : cloud
+          ? "Ollama Cloud listed no chat models for this key."
+          : "The Ollama server has no chat models. Pull one (for example ollama pull qwen3-vl:2b) and try again.",
+    );
+  const requested = String(input.model ?? "")
+    .trim()
+    .slice(0, 200);
+  const unusable = skipped.find((item) => item.id === requested);
+  if (unusable)
+    throw new BrokerError(
+      "NOT_SUPPORTED",
+      `${requested} cannot be used. ${unusable.reason}`,
+    );
+  if (requested && !models.some((model) => model.id === requested))
+    throw new BrokerError(
+      "INVALID_REQUEST",
+      `${where} does not offer ${requested}. Choose a model from the list.`,
+    );
+  const model = models.find(
+    (item) =>
+      item.id === (requested || ollamaPreferredModel(models, previous?.model)),
+  );
+  return { credential, models, skipped, ignored, model };
+}
+
+// When each saved catalog was last read from its server, kept in memory: a
+// timestamp in storage would announce a state change on every refresh.
+const ollamaRefreshedAt = new Map();
+const ollamaRefreshing = new Map();
+function scheduleOllamaRefresh(cloud, stored) {
+  if (!stored?.baseUrl || (cloud && !stored.apiKey)) return;
+  const ttl = cloud ? OLLAMA_REFRESH_MS.cloud : OLLAMA_REFRESH_MS.local;
+  if (Date.now() - (ollamaRefreshedAt.get(cloud) ?? 0) < ttl) return;
+  if (ollamaRefreshing.has(cloud)) return;
+  ollamaRefreshedAt.set(cloud, Date.now());
+  const run = refreshOllama(cloud)
+    .catch(() => null)
+    .finally(() => ollamaRefreshing.delete(cloud));
+  ollamaRefreshing.set(cloud, run);
+}
+/**
+ * Re-read a saved server's catalog. A model the user pulled appears and a
+ * removed one disappears; a server that does not answer keeps its last catalog
+ * and says so. Nothing is written when nothing changed, or when the saved
+ * configuration moved while the read was in flight.
+ */
+async function refreshOllama(cloud, { force = false } = {}) {
+  const stored = await getOllama(cloud);
+  if (!stored) return null;
+  const credential = {
+    kind: "ollama",
+    cloud,
+    baseUrl: stored.baseUrl,
+    apiKey: stored.apiKey ?? null,
+  };
+  let next;
+  try {
+    const found = await listOllamaModels(credential, stored, { force });
+    const models = normalizeOllamaModels(found.models);
+    next = {
+      ...stored,
+      models,
+      skipped: normalizeOllamaSkipped(found.skipped),
+      ignored: normalizeOllamaIgnored(found.ignored),
+      model: models.some((model) => model.id === stored.model)
+        ? stored.model
+        : (ollamaPreferredModel(models, stored.model) ?? stored.model),
+      lastError: models.length
+        ? null
+        : "The server reported no chat models. Pull one, then refresh.",
+    };
+  } catch (error) {
+    next = {
+      ...stored,
+      lastError: `Could not refresh the model list: ${publicError(error).message}`,
+    };
+  }
+  ollamaRefreshedAt.set(cloud, Date.now());
+  const current = await getOllama(cloud);
+  if (
+    !current ||
+    current.baseUrl !== stored.baseUrl ||
+    current.apiKey !== stored.apiKey
+  )
+    return current;
+  if (stableJson(next) === stableJson(current)) return current;
+  await chrome.storage.local.set({ [ollamaKey(cloud)]: next });
+  if (next.model !== current.model) invalidate();
+  return next;
+}
+
+/**
+ * A turn that failed because the server could not load the model, or no
+ * longer has it, means the stored catalog is wrong about that model. Its
+ * cache stamp is cleared and a refresh queued, so the next read asks the
+ * server again and the settings card can show the server's reason.
+ */
+async function noteOllamaFailure(config, error) {
+  if (config?.kind !== "ollama") return;
+  const refused = error?.ollama;
+  if (!refused || !(refused.kind === "unloadable" || refused.status === 404))
+    return;
+  const cloud = config.cloud === true;
+  const stored = await getOllama(cloud);
+  if (!stored || stored.baseUrl !== config.baseUrl) return;
+  const models = (stored.models ?? []).map((model) =>
+    model.id === config.model ? { ...model, checkedWith: null } : model,
+  );
+  await chrome.storage.local.set({ [ollamaKey(cloud)]: { ...stored, models } });
+  ollamaRefreshedAt.delete(cloud);
+  scheduleOllamaRefresh(cloud, stored);
+}
+
+async function ollamaMethod(method, params) {
+  const cloud = ollamaTarget(params);
+  const key = ollamaKey(cloud);
+  const type = cloud ? OLLAMA_CLOUD_PROVIDER_ID : OLLAMA_PROVIDER_ID;
+  if (method === "ollama.get")
+    return ollamaSummary(cloud, await getOllama(cloud));
+  if (method === "ollama.refresh") {
+    ollamaRefreshedAt.delete(cloud);
+    await ollamaRefreshing.get(cloud);
+    // The visitor asked: re-read every model, so a reason shown after a
+    // failed turn is the server's current one, not a cached verdict.
+    return ollamaSummary(cloud, await refreshOllama(cloud, { force: true }));
+  }
+  if (method === "ollama.save") {
+    try {
+      const { credential, models, skipped, ignored, model } =
+        await ollamaDiscover(params, cloud);
+      const stored = {
+        baseUrl: credential.baseUrl,
+        apiKey: credential.apiKey,
+        model: model.id,
+        models,
+        skipped,
+        ignored,
+        lastError: null,
+      };
+      invalidate();
+      clearMcpSessions();
+      await chrome.storage.local.set({ [key]: stored });
+      ollamaRefreshedAt.set(cloud, Date.now());
+      if (!cloud) await syncOllamaOriginRule();
+      if (!(await getActive()).type) await setActive({ type });
+      void pushSync().catch(() => {});
+      return ollamaSummary(cloud, stored);
+    } finally {
+      if (!cloud) await setOllamaOriginRules([[OLLAMA_PROBE_RULE_ID, null]]);
+    }
+  }
+  if (method === "ollama.clear") {
+    invalidate();
+    clearMcpSessions();
+    await chrome.storage.local.remove(key);
+    ollamaRefreshedAt.delete(cloud);
+    if (!cloud) await syncOllamaOriginRule();
+    if ((await getActive()).type === type)
+      await chrome.storage.local.remove(STORAGE.active);
+    void pushSync().catch(() => {});
+    return true;
+  }
+  if (method === "ollama.test") {
+    try {
+      const { credential, models, skipped, ignored, model } =
+        await ollamaDiscover(params, cloud);
+      const config = ollamaConfig(credential, model);
+      // Small local models are slow to start and may think at length even
+      // when asked not to, so the probe allows room and accepts any sign of
+      // generation: text, a tool call, or reasoning cut off by the limit.
+      const probe = await generate(config, {
+        messages: [
+          {
+            role: "user",
+            content:
+              "Reply briefly to confirm the connection. Do not call tools.",
+          },
+        ],
+        ...(model.capabilities.tools
+          ? {
+              tools: [
+                {
+                  name: "connection_check",
+                  description: "A connection test placeholder. Do not call it.",
+                  inputSchema: {
+                    type: "object",
+                    properties: {},
+                    additionalProperties: false,
+                  },
+                },
+              ],
+            }
+          : {}),
+        ...(model.reasoningLevels.includes("none")
+          ? { reasoning: "none" }
+          : {}),
+        maxTokens: 2048,
+      });
+      if (
+        !probe.message.content.trim() &&
+        !probe.message.toolCalls.length &&
+        !probe.message.reasoning
+      )
+        throw new BrokerError(
+          "PROVIDER_ERROR",
+          "The model returned an empty response. Check the selected model.",
+        );
+      // A test of the saved server refreshes its stored catalog as well.
+      const saved = await getOllama(cloud);
+      if (
+        saved &&
+        saved.baseUrl === credential.baseUrl &&
+        (saved.apiKey ?? null) === credential.apiKey
+      ) {
+        const next = { ...saved, models, skipped, ignored, lastError: null };
+        if (stableJson(next) !== stableJson(saved))
+          await chrome.storage.local.set({ [key]: next });
+        ollamaRefreshedAt.set(cloud, Date.now());
+      }
+      return {
+        ok: true,
+        generationVerified: true,
+        model: model.id,
+        capabilities: model.capabilities,
+        modelCount: models.length,
+        visionModels: models.filter((item) => item.capabilities.vision).length,
+        skipped,
+        content: probe.message.content.slice(0, 300),
+        calledTool: probe.message.toolCalls.length > 0,
+        contextWindow: probe.contextWindow ?? null,
+      };
+    } finally {
+      if (!cloud) await setOllamaOriginRules([[OLLAMA_PROBE_RULE_ID, null]]);
+    }
+  }
+  throw new BrokerError("NOT_SUPPORTED", "Unknown extension operation.");
+}
 async function getGrant(origin) {
   await grantQueue;
   return (
@@ -1918,6 +3310,22 @@ function approveGrant(origin, request, resources, binding, params = {}) {
     };
     const merge = (key, items) =>
       [...new Set([...(previous.resources?.[key] ?? []), ...items])].slice(-32);
+    // A request that carries `require` replaces the stored one; one without
+    // keeps it. The site model then has to qualify, and stays pinned.
+    const constraint = Object.hasOwn(request, "require")
+      ? requireOrNull(request.require)
+      : requireOrNull(previous.require ?? null);
+    let model = Object.hasOwn(choices, "model")
+      ? choices.model
+      : (previous.model ?? null);
+    if (constraint)
+      model = acceptedPin(
+        constraint,
+        catalog,
+        Object.hasOwn(choices, "model")
+          ? (params.model ?? null)
+          : (previous.model ?? null),
+      );
     const grant = {
       origin,
       capabilities: [
@@ -1925,9 +3333,8 @@ function approveGrant(origin, request, resources, binding, params = {}) {
       ],
       context: [...new Set([...previous.context, ...request.context])],
       grantedAt: new Date().toISOString(),
-      model: Object.hasOwn(choices, "model")
-        ? choices.model
-        : (previous.model ?? null),
+      require: constraint,
+      model,
       reasoning: Object.hasOwn(choices, "reasoning")
         ? choices.reasoning
         : (previous.reasoning ?? null),
@@ -1937,6 +3344,14 @@ function approveGrant(origin, request, resources, binding, params = {}) {
       providerIdsVersion: Object.hasOwn(choices, "providers")
         ? 2
         : previous.providerIdsVersion,
+      // Who composes the site's level 1 or 2 rounds (SPEC 15.3): recorded with
+      // the request that asked for model access, so a different one asks again.
+      composer: request.capabilities.includes("models.generate")
+        ? (request.composer ?? "webapp")
+        : (previous.composer ?? null),
+      siteModel: Object.hasOwn(choices, "siteModel")
+        ? choices.siteModel
+        : (previous.siteModel ?? null),
       resources: {
         mcpOrigins: merge("mcpOrigins", resources.mcpOrigins),
         contractFingerprints: merge(
@@ -2005,11 +3420,16 @@ async function fingerprint(value) {
 function revokeGrant(origin) {
   invalidate((turn) => turn.binding.origin === origin);
   clearMcpSessions(origin);
+  endDesktopThreads((owner) => owner === origin);
+  // Queued after any write a just-aborted round already queued, and the
+  // abort above stops one that was not queued yet (SPEC 5.4).
+  const cleared = providerState.clearOrigin(origin);
   return mutateGrants(async () => {
     const stored =
       (await chrome.storage.local.get(STORAGE.grants)).grants ?? {};
     delete stored[origin];
     await chrome.storage.local.set({ [STORAGE.grants]: stored });
+    await cleared;
     return true;
   });
 }
@@ -2026,11 +3446,38 @@ async function requireCapabilities(origin, capabilities) {
     );
   return grant;
 }
+/**
+ * The grant behind the extension's own panel: a hosted-chat grant, or, for a
+ * hosted external loop (SPEC 15.1), a level 1 or 2 grant that approved this
+ * very contract. Anything else needs consent first.
+ */
+async function panelGrant(origin, contractFingerprint) {
+  const grant = await getGrant(origin);
+  if (
+    grant?.capabilities.includes("models.generate") &&
+    typeof contractFingerprint === "string" &&
+    grant.resources?.contractFingerprints?.includes(contractFingerprint)
+  )
+    return grant;
+  return requireCapabilities(origin, ["chat.hosted"]);
+}
 function chatHistory(input) {
   if (!Array.isArray(input) || !input.length)
     throw new BrokerError("INVALID_REQUEST", "Chat history is invalid.");
   const recent = input.slice(-LIMITS.historyMessages).map((item) => {
     if (!item || !["user", "assistant"].includes(item.role))
+      throw new BrokerError("INVALID_REQUEST", "Chat history is invalid.");
+    // History keeps its own 12,000-unit bound per text part (SPEC 5.3), which
+    // is smaller than a model's `messageUnits`, so it is applied here.
+    if (
+      Array.isArray(item.content) &&
+      item.content.some(
+        (part) =>
+          part?.type === "text" &&
+          typeof part.text === "string" &&
+          part.text.length > LIMITS.messageChars,
+      )
+    )
       throw new BrokerError("INVALID_REQUEST", "Chat history is invalid.");
     return {
       role: item.role,
@@ -2070,6 +3517,89 @@ function emit(turn, event) {
     /* the document may be gone */
   }
 }
+/**
+ * A page's own round stream (SPEC 5.3, 10): the answer and reasoning deltas
+ * of one direct `models.generate` the page asked to stream, and a `stalled`
+ * notice after a quiet stretch. Only those two texts cross, coalesced and held
+ * to the result's bounds; tool calls, agent commands, phases, and usage stay
+ * here, and the result the request answers with is the authoritative one.
+ * Messages go to the requesting document's content script under its session
+ * and the bridge id it forwarded, which it checks before posting to the page.
+ */
+function roundStream(turn) {
+  const { tabId, session } = turn.binding;
+  const request = turn.requestId;
+  let delivered = Promise.resolve();
+  let open = true;
+  let stallTimer = 0;
+  const send = (event) => {
+    if (!open) return;
+    // Chained, so the content script receives them in order, and awaited at
+    // the end, so none is still on its way when the answer is.
+    delivered = delivered.then(async () => {
+      try {
+        await chrome.tabs.sendMessage(
+          tabId,
+          { kind: "arjunah-round", session, request, event },
+          { frameId: 0 },
+        );
+      } catch {
+        /* the document may be gone */
+      }
+    });
+  };
+  // Re-armed by every sign of life from the provider, as hosted chat's
+  // `model.stalled` is (SPEC 10), and repeated while the silence lasts.
+  const armStall = () => {
+    clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => {
+      send({ type: "stalled" });
+      armStall();
+    }, LIMITS.stallNoticeMs);
+  };
+  const batch = roundBatcher(
+    (item) =>
+      send({
+        type: item.type === "output_delta" ? "output.delta" : "reasoning.delta",
+        text: item.text,
+      }),
+    {
+      output_delta: LIMITS.answerChars,
+      reasoning_delta: LIMITS.reasoningChars,
+    },
+  );
+  armStall();
+  return {
+    progress: {
+      // The companion keys a run's live activity by this id (SPEC 12.3.1).
+      id: `round-${crypto.randomUUID()}`,
+      onItem(item) {
+        if (!open) return;
+        armStall();
+        if (item?.type === "output_delta" || item?.type === "reasoning_delta")
+          batch.push(item.type, item.text);
+      },
+    },
+    /** Ends the stream; `deliver` false drops what is still batched. */
+    async close(deliver) {
+      if (!open) return;
+      clearTimeout(stallTimer);
+      if (!deliver) open = false;
+      batch.flush();
+      open = false;
+      // Bounded, so a content script that never answers cannot hold the
+      // result back.
+      let timer = 0;
+      await Promise.race([
+        delivered,
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, 2000);
+        }),
+      ]);
+      clearTimeout(timer);
+    },
+  };
+}
 function stripRaw(result) {
   const {
     rawMessage: _raw,
@@ -2078,6 +3608,7 @@ function stripRaw(result) {
     quota: _quota,
     rejectedToolCalls: _rejected,
     droppedToolCalls: _dropped,
+    processor: _processor,
     ...publicResult
   } = result;
   return publicResult;
@@ -2125,6 +3656,10 @@ async function discoverTools(manifest, origin, turn, required, resources) {
       originalName: tool.name,
       inputSchema: tool.inputSchema,
       outputContent: route.type === "site" ? tool.outputContent : [],
+      // Only contract-declared tools carry these (SPEC 7.8); a discovered
+      // tool's metadata cannot ask for either.
+      requiresApproval: tool.requiresApproval === true,
+      userInputs: route.type === "mcp" ? (tool.userInputs ?? []) : [],
     });
     disclosure.push({
       source: route.type === "site" ? "Site" : route.server.url,
@@ -2180,7 +3715,11 @@ async function hostedChat(
   // One id per card in this turn (SPEC 7.4), so a later card cannot claim a
   // live id and make a card action update the wrong card.
   const cardIds = new Set();
-  ensureConfigured(config);
+  // A round the site's own model answers (SPEC 15.2) has no provider behind
+  // it: no credential, no ledger, and usage only when the site reports it.
+  const siteAnswers = config.kind === "site";
+  if (!siteAnswers) ensureConfigured(config);
+  let usageReported = !siteAnswers;
   const messages = [
     {
       role: "system",
@@ -2224,6 +3763,10 @@ async function hostedChat(
     messages.push(...history.slice(untrusted));
   } else messages.push(...history);
   const tools = config.capabilities?.tools === false ? [] : item.tools;
+  // Provider state behind each assistant message this turn added, by its
+  // index in `messages`, sent back with it on every later round (SPEC 5.4).
+  // The turn lives here, so nothing of it is stored.
+  const continuation = new Map();
   // A turn is one ledger request no matter how many tool rounds it takes, but
   // tokens already spent still count when a later round fails or is cancelled.
   let recorded = false;
@@ -2250,17 +3793,22 @@ async function hostedChat(
   };
   const settle = async (result) => {
     recorded = true;
-    const completed = { ...result, usage: turnUsage };
-    await recordUsage(config, completed);
+    const completed = { ...result, usage: usageReported ? turnUsage : null };
+    if (!siteAnswers) await recordUsage(config, completed);
     return completed;
   };
+  // The tool names this turn offers, which a site model's calls must name.
+  const offered = new Set(tools.map((tool) => tool.name));
   try {
     for (let round = 0; round <= LIMITS.toolRounds; round++) {
       await guard(turn, required, item.resources);
       emit(turn, {
         type: "model.start",
         round,
-        model: `${config.catalogProviderId ?? config.providerId}/${config.model}`,
+        // A site model is named by its own id, which is the picker's.
+        model: siteAnswers
+          ? config.model
+          : `${config.catalogProviderId ?? config.providerId}/${config.model}`,
       });
       const roundStartedAt = Date.now();
       logEvent(
@@ -2291,36 +3839,58 @@ async function hostedChat(
       );
       let result;
       try {
-        result = await generate(
-          config,
-          {
-            messages,
-            tools,
-            ...(options.reasoning ? { reasoning: options.reasoning } : {}),
-          },
-          turn.controller.signal,
-          true,
-          {
-            thread: options.conversationId ?? null,
-            progress: turn.progress
-              ? {
-                  id: `${turn.progress}-${round}`.slice(0, 100),
-                  onItem: (step) => {
-                    armStall(round);
-                    if (step.type === "command" && step.phase === "end")
-                      liveSteps++;
-                    if (step.type === "phase")
-                      logEvent(
-                        "debug",
-                        config.providerId ?? "desktop",
-                        step.text,
-                      );
-                    activity.push(step);
-                  },
-                }
-              : null,
-          },
-        );
+        const roundRequest = {
+          messages,
+          tools,
+          ...(options.reasoning ? { reasoning: options.reasoning } : {}),
+        };
+        if (siteAnswers) {
+          // The composed request is held to the section 5.3 bounds and the
+          // model's declared capabilities before it reaches page code.
+          const valid = validateGenerateRequest(roundRequest);
+          if (hasImages(valid.messages) && !config.capabilities.vision)
+            throw new BrokerError(
+              "NOT_SUPPORTED",
+              "The site's model does not accept images.",
+            );
+          result = await siteRound(
+            turn,
+            config,
+            cloneJson(roundRequest, "Generation request", LIMITS.requestBytes),
+            offered,
+          );
+          if (result.usage) usageReported = true;
+        } else
+          result = await generate(
+            config,
+            roundRequest,
+            turn.controller.signal,
+            true,
+            {
+              continuation,
+              thread: options.conversationId ?? null,
+              progress: turn.progress
+                ? {
+                    id: `${turn.progress}-${round}`.slice(0, 100),
+                    onItem: (step) => {
+                      armStall(round);
+                      if (step.type === "command" && step.phase === "end")
+                        liveSteps++;
+                      if (step.type === "phase")
+                        logEvent(
+                          "debug",
+                          config.providerId ?? "desktop",
+                          step.text,
+                        );
+                      activity.push(step);
+                    },
+                  }
+                : null,
+            },
+          );
+      } catch (error) {
+        void noteOllamaFailure(config, error).catch(() => {});
+        throw error;
       } finally {
         activity.flush();
       }
@@ -2335,6 +3905,11 @@ async function hostedChat(
         round,
         usage: result.usage,
         toolCalls: result.message.toolCalls.length,
+        // A self-hosted model's placement and loaded context, so the widget
+        // shows them from the first round rather than only once the turn ends.
+        ...(result.processor
+          ? { processor: result.processor, contextWindow: result.contextWindow }
+          : {}),
       });
       logEvent(
         "info",
@@ -2365,10 +3940,13 @@ async function hostedChat(
           // for them only an explicit final-request measurement is valid.
           contextTokens:
             completed.contextTokens ??
-            (completed.thread ? null : completed.usage.promptTokens),
+            (completed.thread ? null : (result.usage?.promptTokens ?? null)),
           contextCachedTokens:
             completed.contextCachedTokens ??
-            (completed.thread ? null : completed.usage.cachedTokens),
+            (completed.thread ? null : (result.usage?.cachedTokens ?? null)),
+          // Hosted results reach only the broker's own widget, never page
+          // code, so where the model runs can be shown there.
+          ...(completed.processor ? { processor: completed.processor } : {}),
         };
       }
       if (round === LIMITS.toolRounds)
@@ -2376,6 +3954,8 @@ async function hostedChat(
           "TOOL_ERROR",
           "The assistant exceeded the tool-call limit.",
         );
+      if (result.rawMessage.state)
+        continuation.set(messages.length, result.rawMessage.state);
       messages.push({
         role: "assistant",
         content: result.message.content,
@@ -2443,6 +4023,41 @@ async function hostedChat(
           }
           validateArguments(args, route.inputSchema);
           await guard(turn, required, item.resources);
+          // The visitor confirms the call before it runs (SPEC 7.8).
+          if (route.requiresApproval) {
+            const approved = await askApproval(turn, {
+              toolId: call.id,
+              toolName: route.originalName,
+              summary:
+                route.type === "site"
+                  ? `${item.manifest.name} wants to run this tool on this page.`
+                  : `${item.manifest.name} wants to run this tool on ${route.server.name}.`,
+              target: route.type === "site" ? null : route.server.name,
+              detail: approvalDetail(args),
+            });
+            await guard(turn, required, item.resources);
+            if (!approved) throw new BrokerError("TOOL_ERROR", NOT_APPROVED);
+          }
+          // A declared remote tool's collected inputs go to its server in
+          // `_meta`, never into arguments, messages, history, or the log.
+          let inputs = null;
+          if (route.type === "mcp" && route.userInputs.length) {
+            inputs = {};
+            for (const definition of route.userInputs) {
+              inputs[definition.id] = await askInput(turn, {
+                toolName: route.originalName,
+                definition,
+                recipient: new URL(route.server.url).origin,
+              });
+              await guard(turn, required, item.resources);
+            }
+          }
+          const meta = {
+            ...(options.conversationId
+              ? { conversationId: options.conversationId }
+              : {}),
+            ...(inputs ? { inputs } : {}),
+          };
           output =
             route.type === "site"
               ? await invokeSiteTool(
@@ -2456,10 +4071,9 @@ async function hostedChat(
                   route.originalName,
                   args,
                   turn.controller.signal,
-                  options.conversationId
-                    ? { arjunah: { conversationId: options.conversationId } }
-                    : undefined,
+                  Object.keys(meta).length ? { arjunah: meta } : undefined,
                 );
+          inputs = null;
           output =
             route.type === "site"
               ? validateSiteToolResult(output, route.outputContent, cardIds)
@@ -2537,6 +4151,7 @@ async function hostedChat(
   } finally {
     clearTimeout(stallTimer);
     if (
+      !siteAnswers &&
       !recorded &&
       lastResult &&
       turnUsage.totalTokens + turnUsage.promptTokens

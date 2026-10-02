@@ -68,11 +68,49 @@ export interface WidgetOptions {
   defaultModel?: string;
 }
 
-export interface BackendOptions {
+/** A server answers the SPEC 14.4 routes. */
+export interface ServerBackendOptions {
   /** Same-origin or HTTPS. Routes in SPEC 14.4 are resolved against it. */
   baseUrl: string;
   headers?: Record<string, string>;
   credentials?: RequestCredentials;
+  fetch?: never;
+}
+
+/** What the widget passes to `backend.fetch`. */
+export interface PageBackendInit {
+  method: "GET" | "POST" | "PATCH" | "DELETE";
+  /** `{ "Content-Type": "application/json" }` when there is a body. */
+  headers: Record<string, string>;
+  /** A JSON string, on routes that carry one. */
+  body?: string;
+  /** Present on the turn POST; aborted when the visitor stops the turn. */
+  signal?: AbortSignal;
+}
+
+/**
+ * The page answers the SPEC 14.4 routes itself (SPEC 14.1, SPEC 15 mode 5),
+ * and the widget makes no network request. `path` is relative to the routes,
+ * such as `"threads"` or `"threads/t1/turns/u1/tool-results"`. Non-2xx is a
+ * rejection; a turn answers with a `text/event-stream` body (see
+ * `eventStreamResponse`). Every SPEC 14.6 bound applies to the answer: a
+ * stream read incrementally up to 2,000,000 bytes, JSON up to 1,000,000,
+ * body chunks that must be bytes, and malformed data rejected.
+ */
+export interface PageBackendOptions {
+  fetch(path: string, init: PageBackendInit): Promise<Response> | Response;
+  baseUrl?: never;
+  headers?: never;
+  credentials?: never;
+}
+
+/** Exactly one of `baseUrl` and `fetch`. */
+export type BackendOptions = ServerBackendOptions | PageBackendOptions;
+
+/** One SPEC 14.3 event: `type` is the SSE event name, the rest its data. */
+export interface TurnStreamEvent {
+  type: string;
+  [field: string]: unknown;
 }
 
 /** A value the model must not supply or see (SPEC 7.3). */
@@ -115,6 +153,38 @@ export interface ClientTool {
   ): unknown;
 }
 
+/** A section 5.3 request, as the backend composed it. Passed on unchanged. */
+export type GenerateRequest = Record<string, JSONValue>;
+/** A section 5.3 result. */
+export type GenerateResult = Record<string, JSONValue>;
+
+/** What `enable()` is asked for in bridged mode (SPEC section 4). */
+export interface BridgeAccessRequest {
+  level?: "completion" | "catalog";
+  context?: Array<"title" | "url" | "selection" | "text">;
+  reason?: string;
+  /**
+   * Who writes the prompts, for the extension's consent wording. Defaults to
+   * "server" with `backend.baseUrl` and "webapp" with `backend.fetch`; pass
+   * "server" when that function forwards to your server.
+   */
+  composer?: "server" | "webapp";
+}
+
+/**
+ * Bridged mode (SPEC 14.7): the backend runs the loop and the page answers
+ * each `model.client` completion. With `arjunah` the widget holds a level 1
+ * or 2 session on the visitor's extension, asked for on the first send;
+ * `generate` answers completions some other way and wins when both are given.
+ */
+export interface BridgeOptions {
+  arjunah?: true | BridgeAccessRequest;
+  generate?(
+    request: GenerateRequest,
+    options: { signal: AbortSignal },
+  ): Promise<GenerateResult>;
+}
+
 export interface TurnEvent {
   threadId: string | null;
   turnId: string | null;
@@ -133,6 +203,8 @@ export interface MountConfig {
   tools?: ClientTool[];
   /** Present enables `@` mentions in the composer (SPEC 8.3). */
   entities?: EntitiesConfig;
+  /** Relay the backend's completions through the page (SPEC 14.7). */
+  bridge?: BridgeOptions;
   /** Show the image attach control. Default false. */
   vision?: boolean;
   /** Set false when the backend has no PATCH route for thread titles. */
@@ -165,12 +237,24 @@ export interface MountedAssistant {
   setControls(
     values: Record<string, boolean | string>,
   ): Record<string, boolean | string>;
-  /** Replace the catalog, for example once the site has loaded it. */
+  /**
+   * Replace the catalog, for example once the site has loaded it. Ignored
+   * with `bridge.arjunah`, where the catalog is the visitor's.
+   */
   setModels(models: ModelOption[], selected?: string): string | null;
+  /** Aborts the running turn, its relayed completions and open prompts. */
   destroy(): void;
 }
 
 export function mountAssistant(config: MountConfig): MountedAssistant;
+/**
+ * A `text/event-stream` `Response` for `backend.fetch`, one SSE event per
+ * item. Pulled one event at a time; the iterator's `return()` runs when the
+ * widget stops reading.
+ */
+export function eventStreamResponse(
+  events: AsyncIterable<TurnStreamEvent> | Iterable<TurnStreamEvent>,
+): Response;
 export function validateCard(card: unknown, name?: string): unknown;
 export const ArjunahRenderer: unknown;
 export const PROTOCOL_VERSION: string;

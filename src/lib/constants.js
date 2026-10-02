@@ -34,15 +34,50 @@ export const IMAGE_TYPES = Object.freeze([
   "image/webp",
   "image/gif",
 ]);
+/**
+ * The bounds of one `models.generate` request (SPEC 5.3), the one table both
+ * validation and `models.list()` read: what a page is told is what it is held
+ * to. Names carry their unit: `Units` are UTF-16 code units, `Bytes` UTF-8
+ * bytes, and `messageUnits` covers a message's text as a whole, whether it is
+ * one string or several text parts.
+ */
+export const GENERATE_LIMITS = Object.freeze({
+  messages: 400,
+  messageUnits: 180_000,
+  tools: 128,
+  toolDescriptionUnits: 2_000,
+  toolCallsPerMessage: 32,
+  toolArgumentUnits: 65_536,
+  schemaBytes: 32_768,
+  schemaDepth: 16,
+  requestBytes: 12_000_000,
+  maxTokens: 32_768,
+  timeoutMs: 180_000,
+});
+/**
+ * The desktop companion refuses more than 300 messages and keeps only the
+ * first 64 tools and 500 characters of each description (`validateGenerate`
+ * in desktop/lib/server.mjs). Its models report that, so a page sized to them
+ * is refused here, with a reason, rather than cut short there in silence.
+ */
+const DESKTOP_GENERATE_LIMITS = Object.freeze({
+  ...GENERATE_LIMITS,
+  messages: 300,
+  tools: 64,
+  toolDescriptionUnits: 500,
+});
+/** The generate bounds for one model; `desktop` for a companion-run agent. */
+export function generateLimits(desktop = false) {
+  return desktop ? DESKTOP_GENERATE_LIMITS : GENERATE_LIMITS;
+}
 export const LIMITS = Object.freeze({
-  messages: 100,
+  // Hosted-chat history and site tool result text keep their own, smaller
+  // per-message bound; a page's own requests are sized by GENERATE_LIMITS.
   messageChars: 12_000,
-  internalMessageChars: 180_000,
-  internalMessages: 400,
   contentParts: 8,
   imagesPerMessage: 4,
   imageChars: 2_000_000,
-  requestBytes: 12_000_000,
+  requestBytes: GENERATE_LIMITS.requestBytes,
   providerResponseBytes: 2_000_000,
   // A streamed response has no total cap, since every token carries its own
   // JSON envelope. Each event is parsed and dropped, so only one event is ever
@@ -53,8 +88,9 @@ export const LIMITS = Object.freeze({
   reasoningBatchMs: 250,
   reasoningBatchChars: 4_000,
   mcpResponseBytes: 1_000_000,
-  schemaBytes: 32_768,
-  toolCalls: 32,
+  schemaBytes: GENERATE_LIMITS.schemaBytes,
+  toolCalls: GENERATE_LIMITS.toolCallsPerMessage,
+  toolArgumentUnits: GENERATE_LIMITS.toolArgumentUnits,
   timeoutMs: 30_000,
   // A model that is still thinking is not a failed request, so a generation
   // round has no deadline of its own. After this much silence the visitor is
@@ -66,13 +102,16 @@ export const LIMITS = Object.freeze({
   // (src/page-api.js), so past it nobody is waiting for the answer. A hosted
   // chat is different: it has a visitor, a stall notice, and a stop button, so
   // it stays unbounded. This bounds only the direct call whose caller is gone.
-  directGenerateMs: 180_000,
+  directGenerateMs: GENERATE_LIMITS.timeoutMs,
   desktopTimeoutMs: 180_000,
   preparedMs: 300_000,
   contextText: 20_000,
   selection: 4_000,
   systemPrompt: 12_000,
+  // A hosted assistant's whole tool set (site, declared, and discovered MCP
+  // tools together), and the description bound its contract applies.
   tools: 64,
+  toolDescriptionChars: 500,
   siteTools: 32,
   toolUserInputs: 8,
   toolUserInputChars: 4_096,
@@ -82,11 +121,18 @@ export const LIMITS = Object.freeze({
   resultBytes: 64 * 1024,
   // Gemini thought signatures run ~900 chars; leave generous headroom.
   signatureChars: 8_000,
+  // The provider state one assistant message may carry into a later round
+  // (SPEC 5.4), serialized: signed thinking, thought signatures, encrypted
+  // reasoning. Larger state is not kept, since a cut copy cannot be replayed.
+  providerStateBytes: 2_000_000,
   toolRounds: 100,
   historyMessages: 40,
   widgetControls: 8,
   widgetSuggestions: 6,
   reasoningChars: 12_000,
+  // A result's answer text. A page's round stream (SPEC 5.3) is held to this
+  // and to `reasoningChars`, so its deltas never carry more than the result.
+  answerChars: 120_000,
   // Transcript cards (SPEC 7.4).
   cardNodes: 200,
   cardDepth: 6,
@@ -108,4 +154,8 @@ export const LIMITS = Object.freeze({
   stepPreview: 2_000,
   // Declared remote tools (SPEC 7.7).
   declaredMcpTools: 64,
+  // The site's own models (SPEC 15.2).
+  siteModels: 8,
+  // How long the visitor has to answer an approval prompt (SPEC 7.8).
+  approvalTimeoutMs: 120_000,
 });

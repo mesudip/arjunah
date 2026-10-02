@@ -3,6 +3,7 @@ import {
   CAPABILITIES,
   CONTEXT_FIELDS,
   EFFORTS,
+  GENERATE_LIMITS,
   IMAGE_TYPES,
   LEVELS,
   LIMITS,
@@ -97,21 +98,89 @@ export function validateAccessRequest(input) {
   }
   if (context.length && !capabilities.includes("context.read"))
     invalid("context fields require context.read.");
+  const constraint = validateRequire(input.require);
+  if (
+    constraint !== undefined &&
+    !capabilities.includes("models.list") &&
+    !capabilities.includes("models.generate")
+  )
+    invalid("require applies only to model access (level 1 or 2).", {
+      field: "require",
+    });
+  // Who composes the site's level 1 or 2 rounds (SPEC 15.3). It changes only
+  // what consent says, so it is checked rather than trusted to be meaningful.
+  if (input.composer != null && !COMPOSERS.includes(input.composer))
+    invalid('composer must be "webapp" or "server".', { field: "composer" });
   return {
     capabilities,
     context,
     reason: boundedString(input.reason, "reason", 280),
+    ...(constraint !== undefined ? { require: constraint } : {}),
+    ...(input.composer != null ? { composer: input.composer } : {}),
   };
+}
+
+/** The composers a page may name (SPEC 15.3); the extension is never one. */
+export const COMPOSERS = Object.freeze(["webapp", "server"]);
+
+const REQUIRE_KINDS = Object.freeze(["api-key", "subscription", "self-hosted"]);
+
+/**
+ * A site's constraint on which of the visitor's models may answer it (SPEC
+ * 4): `{ kinds?, local?: true, builtinTools?: false }`. Returns the normalized
+ * object (kinds sorted, absent members left out; `{}` means no constraint),
+ * or `undefined` when the request carries none. Every member and value is
+ * checked: a constraint the extension silently ignored would promise the site
+ * something it does not enforce.
+ */
+export function validateRequire(input) {
+  if (input === undefined || input === null) return undefined;
+  const fail = (message) => invalid(message, { field: "require" });
+  if (!plainObject(input)) fail("require must be an object.");
+  const known = ["kinds", "local", "builtinTools"];
+  if (Object.keys(input).some((key) => !known.includes(key)))
+    fail("require has an unknown member.");
+  const result = {};
+  if (input.kinds !== undefined) {
+    if (
+      !Array.isArray(input.kinds) ||
+      !input.kinds.length ||
+      new Set(input.kinds).size !== input.kinds.length ||
+      input.kinds.some((kind) => !REQUIRE_KINDS.includes(kind))
+    )
+      fail(
+        `require.kinds must be a non-empty list of unique values from ${REQUIRE_KINDS.join(", ")}.`,
+      );
+    result.kinds = REQUIRE_KINDS.filter((kind) => input.kinds.includes(kind));
+  }
+  if (input.local !== undefined) {
+    if (input.local !== true) fail("require.local can only be true.");
+    result.local = true;
+  }
+  if (input.builtinTools !== undefined) {
+    if (input.builtinTools !== false)
+      fail("require.builtinTools can only be false.");
+    result.builtinTools = false;
+  }
+  return result;
+}
+
+/** The stored form: `null` when nothing is required. */
+export function requireOrNull(value) {
+  return value && Object.keys(value).length ? value : null;
 }
 
 /**
  * User message content may be a string or bounded text/image parts. Parts are
  * kept in the public shape; provider adapters convert them to wire formats.
+ * `maxChars` bounds each text part; `totalChars`, when given, bounds the text
+ * parts together, which is how a message's text is one budget however it is
+ * split (a desktop agent receives the parts joined into one string).
  */
-function validateContent(content, name, maxChars) {
+function validateContent(content, name, maxChars, totalChars = Infinity) {
   if (content == null) return "";
   if (typeof content === "string")
-    return boundedString(content, name, maxChars);
+    return boundedString(content, name, Math.min(maxChars, totalChars));
   if (
     !Array.isArray(content) ||
     !content.length ||
@@ -121,15 +190,20 @@ function validateContent(content, name, maxChars) {
       field: name,
     });
   let images = 0;
+  let text = 0;
   return content.map((part, index) => {
     if (!plainObject(part)) invalid(`${name}[${index}] must be an object.`);
-    if (part.type === "text")
-      return {
-        type: "text",
-        text:
-          boundedString(part.text ?? "", `${name}[${index}].text`, maxChars) ??
-          "",
-      };
+    if (part.type === "text") {
+      const value =
+        boundedString(part.text ?? "", `${name}[${index}].text`, maxChars) ??
+        "";
+      if ((text += value.length) > totalChars)
+        invalid(
+          `${name} text parts must total no more than ${totalChars} characters.`,
+          { field: name },
+        );
+      return { type: "text", text: value };
+    }
     if (part.type === "image") {
       if (++images > LIMITS.imagesPerMessage)
         invalid(
@@ -218,13 +292,19 @@ export function contentText(content) {
     .join("\n");
 }
 
-export function validateMessages(messages, internal = false) {
+/**
+ * One bound for every message, whoever wrote it: a page's own request and the
+ * broker's hosted rounds are validated against the same model's `limits`.
+ */
+export function validateMessages(messages, limits = GENERATE_LIMITS) {
   if (
     !Array.isArray(messages) ||
     messages.length < 1 ||
-    messages.length > (internal ? LIMITS.internalMessages : LIMITS.messages)
+    messages.length > limits.messages
   ) {
-    invalid(`messages must contain 1 to ${LIMITS.messages} items.`);
+    invalid(`messages must contain 1 to ${limits.messages} items.`, {
+      field: "messages",
+    });
   }
   return messages.map((message, index) => {
     if (
@@ -233,9 +313,7 @@ export function validateMessages(messages, internal = false) {
     ) {
       invalid(`messages[${index}] has an invalid role.`);
     }
-    const maxChars = internal
-      ? LIMITS.internalMessageChars
-      : LIMITS.messageChars;
+    const maxChars = limits.messageUnits;
     if (message.role !== "user" && Array.isArray(message.content))
       invalid(
         `messages[${index}] may use content parts only for user messages.`,
@@ -245,6 +323,7 @@ export function validateMessages(messages, internal = false) {
       content: validateContent(
         message.content,
         `messages[${index}].content`,
+        maxChars,
         maxChars,
       ),
     };
@@ -263,7 +342,7 @@ export function validateMessages(messages, internal = false) {
         true,
       );
     if (message.toolCalls != null)
-      result.tool_calls = validateToolCalls(message.toolCalls);
+      result.tool_calls = validateToolCalls(message.toolCalls, limits);
     if (message.role === "tool" && !result.tool_call_id)
       invalid("Tool messages require toolCallId.");
     if (message.toolCalls != null && message.role !== "assistant")
@@ -375,10 +454,18 @@ function validateToolUserInputs(inputs, inputSchema, toolIndex) {
   });
 }
 
+/**
+ * `allowUserInputs` names who declares the tools: `true` for site tools
+ * (collected inputs, output kinds, approvals), `"remote"` for a declared
+ * remote tool (SPEC 7.7, 7.8: collected inputs and approvals, never output
+ * kinds), and `false` for a page's own request, where neither exists.
+ */
 export function validateTools(
   tools,
   limit = LIMITS.tools,
   allowUserInputs = false,
+  descriptionChars = LIMITS.toolDescriptionChars,
+  schemaBytes = LIMITS.schemaBytes,
 ) {
   if (tools == null) return [];
   if (!Array.isArray(tools) || tools.length > limit)
@@ -397,12 +484,12 @@ export function validateTools(
       cloneJson(
         tool.inputSchema ?? { type: "object" },
         `tools[${index}].inputSchema`,
-        LIMITS.schemaBytes,
+        schemaBytes,
       ),
     );
     if (!allowUserInputs && tool.userInputs != null)
       invalid(
-        `tools[${index}].userInputs is supported only for registered site tools.`,
+        `tools[${index}].userInputs is supported only for registered site tools and declared remote tools.`,
       );
     const result = {
       name: tool.name,
@@ -410,17 +497,40 @@ export function validateTools(
         boundedString(
           tool.description ?? "",
           `tools[${index}].description`,
-          500,
+          descriptionChars,
         ) ?? "",
       inputSchema,
     };
-    if (allowUserInputs)
+    if (allowUserInputs === true)
       result.userInputs = validateToolUserInputs(
         tool.userInputs,
         inputSchema,
         index,
       );
+    else if (allowUserInputs === "remote") {
+      // Only present when declared, so contracts that declare none keep the
+      // fingerprint they were approved under.
+      const inputs = validateToolUserInputs(
+        tool.userInputs,
+        inputSchema,
+        index,
+      );
+      if (inputs.length) result.userInputs = inputs;
+    }
+    // The visitor confirms the call before it runs (SPEC 7.8). Part of the
+    // fingerprinted contract, so a site cannot drop it after consent.
     if (allowUserInputs) {
+      if (
+        tool.requiresApproval != null &&
+        typeof tool.requiresApproval !== "boolean"
+      )
+        invalid(`tools[${index}].requiresApproval must be a boolean.`, {
+          field: `tools[${index}].requiresApproval`,
+        });
+      // Recorded only when set, for the same reason as remote userInputs.
+      if (tool.requiresApproval === true) result.requiresApproval = true;
+    }
+    if (allowUserInputs === true) {
       const outputContent = tool.outputContent ?? [];
       if (
         !Array.isArray(outputContent) ||
@@ -441,11 +551,41 @@ export function validateTools(
   });
 }
 
-export function validateGenerateRequest(input, internal = false) {
+/**
+ * `toolChoice` (SPEC 5.3): `"auto"`, `"none"`, `"required"`, or `{ name }`
+ * naming one of the request's own tools. It needs `tools`, because each wire
+ * format expresses it as a constraint on the declared list.
+ */
+function validateToolChoice(input, tools) {
+  const fail = (message) => invalid(message, { field: "toolChoice" });
+  if (!tools.length) fail("toolChoice requires tools.");
+  if (typeof input === "string") {
+    if (!["auto", "none", "required"].includes(input))
+      fail('toolChoice must be "auto", "none", "required", or { name }.');
+    return input;
+  }
+  if (!plainObject(input) || typeof input.name !== "string")
+    fail('toolChoice must be "auto", "none", "required", or { name }.');
+  if (!tools.some((tool) => tool.name === input.name))
+    fail("toolChoice.name must be one of the request's tools.");
+  return { name: input.name };
+}
+
+/**
+ * `limits` is the answering model's entry in `models.list()` (SPEC 5.2), so a
+ * request is held to exactly the numbers the page was shown.
+ */
+export function validateGenerateRequest(input, limits = GENERATE_LIMITS) {
   if (!plainObject(input)) invalid("Generation request must be an object.");
   const output = {
-    messages: validateMessages(input.messages, internal),
-    tools: validateTools(input.tools),
+    messages: validateMessages(input.messages, limits),
+    tools: validateTools(
+      input.tools,
+      limits.tools,
+      false,
+      limits.toolDescriptionUnits,
+      limits.schemaBytes,
+    ),
   };
   if (input.model != null)
     output.model = boundedString(input.model, "model", 200, true);
@@ -462,9 +602,11 @@ export function validateGenerateRequest(input, internal = false) {
     if (
       !Number.isInteger(input.maxTokens) ||
       input.maxTokens < 1 ||
-      input.maxTokens > 32768
+      input.maxTokens > limits.maxTokens
     )
-      invalid("maxTokens must be an integer from 1 to 32768.");
+      invalid(`maxTokens must be an integer from 1 to ${limits.maxTokens}.`, {
+        field: "maxTokens",
+      });
     output.maxTokens = input.maxTokens;
   }
   if (input.reasoning != null) {
@@ -477,7 +619,9 @@ export function validateGenerateRequest(input, internal = false) {
       });
     output.reasoning = effort;
   }
-  cloneJson(output, "Generation request", LIMITS.requestBytes);
+  if (input.toolChoice != null)
+    output.toolChoice = validateToolChoice(input.toolChoice, output.tools);
+  cloneJson(output, "Generation request", limits.requestBytes);
   return output;
 }
 
@@ -539,7 +683,7 @@ export function validateMcpServer(server, index = 0) {
   if (server.tools != null) {
     if (!Array.isArray(server.tools) || !server.tools.length)
       invalid(`mcpServers[${index}].tools must be a non-empty array.`);
-    tools = validateTools(server.tools, LIMITS.declaredMcpTools);
+    tools = validateTools(server.tools, LIMITS.declaredMcpTools, "remote");
   }
   return {
     id,
@@ -682,10 +826,116 @@ export function validateWidget(input) {
   };
 }
 
+/** A site's own model id (SPEC 15.2); never contains "/", unlike a catalog id. */
+export const SITE_MODEL_ID = /^[A-Za-z0-9_.:-]{1,100}$/;
+
+/**
+ * `loop` (SPEC 15.1): the page function itself never crosses the bridge, so
+ * the contract carries who composes, for consent, and the level to request.
+ */
+function validateLoop(input) {
+  if (!plainObject(input))
+    invalid("loop must be an object.", { field: "loop" });
+  if (!COMPOSERS.includes(input.composer))
+    invalid('loop.composer must be "server" or "webapp".', {
+      field: "loop.composer",
+    });
+  const level = input.level ?? 1;
+  if (level !== 1 && level !== 2)
+    invalid("loop.level must be 1 or 2.", { field: "loop.level" });
+  return { composer: input.composer, level };
+}
+
+/**
+ * `models` (SPEC 15.2): 1 to 8 entries the site answers itself. Metadata is
+ * the site's to give, so nothing absent is filled in except the two defaults
+ * the specification names (tools on, vision off) and the display name.
+ * `generate` is whether the page supplied an answering function: required
+ * without a loop, refused with one, because a loop answers its own models.
+ */
+function validateSiteModels(input, loop, siteName) {
+  const field = "models";
+  if (!plainObject(input)) invalid("models must be an object.", { field });
+  const list = input.list;
+  if (!Array.isArray(list) || !list.length || list.length > LIMITS.siteModels)
+    invalid(`models.list must contain 1 to ${LIMITS.siteModels} entries.`, {
+      field: "models.list",
+    });
+  if (loop && input.generate)
+    invalid(
+      "models.generate must be absent with a loop: the loop answers its own models.",
+      { field: "models.generate" },
+    );
+  if (!loop && input.generate !== true)
+    invalid("models.generate must be a function without a loop.", {
+      field: "models.generate",
+    });
+  const ids = new Set();
+  return {
+    list: list.map((raw, index) => {
+      const name = `models.list[${index}]`;
+      if (
+        !plainObject(raw) ||
+        typeof raw.id !== "string" ||
+        !SITE_MODEL_ID.test(raw.id) ||
+        ids.has(raw.id)
+      )
+        invalid(`${name}.id is invalid or duplicated.`, { field: name });
+      ids.add(raw.id);
+      const caps = raw.capabilities ?? {};
+      if (!plainObject(caps))
+        invalid(`${name}.capabilities must be an object.`, { field: name });
+      for (const flag of ["tools", "vision", "reasoning"])
+        if (caps[flag] != null && typeof caps[flag] !== "boolean")
+          invalid(`${name}.capabilities.${flag} must be a boolean.`, {
+            field: name,
+          });
+      const levels = raw.reasoningLevels ?? [];
+      if (
+        !Array.isArray(levels) ||
+        new Set(levels).size !== levels.length ||
+        levels.some((level) => !EFFORTS.includes(level))
+      )
+        invalid(
+          `${name}.reasoningLevels must be unique values from ${EFFORTS.join(", ")}.`,
+          { field: name },
+        );
+      if (
+        raw.contextWindow != null &&
+        (!Number.isSafeInteger(raw.contextWindow) || raw.contextWindow < 1)
+      )
+        invalid(`${name}.contextWindow must be a positive integer.`, {
+          field: name,
+        });
+      return {
+        id: raw.id,
+        displayName:
+          boundedString(raw.displayName, `${name}.displayName`, 80) || siteName,
+        capabilities: {
+          tools: caps.tools ?? true,
+          vision: caps.vision ?? false,
+          reasoning: caps.reasoning ?? levels.length > 0,
+        },
+        contextWindow: raw.contextWindow ?? null,
+        reasoningLevels: EFFORTS.filter((level) => levels.includes(level)),
+        kind: "site",
+      };
+    }),
+    generate: !loop,
+  };
+}
+
 export function validateSiteManifest(input) {
   if (!plainObject(input)) invalid("Site manifest must be an object.");
   const tools = validateTools(input.tools, LIMITS.siteTools, true);
-  const servers = input.mcpServers ?? [];
+  const loop = input.loop != null ? validateLoop(input.loop) : null;
+  // With a loop the composer writes every prompt, so there is no extension
+  // prompt to disclose, and it runs its own server tools (SPEC 15.1).
+  if (loop && input.systemPrompt)
+    invalid("loop and systemPrompt are mutually exclusive.", {
+      field: "systemPrompt",
+    });
+  const servers = loop ? [] : (input.mcpServers ?? []);
   if (!Array.isArray(servers) || servers.length > LIMITS.mcpServers)
     invalid(`mcpServers must contain no more than ${LIMITS.mcpServers} items.`);
   const serverIds = new Set();
@@ -703,8 +953,11 @@ export function validateSiteManifest(input) {
     if (!plainObject(input.threads)) invalid("threads must be an object.");
     threads = { rename: input.threads.rename === true };
   }
+  const name = boundedString(input.name, "name", 80, true);
+  const models =
+    input.models != null ? validateSiteModels(input.models, loop, name) : null;
   return {
-    name: boundedString(input.name, "name", 80, true),
+    name,
     description:
       boundedString(input.description ?? "", "description", 280) ?? "",
     systemPrompt:
@@ -717,7 +970,146 @@ export function validateSiteManifest(input) {
     tools,
     mcpServers,
     threads,
+    // Appended only when declared, so every earlier contract keeps the
+    // fingerprint it was approved under.
+    ...(loop ? { loop } : {}),
+    ...(models ? { models } : {}),
   };
+}
+
+/**
+ * What a site's own model returned for one round (SPEC 15.2), checked the way
+ * a provider's answer is: the section 5.3 result shape and bounds, and tool
+ * calls only to tools that round offered. Anything else fails the round as a
+ * PROVIDER_ERROR. `usage` stays null when the site reported none, so the
+ * panel shows no number the site did not give.
+ */
+export function validateSiteModelResult(input, offered = new Set()) {
+  const fail = (what) => {
+    throw new BrokerError(
+      "PROVIDER_ERROR",
+      `The site's model returned ${what}.`,
+    );
+  };
+  if (!plainObject(input) || !plainObject(input.message)) fail("no message");
+  const message = input.message;
+  if (message.content != null && typeof message.content !== "string")
+    fail("invalid message content");
+  const content = message.content ?? "";
+  if (content.length > LIMITS.answerChars) fail("an answer past its bound");
+  const calls = message.toolCalls ?? [];
+  if (!Array.isArray(calls) || calls.length > LIMITS.toolCalls)
+    fail("an invalid list of tool calls");
+  const ids = new Set();
+  const toolCalls = calls.map((call) => {
+    if (
+      !plainObject(call) ||
+      typeof call.id !== "string" ||
+      !call.id ||
+      call.id.length > 128 ||
+      ids.has(call.id)
+    )
+      fail("a tool call with an invalid or repeated id");
+    ids.add(call.id);
+    if (typeof call.name !== "string" || !offered.has(call.name))
+      fail("a call to a tool this round did not offer");
+    const args = call.arguments ?? "{}";
+    if (typeof args !== "string" || args.length > LIMITS.toolArgumentUnits)
+      fail("tool arguments that are not a bounded JSON string");
+    return { id: call.id, name: call.name, arguments: args || "{}" };
+  });
+  const images = message.attachments ?? [];
+  if (!Array.isArray(images) || images.length > LIMITS.imagesPerMessage)
+    fail("too many attachments");
+  const attachments = images.map((image) => {
+    if (
+      !plainObject(image) ||
+      (image.type != null && image.type !== "image") ||
+      !IMAGE_TYPES.includes(image.mediaType) ||
+      typeof image.data !== "string" ||
+      !image.data ||
+      image.data.length > LIMITS.imageChars ||
+      !/^[A-Za-z0-9+/]+={0,2}$/.test(image.data)
+    )
+      fail("an invalid image attachment");
+    return { type: "image", mediaType: image.mediaType, data: image.data };
+  });
+  if (
+    message.reasoning != null &&
+    (typeof message.reasoning !== "string" ||
+      message.reasoning.length > LIMITS.reasoningChars)
+  )
+    fail("an invalid reasoning summary");
+  let usage = null;
+  if (input.usage != null) {
+    if (!plainObject(input.usage)) fail("invalid usage");
+    usage = {};
+    for (const key of [
+      "promptTokens",
+      "completionTokens",
+      "totalTokens",
+      "cachedTokens",
+      "reasoningTokens",
+    ]) {
+      const value = input.usage[key] ?? 0;
+      if (!Number.isSafeInteger(value) || value < 0) fail("invalid usage");
+      usage[key] = value;
+    }
+  }
+  return {
+    id:
+      typeof input.id === "string" && input.id && input.id.length <= 200
+        ? input.id
+        : crypto.randomUUID(),
+    message: {
+      role: "assistant",
+      content,
+      toolCalls,
+      attachments,
+      reasoning: message.reasoning || null,
+    },
+    finishReason:
+      typeof input.finishReason === "string" && input.finishReason
+        ? input.finishReason.slice(0, 80)
+        : toolCalls.length
+          ? "tool_calls"
+          : "stop",
+    usage,
+  };
+}
+
+/**
+ * One collected input value against its declared scalar schema (SPEC 7.3),
+ * for a declared remote tool, whose value the extension forwards itself. The
+ * error names the input, never the value.
+ */
+export function validateUserInputValue(definition, value) {
+  const schema = definition?.schema ?? {};
+  const fail = () => {
+    throw new BrokerError(
+      "TOOL_ERROR",
+      `The value given for ${String(definition?.label ?? "an input").slice(0, 80)} does not match what the tool declared.`,
+    );
+  };
+  if (schema.type === "string") {
+    if (typeof value !== "string") fail();
+    const length = [...value].length;
+    if (
+      length < (schema.minLength ?? 0) ||
+      length > (schema.maxLength ?? LIMITS.toolUserInputChars)
+    )
+      fail();
+  } else if (schema.type === "boolean") {
+    if (typeof value !== "boolean") fail();
+  } else if (schema.type === "number" || schema.type === "integer") {
+    if (typeof value !== "number" || !Number.isFinite(value)) fail();
+    if (schema.type === "integer" && !Number.isInteger(value)) fail();
+    if (value < (schema.minimum ?? -Infinity)) fail();
+    if (value > (schema.maximum ?? Infinity)) fail();
+  } else fail();
+  if (schema.enum && !schema.enum.some((item) => item === value)) fail();
+  if (Object.hasOwn(schema, "const") && schema.const !== value) fail();
+  return value;
 }
 
 export function validateContextFields(input, granted = []) {
@@ -758,9 +1150,11 @@ export function providerOrigin(baseUrl) {
 
 export { plainObject, cloneJson };
 
-export function validateToolCalls(calls) {
-  if (!Array.isArray(calls) || calls.length > LIMITS.toolCalls)
-    invalid("toolCalls must be a bounded array.");
+export function validateToolCalls(calls, limits = GENERATE_LIMITS) {
+  if (!Array.isArray(calls) || calls.length > limits.toolCallsPerMessage)
+    invalid(
+      `toolCalls must be an array of at most ${limits.toolCallsPerMessage} calls.`,
+    );
   const ids = new Set();
   return calls.map((call) => {
     if (
@@ -785,7 +1179,7 @@ export function validateToolCalls(calls) {
         arguments: boundedString(
           call.function.arguments,
           "tool arguments",
-          LIMITS.resultBytes,
+          limits.toolArgumentUnits,
           true,
         ),
       },
@@ -885,10 +1279,10 @@ export function repairToolCalls(calls) {
     // A zero-argument call arrives as "" from several providers; that is the
     // same intent as "{}" and is repaired rather than reported.
     if (!args) args = "{}";
-    if (args.length > LIMITS.resultBytes) {
+    if (args.length > LIMITS.toolArgumentUnits) {
       rejected.set(
         id,
-        `The arguments were ${args.length} characters long, over the ${LIMITS.resultBytes} character limit. Call the tool again with smaller arguments.`,
+        `The arguments were ${args.length} characters long, over the ${LIMITS.toolArgumentUnits} character limit. Call the tool again with smaller arguments.`,
       );
       args = "{}";
     }

@@ -104,6 +104,34 @@ class HttpError extends Error {
   }
 }
 
+/**
+ * The section 9 code for an agent run that failed, read from the CLI's own
+ * words because none of the three reports a machine-readable reason. The
+ * browser shows its own sentence for each code, never this text.
+ */
+export function agentFailureCode(message) {
+  const text = String(message ?? "");
+  if (
+    /prompt is too long|context (?:length|window|limit)|maximum context|input is too long|too many (?:input |prompt )?tokens/i.test(
+      text,
+    )
+  )
+    return "CONTEXT_TOO_LONG";
+  if (
+    /rate[ _-]?limit|usage limit|too many requests|\b429\b|quota (?:exceeded|exhausted)|resource[_ ]exhausted|limit reached/i.test(
+      text,
+    )
+  )
+    return "RATE_LIMITED";
+  if (
+    /\bmodel\b[^.\n]{0,160}?\b(?:not found|does not exist|is not available|not available|unavailable|not supported)\b|\b(?:unknown|invalid|unsupported) model\b|not_found_error/i.test(
+      text,
+    )
+  )
+    return "MODEL_UNAVAILABLE";
+  return "PROVIDER_ERROR";
+}
+
 export function createDesktopApp({
   store = new Store(),
   log = () => {},
@@ -628,8 +656,10 @@ export function createDesktopApp({
     const config = sync.config ? structuredClone(sync.config) : null;
     if (config?.openai?.apiKey)
       config.openai.apiKey = `${config.openai.apiKey.slice(0, 3)}…${config.openai.apiKey.slice(-4)}`;
-    if (config?.opencode?.apiKey)
-      config.opencode.apiKey = `${config.opencode.apiKey.slice(0, 3)}…${config.opencode.apiKey.slice(-4)}`;
+    for (const name of ["opencode", "ollama", "ollamaCloud"])
+      if (config?.[name]?.apiKey)
+        config[name].apiKey =
+          `${config[name].apiKey.slice(0, 3)}…${config[name].apiKey.slice(-4)}`;
     return { ...sync, config };
   }
 
@@ -763,7 +793,11 @@ export function createDesktopApp({
     return providers.find((item) => item.id === providerId) ?? known ?? null;
   }
 
-  async function generate(body, client) {
+  /**
+   * `closed` aborts when the browser drops this request before the answer was
+   * written: the extension cancelled it, so the run behind it is stopped.
+   */
+  async function generate(body, client, closed) {
     const { adapter, providerId, model, messages, tools, threadId, reasoning } =
       validateGenerate(body);
     sweepThreads();
@@ -892,6 +926,12 @@ export function createDesktopApp({
           ? `Resuming the ${adapter.name} session…`
           : `Starting ${adapter.name}…`,
       );
+      if (closed?.aborted) {
+        session.end(true);
+        if (thread) endThread(threadId);
+        if (live) live.done = true;
+        throw new HttpError(499, "ABORTED", "The browser closed the request.");
+      }
       try {
         session.attach(
           adapter.start({
@@ -924,12 +964,30 @@ export function createDesktopApp({
         );
       }
     }
-    const event = await session.nextEvent();
+    const stop = () => session.cancel();
+    if (closed?.aborted) stop();
+    else closed?.addEventListener("abort", stop, { once: true });
+    let event;
+    try {
+      event = await session.nextEvent();
+    } finally {
+      closed?.removeEventListener("abort", stop);
+    }
     if (live && event.type !== "tool_calls") live.done = true;
     else if (live) phase(live, providerId, "Running the tools it asked for…");
-    if (session.thread && (event.type === "error" || event.type === "timeout"))
+    if (
+      session.thread &&
+      ["error", "timeout", "cancelled"].includes(event.type)
+    )
       for (const [id, item] of threads)
         if (item === session.thread) endThread(id);
+    if (event.type === "cancelled") {
+      record(
+        "cancelled",
+        `${client.name} closed the request; ${adapter.name} was stopped`,
+      );
+      throw new HttpError(499, "ABORTED", "The browser closed the request.");
+    }
     if (event.type === "timeout")
       throw new HttpError(
         504,
@@ -938,9 +996,10 @@ export function createDesktopApp({
       );
     if (event.type === "error") {
       record("error", `${adapter.name}: ${event.message}`);
+      const code = agentFailureCode(event.message);
       throw new HttpError(
-        502,
-        "PROVIDER_ERROR",
+        code === "RATE_LIMITED" ? 429 : 502,
+        code,
         `${adapter.name} failed: ${event.message}`,
       );
     }
@@ -1206,10 +1265,16 @@ export function createDesktopApp({
     }
     if (path === "/api/generate" && request.method === "POST") {
       const client = requireClient(request);
+      // `close` also fires after a normal answer; only one that comes before
+      // the response finished means the browser went away.
+      const closed = new AbortController();
+      response.on("close", () => {
+        if (!response.writableFinished) closed.abort();
+      });
       return send(
         response,
         200,
-        await generate(await readBody(request), client),
+        await generate(await readBody(request), client, closed.signal),
       );
     }
     if (path === "/api/sync" && request.method === "GET") {
@@ -1391,6 +1456,8 @@ export function createDesktopApp({
           ? error.message
           : "The desktop app could not complete the request.";
       if (status === 500) log(`internal error: ${error?.stack ?? error}`);
+      // A request the browser already dropped has nobody left to answer.
+      if (response.destroyed) return;
       if (!response.headersSent)
         send(response, status, { error: { code, message } });
       else response.end();

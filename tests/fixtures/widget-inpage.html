@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>In-page backend fixture</title>
+  </head>
+  <body>
+    <div id="assistant"></div>
+    <div id="visitor"></div>
+    <script type="module">
+      import { mountAssistant, eventStreamResponse } from "/widget/index.js";
+
+      // SPEC 15 mode 5: the page composes and the page controls the UI. Every
+      // route of SPEC 14.4 is answered here, so nothing leaves the page.
+      const log = (window.inpageLog = {
+        calls: [],
+        toolResults: [],
+        modelResults: [],
+        generated: [],
+        flood: { pulled: 0, cancelled: false },
+        hangClosed: false,
+        mountErrors: [],
+        enables: [],
+      });
+      // A stand-in extension that records the access request and refuses it,
+      // so the turn runs with no visitor model announced.
+      window.ai = {
+        arjunah: {
+          async enable(access) {
+            log.enables.push(access);
+            throw Object.assign(new Error("Refused."), { code: "PERMISSION_DENIED" });
+          },
+        },
+      };
+      const now = () => new Date().toISOString();
+      const threads = [{ id: "p1", title: "In-page", updatedAt: now() }];
+      const reply = (value) =>
+        value === undefined
+          ? new Response(null, { status: 204 })
+          : new Response(JSON.stringify(value), {
+              headers: { "Content-Type": "application/json" },
+            });
+      const message = (id, content) => ({
+        type: "message",
+        entry: { type: "message", id, role: "assistant", content, createdAt: now() },
+      });
+
+      // Answers the loop is waiting for, by the id the loop asked under.
+      const waiting = new Map();
+      const awaitAnswer = (id) =>
+        new Promise((resolve) => waiting.set(id, resolve));
+      const settle = (id, value) => {
+        waiting.get(id)?.(value);
+        waiting.delete(id);
+      };
+
+      let turns = 0;
+      async function* loop(threadId, body, signal) {
+        const turnId = `pt${++turns}`;
+        yield { type: "turn.start", turnId, threadId };
+        if (body.content === "hello") {
+          yield { type: "output.delta", text: "Hello " };
+          yield { type: "output.delta", text: "from the page" };
+          yield message("a1", "Hello from the page.");
+          yield {
+            type: "turn.end",
+            turnId,
+            usage: { promptTokens: 3, completionTokens: 4 },
+          };
+        } else if (body.content === "tool") {
+          yield { type: "tool.client", id: "c1", name: "page_info", arguments: {} };
+          const result = await awaitAnswer("c1");
+          yield {
+            type: "tool.end",
+            id: "c1",
+            name: "page_info",
+            ok: true,
+            result: JSON.stringify(result),
+          };
+          yield message("a2", `The page is called ${result.title}.`);
+          yield { type: "turn.end", turnId };
+        } else if (body.content === "model") {
+          // A round answered through the bridge, posted back through this
+          // same function.
+          yield {
+            type: "model.client",
+            id: "m1",
+            request: { messages: [{ role: "user", content: "say hi" }] },
+          };
+          const answer = await awaitAnswer("m1");
+          yield message("a3", `Model said ${answer.result.message.content}.`);
+          yield { type: "turn.end", turnId };
+        } else if (body.content === "hang") {
+          try {
+            await new Promise((resolve) =>
+              signal.addEventListener("abort", resolve, { once: true }),
+            );
+          } finally {
+            log.hangClosed = true;
+          }
+        } else {
+          yield message("a0", "Unscripted.");
+          yield { type: "turn.end", turnId };
+        }
+      }
+
+      /** Bodies that break a bound, one per kind of violation. */
+      function violation(content) {
+        if (content === "flood") {
+          // Never ends on its own: only the 2,000,000-byte ceiling stops it.
+          const chunk = new Uint8Array(65536).fill(0x20);
+          const body = new ReadableStream({
+            pull(stream) {
+              log.flood.pulled += chunk.byteLength;
+              stream.enqueue(chunk);
+            },
+            cancel() {
+              log.flood.cancelled = true;
+            },
+          });
+          return new Response(body, {
+            headers: { "Content-Type": "text/event-stream" },
+          });
+        }
+        if (content === "strings") {
+          // Text, not bytes: rejected rather than measured as zero.
+          const body = new ReadableStream({
+            start(stream) {
+              stream.enqueue('event: turn.start\ndata: {"turnId":"x"}\n\n');
+              stream.close();
+            },
+          });
+          return new Response(body);
+        }
+        if (content === "shapeless") return "event: turn.start";
+        if (content === "rejected") return new Response(null, { status: 500 });
+        if (content === "throws") throw new Error("page backend exploded");
+        return null;
+      }
+
+      async function backendFetch(path, init) {
+        const { method, body, signal } = init;
+        log.calls.push({ path, method, ...(body ? { body: JSON.parse(body) } : {}) });
+        const route = path.split("?")[0].split("/");
+        if (path === "threads")
+          return method === "POST"
+            ? reply(threads[threads.push({ id: `p${threads.length + 1}`, title: "New", updatedAt: now() }) - 1])
+            : reply(threads);
+        if (route[0] === "threads" && route.length === 2) {
+          // One stored thread whose transcript breaks the JSON bound.
+          if (route[1] === "big")
+            return reply(
+              Array.from({ length: 1200 }, (_, index) => ({
+                type: "message",
+                id: `big${index}`,
+                role: "user",
+                content: "x".repeat(1000),
+              })),
+            );
+          return method === "GET" ? reply([]) : reply();
+        }
+        if (route[2] === "turns" && route.length === 3) {
+          const turn = JSON.parse(body);
+          const broken = violation(turn.content);
+          if (broken !== null) return broken;
+          return eventStreamResponse(loop(route[1], turn, signal));
+        }
+        const answer = JSON.parse(body ?? "{}");
+        if (route[4] === "tool-results") {
+          log.toolResults.push(answer);
+          settle(answer.id, answer.result);
+        }
+        if (route[4] === "model-results") {
+          log.modelResults.push(answer);
+          if (answer.result || answer.error) settle(answer.id, answer);
+        }
+        return reply();
+      }
+
+      // Exactly one of baseUrl and fetch, and nothing that fetch would ignore.
+      for (const backend of [
+        {},
+        { baseUrl: "/api/", fetch: backendFetch },
+        { fetch: backendFetch, headers: { "X-Token": "t" } },
+        { fetch: "not a function" },
+      ])
+        try {
+          mountAssistant({ mount: document.createElement("div"), backend });
+        } catch (error) {
+          log.mountErrors.push(error.message);
+        }
+
+      window.assistant = mountAssistant({
+        mount: document.querySelector("#assistant"),
+        backend: { fetch: backendFetch },
+        widget: { name: "Page desk", greeting: "The page runs this one." },
+        bridge: {
+          async generate(request) {
+            log.generated.push(request.messages.at(-1).content);
+            return {
+              message: { role: "assistant", content: "hi", toolCalls: [] },
+              finishReason: "stop",
+            };
+          },
+        },
+        tools: [
+          {
+            name: "page_info",
+            inputSchema: { type: "object", additionalProperties: false },
+            handler: () => ({ title: document.title }),
+          },
+        ],
+      });
+
+      // With `fetch` the page composes, so consent hears "webapp" by default.
+      window.visitor = mountAssistant({
+        mount: document.querySelector("#visitor"),
+        backend: { fetch: backendFetch },
+        bridge: { arjunah: true },
+      });
+    </script>
+  </body>
+</html>

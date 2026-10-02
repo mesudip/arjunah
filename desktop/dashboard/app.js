@@ -254,8 +254,8 @@ function render() {
     $("#active").value =
       active.type === "desktop"
         ? `desktop:${active.providerId}`
-        : active.type === "opencode"
-          ? "opencode"
+        : ["opencode", "ollama", "ollama-cloud"].includes(active.type)
+          ? active.type
           : "openai";
     $("#active-model").value =
       active.type === "desktop" ? (active.model ?? "") : "";
@@ -440,7 +440,9 @@ $("#config-form").addEventListener("submit", async (event) => {
       model: $("#opencode-model").value.trim() || null,
       apiKey: $("#opencode-key").value.trim() || null,
     },
-    active: ["openai", "opencode"].includes(activeValue)
+    active: ["openai", "opencode", "ollama", "ollama-cloud"].includes(
+      activeValue,
+    )
       ? { type: activeValue }
       : {
           type: "desktop",

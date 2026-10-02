@@ -2,11 +2,28 @@
   "use strict";
   const CHANNEL = "arjunah-v0.1";
   const R = ArjunahRenderer;
+  const H = ArjunahHosted;
   const nonce = crypto.randomUUID();
   const toolPending = new Map();
   const pagePending = new Map();
+  // Bridge ids of this document's `models.generate` calls still in flight: the
+  // only ids a page `cancel` may name (SPEC 10).
+  const generating = new Set();
+  // The streamed ones among them (SPEC 5.3), with the text each has carried
+  // so far: the only ids a round delta may be posted under.
+  const streaming = new Map();
+  // Whether this document ever called `models.generate`, so the broker knows
+  // whether the document may have provider state to release (SPEC 5.4).
+  let generated = false;
+  const REQUEST_ID = /^[A-Za-z0-9-]{1,100}$/;
+  // Mirrors src/lib/errors.js: codes whose failure is transient (SPEC 9).
+  const RETRYABLE = new Set(["TIMEOUT", "RATE_LIMITED"]);
   const IMAGE_TYPES = R.IMAGE_TYPES;
   const HISTORY_LIMIT = 40;
+  // A round stream's bounds (SPEC 5.3): one delta, and each text per round,
+  // which is the result's own answer and reasoning bound.
+  const ROUND_DELTA_UNITS = 4000;
+  const ROUND_TEXT_UNITS = { output: 120000, reasoning: 12000 };
   let registration = null,
     view = null,
     host,
@@ -21,6 +38,8 @@
   let panelEpoch = 0;
   let alive = true;
   let settings = null; // hosted.settings result: site model, switchable models, usage
+  let live = null; // the running turn's latest model placement and loaded context
+  let settingsAt = 0; // when `settings` was last read
   let pendingModel = null; // model chosen in the header before any grant exists
   let pendingReasoning = null; // and the effort chosen with it
   let controls = {};
@@ -30,7 +49,23 @@
   let statePort = null;
   let stateRefreshTimer = null;
   let settingsRequest = 0;
-  let threadsAttached = false;
+  let threadsAttached = null; // which thread host is attached, if any
+  let grantRevision = null; // the last grant.state revision, once read
+  let grantCheck = Promise.resolve();
+  let grantCheckTimer = null;
+  // Hosted external loop (SPEC 15.1): `loop.fetch` calls in flight, the
+  // rounds the extension is answering for the loop by broker request id,
+  // the conversation minted per loop thread, the thread id used when the
+  // manifest declares no thread routes, and the turn running now.
+  const loopCalls = new Map();
+  const loopRounds = new Map();
+  const loopConversations = new Map();
+  let loopLocalThread = crypto.randomUUID().replace(/-/g, "");
+  let loopTurn = null;
+  // Rounds of the site's own model (SPEC 15.2): broker id -> page call id.
+  const siteRounds = new Map();
+  // Approval and collected-input prompts open one at a time, in order.
+  let promptChain = Promise.resolve();
 
   const script = document.createElement("script");
   script.src = chrome.runtime.getURL("page-api.js");
@@ -69,6 +104,11 @@
         if (message?.kind !== "arjunah-state") return;
         clearTimeout(stateRefreshTimer);
         stateRefreshTimer = setTimeout(() => void refreshSettings(), 50);
+        // The usage ledger moves on every reply and never changes a grant.
+        if (message.reason !== "storage:usage") {
+          clearTimeout(grantCheckTimer);
+          grantCheckTimer = setTimeout(checkGrant, 50);
+        }
       });
       port.onDisconnect.addListener(() => {
         if (statePort === port) statePort = null;
@@ -77,6 +117,35 @@
     } catch {
       if (alive) setTimeout(connectStateStream, 1000);
     }
+  }
+  /**
+   * `arjunah:grantchange` (SPEC 3): this origin's grant or site model changed,
+   * on whatever surface did it. The broker answers only for the sender's own
+   * origin, and the page gets only `level`, `model`, and `revoked`. The first
+   * read is the baseline and announces nothing.
+   */
+  function checkGrant() {
+    grantCheck = grantCheck.then(async () => {
+      if (!alive) return;
+      let state;
+      try {
+        state = await runtime("grant.state");
+      } catch {
+        return;
+      }
+      if (!alive) return;
+      const revision = String(state?.revision ?? "");
+      if (grantRevision !== null && revision !== grantRevision)
+        toPage({
+          kind: "grantchange",
+          detail: {
+            level: state.revoked ? null : (state.level ?? null),
+            model: state.revoked ? null : (state.model ?? null),
+            revoked: state.revoked === true,
+          },
+        });
+      grantRevision = revision;
+    });
   }
   function aiError(
     code = "INTERNAL_ERROR",
@@ -104,10 +173,14 @@
    * Calls one of the page's local manifest functions (card actions and thread
    * storage) across the bridge, bounded like every other page round trip.
    */
-  function callPage(kind, payload, timeoutMs = 30000) {
+  function callPage(
+    kind,
+    payload,
+    timeoutMs = 30000,
+    id = crypto.randomUUID(),
+  ) {
     if (!registration)
       return Promise.reject(aiError("TOOL_ERROR", "No assistant is active."));
-    const id = crypto.randomUUID();
     const active = registration;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -186,7 +259,19 @@
     }
     return (!images && !cards) || text;
   }
+  /**
+   * Every page-visible error carries the bridge id it answers and whether the
+   * same request may succeed if sent again (SPEC 9), beside whatever members
+   * the broker already put in `details`.
+   */
   function respond(id, ok, value) {
+    const code = value?.code ?? "INTERNAL_ERROR";
+    const own =
+      value?.details &&
+      typeof value.details === "object" &&
+      !Array.isArray(value.details)
+        ? value.details
+        : {};
     toPage({
       kind: "response",
       id,
@@ -195,9 +280,16 @@
         ? { result: value }
         : {
             error: {
-              code: value.code ?? "INTERNAL_ERROR",
-              message: value.message ?? "The AI request failed.",
-              details: value.details,
+              code,
+              message: value?.message ?? "The AI request failed.",
+              details: {
+                ...own,
+                requestId: typeof id === "string" ? id.slice(0, 100) : null,
+                retryable:
+                  typeof own.retryable === "boolean"
+                    ? own.retryable
+                    : RETRYABLE.has(code),
+              },
             },
           }),
     });
@@ -234,6 +326,20 @@
         : pending.reject(
             aiError("TOOL_ERROR", data.error?.message ?? "The site failed."),
           );
+      return;
+    }
+    if (
+      data.kind === "loop-head" ||
+      data.kind === "loop-chunk" ||
+      data.kind === "loop-end"
+    ) {
+      // One `loop.fetch` answer arriving in pieces (SPEC 15.1), accepted only
+      // for a call this document made under the registration still active.
+      const call = typeof data.id === "string" ? loopCalls.get(data.id) : null;
+      if (!call || call.active !== registration) return;
+      if (data.kind === "loop-head") call.head(data);
+      else if (data.kind === "loop-chunk") call.chunk(data.text);
+      else call.end(data.error);
       return;
     }
     if (data.kind === "tool-progress") {
@@ -277,25 +383,72 @@
       }
       return;
     }
+    if (data.kind === "cancel") {
+      // The page aborted a generate it started here; the broker ends the turn
+      // and the provider request with it. The page already settled its own
+      // promise, so nothing is answered.
+      if (typeof data.id === "string" && generating.has(data.id))
+        void runtime("models.cancel", { request: data.id }).catch(() => {});
+      return;
+    }
     if (data.kind !== "request") return;
     try {
       respond(
         data.id,
         true,
-        await handlePageRequest(data.method, data.params ?? {}),
+        await handlePageRequest(data.method, data.params ?? {}, data.id),
       );
     } catch (error) {
       respond(data.id, false, error);
     }
   });
 
-  async function handlePageRequest(method, params) {
+  async function handlePageRequest(method, params, requestId) {
     if (method === "enable") return enableAccess(params);
     if (method === "permissions.query") return runtime("grant.query");
     if (method === "permissions.revoke") return runtime("grant.revoke");
+    if (method === "settings.open") {
+      // Only in answer to the user (SPEC 3): a click or key press the page
+      // is still handling, which this isolated world can see but not fake.
+      if (navigator.userActivation?.isActive !== true)
+        throw aiError(
+          "PERMISSION_REQUIRED",
+          "openSettings() works only in response to a user action such as a click.",
+        );
+      return runtime("ui.openSettings");
+    }
     if (method === "models.list") return runtime("models.list");
     if (method === "providers.list") return runtime("providers.list");
-    if (method === "models.generate") return runtime("models.generate", params);
+    if (method === "models.generate" || method === "models.stream") {
+      // The bridge id travels with the call so a later cancel can name it,
+      // and so the broker's log line for it matches the page's error details.
+      const id =
+        typeof requestId === "string" && REQUEST_ID.test(requestId)
+          ? requestId
+          : null;
+      // A stream is a generate whose deltas are posted under its id before
+      // the answer; without a usable id there is nothing to post them under.
+      const stream = method === "models.stream" && id !== null;
+      if (id) generating.add(id);
+      if (stream) streaming.set(id, { output: 0, reasoning: 0 });
+      generated = true;
+      try {
+        return await runtime("models.generate", {
+          ...params,
+          _request: id ?? undefined,
+          _stream: stream,
+        });
+      } finally {
+        if (id) generating.delete(id);
+        if (id) streaming.delete(id);
+      }
+    }
+    // Conversations are minted and verified by the broker (SPEC 5.4); only
+    // the id crosses, never anything the broker keeps for it.
+    if (method === "conversations.create")
+      return runtime("conversations.create");
+    if (method === "conversations.open" || method === "conversations.release")
+      return runtime(method, { id: params.id });
     if (method === "context.get") {
       await runtime("context.authorize", params);
       return snapshot(params.fields);
@@ -304,6 +457,7 @@
       const validated = await runtime("site.register", params);
       const replaced = registration?.id && registration.id !== validated.id;
       cancelSession();
+      releaseLoopConversations();
       conversationId = crypto.randomUUID();
       registration = {
         id: validated.id,
@@ -331,6 +485,7 @@
     if (method === "site.unregister") {
       if (registration?.id !== params.id) return false;
       cancelSession();
+      releaseLoopConversations();
       conversationId = crypto.randomUUID();
       registration = null;
       controls = {};
@@ -398,13 +553,19 @@
     panelEpoch++;
     pendingConsent?.(false);
     view?.cancelUserInput("The page or assistant changed.");
+    view?.cancelApproval();
+    endLoopTurn(loopTurn);
+    abortLoopCalls();
     for (const pending of toolPending.values()) {
       clearTimeout(pending.timer);
       pending.reject(aiError("TOOL_ERROR", "The page or assistant changed."));
     }
     toolPending.clear();
     rejectPageCalls("The page or assistant changed.");
-    void runtime("session.end", { conversationId }).catch(() => {});
+    void runtime("session.end", {
+      conversationId,
+      ...(generated ? { generated: true } : {}),
+    }).catch(() => {});
   }
   window.addEventListener("pagehide", () => {
     alive = false;
@@ -415,12 +576,15 @@
   window.addEventListener("pageshow", () => {
     alive = true;
     connectStateStream();
+    // A grant can change while the document sits in the back/forward cache.
+    checkGrant();
   });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && panel && !panel.hidden)
       void refreshSettings();
   });
   connectStateStream();
+  checkGrant();
 
   function assertRegistration(contract) {
     if (!alive || (contract && registration !== contract))
@@ -430,21 +594,34 @@
       );
   }
 
+  /**
+   * `mode` describes the panel's own requests for the consent sheet (SPEC
+   * 15.3): `{ loop, siteModel }`, the manifest's loop and the site model the
+   * visitor picked, if any. A page's own `enable()` passes none.
+   */
   function enableAccess(
     raw,
     resources = {},
     contract = null,
     tools = null,
     preparedId = null,
+    mode = null,
   ) {
     const next = accessQueue.then(() =>
-      enableAccessNow(raw, resources, contract, tools, preparedId),
+      enableAccessNow(raw, resources, contract, tools, preparedId, mode),
     );
     accessQueue = next.catch(() => undefined);
     return next;
   }
 
-  async function enableAccessNow(raw, resources, contract, tools, preparedId) {
+  async function enableAccessNow(
+    raw,
+    resources,
+    contract,
+    tools,
+    preparedId,
+    mode,
+  ) {
     assertRegistration(contract);
     const request = await runtime("grant.preview", raw);
     const current = await runtime("grant.details");
@@ -468,16 +645,32 @@
       !current?.resources?.toolFingerprints?.includes(
         resources.toolFingerprint,
       );
+    // A changed `require` (SPEC 4) asks again, since the site model may no
+    // longer qualify; a request without one keeps the stored constraint.
+    const changedRequire =
+      Object.hasOwn(request, "require") &&
+      requireKey(request.require) !== requireKey(current?.require);
+    // Who composes the site's rounds changes what consent said (SPEC 15.3),
+    // so a request naming another composer than the grant's asks again.
+    const changedComposer =
+      request.capabilities.includes("models.generate") &&
+      current?.capabilities?.includes("models.generate") &&
+      (request.composer ?? "webapp") !== (current?.composer ?? "webapp");
     if (
       !missingCapability &&
       !missingContext &&
       !missingMcpOrigin &&
       !missingContract &&
-      !missingTools
+      !missingTools &&
+      !changedRequire &&
+      !changedComposer
     )
       return runtime("grant.query");
     const status = await runtime("broker.status", {
       model: pendingModel ?? undefined,
+      ...(Object.hasOwn(request, "require")
+        ? { require: request.require }
+        : {}),
     }).catch(() => null);
     assertRegistration(contract);
     const answer = await showConsent(
@@ -486,7 +679,13 @@
       contract?.manifest,
       tools,
       status,
+      mode,
     );
+    if (answer.unavailable)
+      throw aiError(
+        "NOT_CONFIGURED",
+        "None of the user's models is one this site accepts.",
+      );
     if (!answer.allowed)
       throw aiError("USER_DENIED", "The user denied this AI access request.");
     assertRegistration(contract);
@@ -496,6 +695,13 @@
       registrationId: contract?.id,
       preparedId,
       ...(answer.model ? { model: answer.model } : {}),
+      // The visitor's choice between the site's own models and theirs (SPEC
+      // 15.2) is stored with the grant, so it holds across this origin.
+      ...(mode?.siteModel
+        ? { siteModel: mode.siteModel.id }
+        : contract?.manifest.models
+          ? { siteModel: null }
+          : {}),
       // The consent sheet has no thinking control; this is the effort the user
       // set in the widget header before the site had a grant to store it on.
       ...(pendingReasoning ? { reasoning: pendingReasoning } : {}),
@@ -505,6 +711,39 @@
     pendingReasoning = null;
     void refreshSettings();
     return grant;
+  }
+
+  /**
+   * A normalized `require`, or none, as a comparable string. Built member by
+   * member: a stored grant comes back with its keys in another order.
+   */
+  function requireKey(value) {
+    if (!value || typeof value !== "object" || !Object.keys(value).length)
+      return "";
+    return JSON.stringify([
+      Array.isArray(value.kinds) ? [...value.kinds].sort() : null,
+      value.local === true,
+      value.builtinTools === false,
+    ]);
+  }
+  /** The site's constraint in the words the consent sheet uses. */
+  function describeRequire(value) {
+    const kinds = {
+      "api-key": "API-key providers",
+      subscription: "subscriptions on this computer",
+      "self-hosted": "servers you run",
+    };
+    return [
+      ...(value.kinds
+        ? [`only ${value.kinds.map((kind) => kinds[kind]).join(" or ")}`]
+        : []),
+      ...(value.local
+        ? ["only models running on this computer or your own network"]
+        : []),
+      ...(value.builtinTools === false
+        ? ["no AI agent that runs tools of its own"]
+        : []),
+    ].join("; ");
   }
 
   const WALLET_CHROME = `<label class="context-toggle compose-control" title="Share page context"><input type="checkbox" aria-label="Share page context"><span>@</span></label>`;
@@ -529,7 +768,8 @@
       host.style.setProperty(key, value, "important");
     root = host.attachShadow({ mode: "closed" });
     const style = document.createElement("style");
-    style.textContent = R.STYLE;
+    // Wallet-only chrome: the line a panel driven by another composer carries.
+    style.textContent = `${R.STYLE}\n.loop-line{display:block;margin:6px 4px 0;font-size:11.5px;line-height:1.4;color:var(--muted)}.loop-line[hidden]{display:none}`;
     root.append(style);
     root.append(R.build(document, LAUNCHER_HTML));
     // The renderer owns the conversation; the extension keeps consent, the
@@ -546,7 +786,7 @@
     view.refs.composerFootSlot.append(
       R.build(
         document,
-        `<button class="context-glance" title="Open context and usage details"><span>Context window</span><span class="context-track"><i></i></span><strong>—</strong></button>`,
+        `<span class="loop-line" role="note" hidden></span><button class="context-glance" title="Open context and usage details"><span>Context window<em class="processor" hidden></em></span><span class="context-track"><i></i></span><strong>—</strong></button>`,
       ),
     );
     panel = view.panel;
@@ -565,8 +805,20 @@
   /** Everything the shared renderer asks the wallet to do. */
   function walletHost() {
     return {
-      submit: (content, context) => runTurn(content, context),
+      // A manifest `loop` composes the turn itself (SPEC 15.1).
+      submit: (content, context) =>
+        registration?.manifest.loop
+          ? runLoopTurn(content, context)
+          : runTurn(content, context),
       stop() {
+        // The loop learns of the stop on its own cancel route (SPEC 14.4).
+        const stopping = loopTurn;
+        if (stopping?.turnId)
+          void loopJson(`${loopTurnPath(stopping, "cancel")}`, {
+            method: "POST",
+            body: "{}",
+          }).catch(() => {});
+        if (stopping) stopping.stopped = true;
         cancelSession();
         view.finishActivity(false);
         view.setBusy(false);
@@ -575,8 +827,16 @@
       close: syncLauncher,
       reset() {
         cancelSession();
+        if (registration?.manifest.loop) {
+          // A loop thread the extension named itself ends with the panel's
+          // conversation; with thread routes the renderer starts a new one.
+          releaseLoopConversation(loopLocalThread);
+          loopLocalThread = crypto.randomUUID().replace(/-/g, "");
+          if (registration.manifest.threads) void view.newThread();
+        }
         conversationId = crypto.randomUUID();
         lastTurn = null;
+        live = null;
         session = { promptTokens: 0, completionTokens: 0, turns: 0 };
         renderStatus();
       },
@@ -592,7 +852,9 @@
         });
       },
       modelLabel: (id) =>
-        settings?.models?.find((model) => model.id === id)?.displayName ?? id,
+        [...(settings?.models ?? []), ...siteEntries()].find(
+          (model) => model.id === id,
+        )?.displayName ?? id,
       // The wallet resolves provider artwork once, from the one table in
       // lib/provider-icons.js, and ships it with the model list. A content
       // script cannot import that module, and a second copy of the table here
@@ -610,13 +872,23 @@
         renderSetup();
       },
       async cardAction(detail) {
-        const card = await callPage("card-action", { action: detail }).catch(
-          () => null,
-        );
+        // A loop's cards post their local actions to its actions route
+        // (SPEC 14.4); otherwise the manifest callback answers.
+        const card = registration?.manifest.loop
+          ? ((
+              await loopJson(
+                `threads/${encodeURIComponent(view.activeThread() ?? loopLocalThread)}/actions`,
+                { method: "POST", body: JSON.stringify(detail) },
+              ).catch(() => null)
+            )?.card ?? null)
+          : await callPage("card-action", { action: detail }).catch(() => null);
         if (!card) return null;
         // Page-authored replacements go through the same section 7.4 validator
         // as the original card before anything is drawn.
-        return runtime("cards.validate", { card }).catch(() => null);
+        return runtime("cards.validate", {
+          card,
+          fingerprint: registration?.fingerprint,
+        }).catch(() => null);
       },
       threadChanged(id) {
         const previous = conversationId;
@@ -679,7 +951,10 @@
   /** A card from the site's own store is re-validated before it is drawn. */
   async function storedCard(card) {
     if (!card || typeof card !== "object") return null;
-    return runtime("cards.validate", { card }).catch(() => null);
+    return runtime("cards.validate", {
+      card,
+      fingerprint: registration?.fingerprint,
+    }).catch(() => null);
   }
   async function transcriptEntries(value) {
     if (!Array.isArray(value))
@@ -814,12 +1089,62 @@
       controls: manifest?.widget.controls ?? [],
     });
     view.setControls(controls);
-    // Site-owned threads only exist while that contract is the active one.
-    const wantsThreads = Boolean(manifest?.threads);
+    // Page context cannot reach a conversation the extension does not
+    // compose (SPEC 15.1), so the control is not offered with a loop.
+    const loop = manifest?.loop ?? null;
+    const contextControl = contextToggle?.closest("label");
+    if (contextControl) contextControl.hidden = Boolean(loop);
+    if (loop && contextToggle) contextToggle.checked = false;
+    // Site-owned threads only exist while that contract is the active one;
+    // a loop's threads are its own routes.
+    const wantsThreads = manifest?.threads ? (loop ? "loop" : "site") : null;
     if (wantsThreads !== threadsAttached) {
       threadsAttached = wantsThreads;
-      view.setThreadHost(wantsThreads ? siteThreads() : null);
+      view.setThreadHost(
+        wantsThreads === "loop"
+          ? loopThreads()
+          : wantsThreads === "site"
+            ? siteThreads()
+            : null,
+      );
     }
+    renderLoopLine();
+  }
+  /**
+   * The persistent line naming the composer while a loop drives this panel
+   * (SPEC 15.3, "Shown in"), so the extension's chrome never implies that
+   * the extension wrote the conversation.
+   */
+  function renderLoopLine() {
+    const line = panel?.querySelector(".loop-line");
+    if (!line) return;
+    const loop = registration?.manifest.loop ?? null;
+    line.hidden = !loop;
+    line.textContent = loop
+      ? H.panelLine(loop.composer, Boolean(selectedSite()))
+      : "";
+  }
+  /** The site's own models as picker entries (SPEC 15.2). */
+  function siteEntries() {
+    return H.siteModelEntries(registration?.manifest);
+  }
+  /** The model the picker should show selected. */
+  function pickerChoice() {
+    return H.pickerSelection({
+      pending: pendingModel,
+      siteChoice: settings?.siteModel ?? null,
+      visitorModel: settings?.model?.id ?? null,
+      siteModels: siteEntries(),
+      visitorModels: settings?.models ?? [],
+    });
+  }
+  /** The contract's entry of the selected site model, or null. */
+  function selectedSite() {
+    const id = view?.selection().model ?? pickerChoice();
+    return (
+      registration?.manifest.models?.list.find((entry) => entry.id === id) ??
+      null
+    );
   }
   function luminance(hex) {
     const [r, g, b] = [1, 3, 5].map(
@@ -838,6 +1163,7 @@
     }
     if (request !== settingsRequest) return;
     settings = next;
+    settingsAt = Date.now();
     if (!view) return;
     renderModelSelect();
     renderStatus();
@@ -852,8 +1178,10 @@
   function renderSetup() {
     if (!view) return;
     view.refs.setupWrap.textContent = "";
-    // Unknown state (settings not loaded) never blocks the composer.
-    const blocked = settings !== null && !settings.model;
+    // Unknown state (settings not loaded) never blocks the composer, and
+    // neither does a site that answers with its own models (SPEC 15.2).
+    const blocked =
+      settings !== null && !settings.model && !siteEntries().length;
     view.setComposerBlocked(
       blocked,
       blocked
@@ -869,7 +1197,7 @@
     const problem = !desktop.paired
       ? {
           title: "No provider is set up yet",
-          text: "Add an OpenAI API key or pair अर्जुनः Desktop to use a Claude, ChatGPT/Codex, or OpenCode subscription.",
+          text: "Add an API key, connect your own Ollama server, or pair अर्जुनः Desktop to use a Claude, ChatGPT/Codex, or OpenCode subscription.",
         }
       : !desktop.running
         ? {
@@ -908,51 +1236,81 @@
   }
   function renderModelSelect() {
     if (!view) return;
-    const current = pendingModel ?? settings?.model?.id ?? null;
+    // The site's own models sit beside the visitor's, under the site's name
+    // (SPEC 15.2); they are the default only when the visitor has none.
+    const sites = siteEntries();
+    const current = pickerChoice();
+    const site = sites.find((entry) => entry.id === current) ?? null;
     // The catalog is the wallet's; the picker that draws it is the renderer's
     // (SPEC 8.2), so this hands over data and nothing else.
     view.setModels(
-      settings?.models ?? [],
+      [...(settings?.models ?? []), ...sites],
       current,
       // Only the wallet knows the site's saved effort; the widget starts blank
       // and would otherwise drop the setting on every reload.
-      pendingReasoning ?? settings?.model?.reasoning ?? null,
+      site ? null : (pendingReasoning ?? settings?.model?.reasoning ?? null),
     );
     const active = settings?.model;
-    view.refs.sub.textContent = active
-      ? `${active.providerName} · ${active.displayName}${active.fallback ? " (default)" : ""}`
-      : settings?.desktop?.paired && !settings.desktop.running
-        ? "अर्जुनः Desktop is not running"
-        : settings?.desktop?.paired && !settings.desktop.accepted
-          ? "अर्जुनः Desktop needs pairing again"
-          : "No provider configured";
+    view.refs.sub.textContent = site
+      ? `${registration?.manifest.name ?? "This site"} · ${site.displayName}`
+      : active
+        ? `${active.providerName} · ${active.displayName}${active.fallback ? " (default)" : ""}`
+        : settings?.desktop?.paired && !settings.desktop.running
+          ? "अर्जुनः Desktop is not running"
+          : settings?.desktop?.paired && !settings.desktop.accepted
+            ? "अर्जुनः Desktop needs pairing again"
+            : "No provider configured";
+    // A site model without a declared `vision` refuses images (SPEC 15.2).
     const vision = Boolean(
-      (settings?.models ?? []).find((model) => model.id === current)
-        ?.capabilities.vision ?? active?.capabilities.vision,
+      site
+        ? site.capabilities.vision
+        : ((settings?.models ?? []).find((model) => model.id === current)
+            ?.capabilities.vision ?? active?.capabilities.vision),
     );
     view.setAttachmentsEnabled(vision);
+    renderLoopLine();
   }
 
   async function switchModel(id, reasoning) {
     if (!id) return false;
-    if (!settings?.grant) {
-      // No grant yet: remember the choice for the consent dialog.
+    const site = siteEntries().some((entry) => entry.id === id);
+    const remember = () => {
+      // No usable grant yet: remember the choice for the consent dialog.
       pendingModel = id;
-      pendingReasoning = reasoning ?? null;
+      pendingReasoning = site ? null : (reasoning ?? null);
       renderModelSelect();
       return true;
-    }
+    };
+    if (!settings?.grant) return remember();
     try {
+      const before = settings?.model?.id;
       settings = await runtime("hosted.model", {
-        model: id,
-        reasoning: reasoning || null,
+        // A site model is stored as the visitor's choice of it; choosing one
+        // of the visitor's own models clears that choice (SPEC 15.2).
+        ...(site
+          ? { siteModel: id }
+          : {
+              model: id,
+              reasoning: reasoning || null,
+              ...(siteEntries().length ? { siteModel: null } : {}),
+            }),
+        fingerprint: registration?.fingerprint,
       });
+      settingsAt = Date.now();
+      // Placement belongs to a model; a switched one reports its own.
+      if (settings?.model?.id !== before) {
+        live = null;
+        if (lastTurn) lastTurn.processor = null;
+      }
       pendingModel = null;
       pendingReasoning = null;
       renderModelSelect();
       renderStatus();
       return true;
     } catch (error) {
+      // A grant this panel cannot change yet (a loop's contract not approved)
+      // keeps the choice for the next consent instead.
+      if (error?.code === "PERMISSION_REQUIRED") return remember();
       view.addBubble("assistant", `Could not switch model: ${error.message}`, {
         error: true,
         persist: false,
@@ -965,17 +1323,26 @@
   function renderStatus() {
     if (!statusLine) return;
     statusLine.textContent = "";
-    const window_ = lastTurn?.contextWindow ?? settings?.model?.contextWindow;
+    // A site model shows only the metadata the site gave (SPEC 15.2): no
+    // meter without its contextWindow, and no provider limits.
+    const site = selectedSite();
+    const window_ =
+      live?.contextWindow ??
+      lastTurn?.contextWindow ??
+      (site ? site.contextWindow : settings?.model?.contextWindow);
     const contextKnown = Number.isSafeInteger(lastTurn?.contextTokens);
     const prompt = contextKnown ? lastTurn.contextTokens : 0;
     const contextPercent =
       window_ && contextKnown ? Math.min(100, (prompt / window_) * 100) : 0;
-    const contextSection = usageSection(
-      "Context window",
+    // The size alone is worth showing while the first count is pending: a
+    // self-hosted model's loaded window arrives with its first round.
+    const contextText =
       window_ && contextKnown
         ? `${compactNumber(prompt)} / ${compactNumber(window_)} (${Math.round(contextPercent)}%)`
-        : "Not reported",
-    );
+        : window_
+          ? `— / ${compactNumber(window_)}`
+          : "Not reported";
+    const contextSection = usageSection("Context window", contextText);
     contextSection.append(
       usageBar(
         contextPercent,
@@ -1004,14 +1371,29 @@
           "#d4d4d8",
         ),
       );
+    // Where a self-hosted model runs: a split onto the CPU is usually why it
+    // is slow, and is the first thing to check before the context size.
+    const processor = currentProcessor();
+    if (processor)
+      contextRows.append(
+        usageRow(
+          "Running on",
+          processor.label,
+          processor.placement === "gpu"
+            ? "#10b981"
+            : processor.placement === "cpu"
+              ? "#d97706"
+              : "#3b82f6",
+        ),
+      );
     contextSection.append(contextRows);
     statusLine.append(contextSection);
 
-    if (lastTurn || session.turns) {
+    if ((lastTurn && lastTurn.usageReported !== false) || session.turns) {
       const response = usageSection("Token usage", "This conversation");
       const rows = document.createElement("div");
       rows.className = "usage-rows";
-      if (lastTurn)
+      if (lastTurn && lastTurn.usageReported !== false)
         rows.append(
           usageRow(
             "Last response",
@@ -1044,12 +1426,20 @@
       statusLine.append(response);
     }
 
-    const model = settings?.model;
+    const model = site ? null : settings?.model;
     const quota = usageSection(
       "Your usage limits",
-      model?.plan || model?.providerName || "Provider",
+      site
+        ? (registration?.manifest.name ?? "This site")
+        : model?.plan || model?.providerName || "Provider",
     );
-    if (model?.quota?.windows?.length) {
+    if (site) {
+      const note = document.createElement("p");
+      note.className = "usage-note";
+      note.textContent =
+        "This site's own model answers. Your AI and its limits are not used.";
+      quota.append(note);
+    } else if (model?.quota?.windows?.length) {
       for (const windowItem of model.quota.windows) {
         const percent = Math.max(
           0,
@@ -1110,11 +1500,18 @@
     statusLine.append(quota);
 
     const glance = contextGlance;
-    glance.querySelector("strong").textContent =
-      window_ && contextKnown
-        ? `${compactNumber(prompt)} / ${compactNumber(window_)} (${Math.round(contextPercent)}%)`
-        : "Not reported";
+    glance.querySelector("strong").textContent = contextText;
     glance.querySelector(".context-track i").style.width = `${contextPercent}%`;
+    const marker = glance.querySelector(".processor");
+    marker.hidden = !processor;
+    if (processor) {
+      marker.textContent =
+        processor.placement === "split"
+          ? `CPU+GPU ${processor.gpuPercent}%`
+          : processor.placement.toUpperCase();
+      marker.dataset.placement = processor.placement;
+      marker.title = `The model server holds this model ${processor.label}.`;
+    }
     const quotaPercent = Math.max(
       0,
       ...(model?.quota?.windows ?? []).map(
@@ -1138,6 +1535,57 @@
   }
 
   const compactNumber = R.compactNumber;
+
+  /** The broker's processor summary, re-checked before it is drawn. */
+  function validProcessor(value) {
+    if (
+      !value ||
+      !["gpu", "cpu", "split"].includes(value.placement) ||
+      typeof value.label !== "string" ||
+      !Number.isInteger(value.gpuPercent) ||
+      value.gpuPercent < 0 ||
+      value.gpuPercent > 100
+    )
+      return null;
+    const until =
+      typeof value.until === "string" &&
+      Number.isFinite(Date.parse(value.until))
+        ? Date.parse(value.until)
+        : null;
+    return {
+      placement: value.placement,
+      gpuPercent: value.gpuPercent,
+      label: value.label.slice(0, 40),
+      until,
+    };
+  }
+
+  /**
+   * The placement to draw: the running turn's, else whichever of the last
+   * turn and the widget settings was read more recently, and none once the
+   * server's own unload time has passed. A timer redraws at that moment, so a
+   * model Ollama unloaded stops being shown without anything polling for it.
+   */
+  let processorTimer = 0;
+  function currentProcessor() {
+    const fromSettings = validProcessor(settings?.model?.processor);
+    const candidate =
+      live?.processor ??
+      (lastTurn && lastTurn.at > settingsAt
+        ? (lastTurn.processor ?? fromSettings)
+        : fromSettings);
+    clearTimeout(processorTimer);
+    if (!candidate) return null;
+    if (candidate.until != null) {
+      const left = candidate.until - Date.now();
+      if (left <= 0) return null;
+      processorTimer = setTimeout(
+        renderStatus,
+        Math.min(left + 50, 2 ** 31 - 1),
+      );
+    }
+    return candidate;
+  }
 
   function usageSection(label, value) {
     const section = document.createElement("section");
@@ -1224,6 +1672,9 @@
     const epoch = panelEpoch;
     const { manifest, fingerprint } = contract;
     const turnHistory = view.modelHistory();
+    // One of the site's own models may answer (SPEC 15.2); consent says so.
+    const site = selectedSite();
+    const mode = { loop: null, siteModel: site };
     const capabilities = ["chat.hosted"];
     if (manifest.tools.length) capabilities.push("tools.site");
     if (manifest.mcpServers.length) capabilities.push("tools.mcp");
@@ -1245,7 +1696,7 @@
     const turnId = crypto.randomUUID();
     const turnConversationId = conversationId;
     try {
-      await enableAccess(request, resources, contract);
+      await enableAccess(request, resources, contract, null, null, mode);
       assertRegistration(contract);
       const prepared = await runtime("chat.prepare", {
         manifest,
@@ -1259,6 +1710,7 @@
           contract,
           prepared.tools,
           prepared.id,
+          mode,
         );
       assertRegistration(contract);
       if (epoch !== panelEpoch)
@@ -1274,21 +1726,29 @@
         controls: { ...controls },
         turnId,
         conversationId: turnConversationId,
+        ...(site ? { siteModel: site.id } : {}),
         ...(view.selection().reasoning
           ? { reasoning: view.selection().reasoning }
           : {}),
       });
       if (registration === contract && epoch === panelEpoch) {
         const turn = view.currentTurn();
+        live = null;
+        // A site model that reported no usage shows none (SPEC 15.2).
+        const usage = result.usage ?? null;
         lastTurn = {
-          promptTokens: turn?.promptTokens || result.usage.promptTokens,
-          completionTokens:
-            turn?.completionTokens || result.usage.completionTokens,
-          cachedTokens: result.usage.cachedTokens ?? 0,
+          at: Date.now(),
+          usageReported: usage != null,
+          promptTokens: usage ? turn?.promptTokens || usage.promptTokens : 0,
+          completionTokens: usage
+            ? turn?.completionTokens || usage.completionTokens
+            : 0,
+          cachedTokens: usage?.cachedTokens ?? 0,
           contextTokens: result.contextTokens ?? null,
           contextCachedTokens: result.contextCachedTokens ?? null,
-          reasoningTokens: result.usage.reasoningTokens ?? 0,
+          reasoningTokens: usage?.reasoningTokens ?? 0,
           contextWindow: result.contextWindow ?? null,
+          processor: validProcessor(result.processor),
         };
         session.promptTokens += lastTurn.promptTokens;
         session.completionTokens += lastTurn.completionTokens;
@@ -1314,6 +1774,981 @@
     }
   }
 
+  // ------------------------------------------------- hosted external loop
+  //
+  // SPEC 15.1: with a manifest `loop`, this panel is the section 14 renderer
+  // toward a loop the page runs or relays through `loop.fetch`, and the
+  // section 14.7 bridge toward the visitor's model. The extension never
+  // reaches the site's server: every route goes through the page function,
+  // and every answer comes back through the page bridge, bounded here.
+  const LOOP_STREAM_BYTES = 2000000;
+  const LOOP_JSON_BYTES = 1000000;
+  // How long `loop.fetch` may take to start answering, like any page callback.
+  const LOOP_HEAD_MS = 30000;
+  // A turn's stream may be quiet while the loop waits on its own model or
+  // tools. Past this, with nothing owed by this side, the turn ends.
+  const LOOP_IDLE_MS = 180000;
+  const LOOP_DELTA_UNITS = 4000;
+  const LOOP_DELTA_POST = 8000;
+  const CONVERSATION_ID = /^[\x21-\x7e]{1,200}$/;
+  const plainObject = (value) =>
+    value != null && typeof value === "object" && !Array.isArray(value);
+  const boundedText = (value, max) =>
+    typeof value === "string" ? value.slice(0, max) : "";
+  /** The id of a loop request this side answers on a route, or null. */
+  const callId = (value) =>
+    typeof value === "string" && value.length > 0 && value.length <= 128
+      ? value
+      : null;
+
+  /**
+   * Starts one `loop.fetch` call. Resolves once the page function answered
+   * with a status, to `{ status, contentType, read(), cancel() }`; `read()`
+   * resolves to the next text chunk or `null` at the end, and the body is
+   * held to `maxBytes` UTF-8 bytes counted here, whatever the page claims.
+   */
+  function loopOpen(path, init = {}, maxBytes = LOOP_JSON_BYTES) {
+    const active = registration;
+    if (!active?.manifest.loop)
+      return Promise.reject(
+        aiError("NOT_SUPPORTED", "This assistant declared no loop."),
+      );
+    const id = crypto.randomUUID();
+    const encoder = new TextEncoder();
+    return new Promise((resolve, reject) => {
+      const call = {
+        active,
+        bytes: 0,
+        queue: [],
+        waiter: null,
+        ended: false,
+        error: null,
+        headed: false,
+      };
+      const settleWaiter = () => {
+        const waiter = call.waiter;
+        if (!waiter) return;
+        if (call.queue.length) {
+          call.waiter = null;
+          waiter.resolve(call.queue.shift());
+        } else if (call.error) {
+          call.waiter = null;
+          waiter.reject(call.error);
+        } else if (call.ended) {
+          call.waiter = null;
+          waiter.resolve(null);
+        }
+      };
+      const close = () => {
+        clearTimeout(call.timer);
+        loopCalls.delete(id);
+      };
+      call.fail = (error) => {
+        if (!loopCalls.has(id)) return;
+        close();
+        toPage({ kind: "page-call-abort", id });
+        if (!call.headed) return reject(error);
+        call.error ??= error;
+        settleWaiter();
+      };
+      call.timer = setTimeout(
+        () =>
+          call.fail(
+            aiError("TIMEOUT", "The site's loop did not answer in time."),
+          ),
+        LOOP_HEAD_MS,
+      );
+      call.head = (data) => {
+        if (call.headed) return;
+        if (data.ok !== true || !Number.isInteger(data.status))
+          return call.fail(
+            aiError(
+              "TOOL_ERROR",
+              `The site's loop failed: ${boundedText(data.error, 300) || "no response"}`,
+            ),
+          );
+        clearTimeout(call.timer);
+        call.headed = true;
+        resolve({
+          status: data.status,
+          contentType: boundedText(data.contentType, 200),
+          read: () =>
+            new Promise((resolveRead, rejectRead) => {
+              call.waiter = { resolve: resolveRead, reject: rejectRead };
+              settleWaiter();
+            }),
+          cancel: () =>
+            call.fail(aiError("ABORTED", "The request was cancelled.")),
+        });
+      };
+      call.chunk = (text) => {
+        if (!call.headed || typeof text !== "string" || !text) return;
+        call.bytes += encoder.encode(text).byteLength;
+        if (call.bytes > maxBytes)
+          return call.fail(
+            aiError(
+              "PROVIDER_ERROR",
+              "The site's loop answered with too much data.",
+            ),
+          );
+        call.queue.push(text);
+        settleWaiter();
+      };
+      call.end = (error) => {
+        if (!call.headed)
+          return call.fail(
+            aiError(
+              "TOOL_ERROR",
+              `The site's loop failed: ${boundedText(error, 300) || "no response"}`,
+            ),
+          );
+        close();
+        if (typeof error === "string")
+          call.error = aiError(
+            "TOOL_ERROR",
+            `The site's loop failed: ${error.slice(0, 300)}`,
+          );
+        call.ended = true;
+        settleWaiter();
+      };
+      loopCalls.set(id, call);
+      toPage({
+        kind: "loop-fetch",
+        id,
+        registrationId: active.id,
+        path: String(path),
+        method: init.method ?? "GET",
+        ...(init.body != null ? { body: init.body } : {}),
+        maxBytes,
+      });
+    });
+  }
+  function abortLoopCalls() {
+    for (const call of [...loopCalls.values()])
+      call.fail(aiError("ABORTED", "The page or assistant changed."));
+  }
+  /** One JSON route (SPEC 14.4): bounded to 1,000,000 bytes, 204 is null. */
+  async function loopJson(path, init) {
+    const response = await loopOpen(path, init, LOOP_JSON_BYTES);
+    if (response.status < 200 || response.status > 299) {
+      response.cancel();
+      throw aiError(
+        "TOOL_ERROR",
+        `The site's loop refused the request (${response.status}).`,
+      );
+    }
+    let text = "";
+    for (;;) {
+      const chunk = await response.read();
+      if (chunk == null) break;
+      text += chunk;
+    }
+    if (response.status === 204 || !text.trim()) return null;
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw aiError("TOOL_ERROR", "The site's loop returned invalid JSON.");
+    }
+  }
+  function loopTurnPath(turn, route) {
+    return `threads/${encodeURIComponent(turn.threadId)}/turns/${encodeURIComponent(turn.turnId ?? "")}/${route}`;
+  }
+  /** An answer on one of the turn's routes; a failure to deliver is the loop's. */
+  function loopPost(turn, route, body) {
+    turn.lastActivity = Date.now();
+    return loopJson(loopTurnPath(turn, route), {
+      method: "POST",
+      body: JSON.stringify(body),
+    }).catch(() => null);
+  }
+
+  /** A loop's own thread routes (SPEC 14.4), validated like a site store's. */
+  function loopThreads() {
+    const at = (id) => `threads/${encodeURIComponent(id)}`;
+    return {
+      list: async () => threadSummaries(await loopJson("threads")),
+      create: async () =>
+        threadSummary(
+          await loopJson("threads", { method: "POST", body: "{}" }),
+        ),
+      load: async (id) => transcriptEntries(await loopJson(at(id))),
+      // The composer stores its own turns; nothing is pushed back to it.
+      append: async () => {},
+      rename: registration?.manifest.threads?.rename
+        ? async (id, title) => {
+            await loopJson(at(id), {
+              method: "PATCH",
+              body: JSON.stringify({ title: String(title).slice(0, 120) }),
+            });
+          }
+        : undefined,
+      remove: async (id) => {
+        await loopJson(at(id), { method: "DELETE" });
+        if (loopTurn?.threadId === id) endLoopTurn(loopTurn);
+        releaseLoopConversation(id);
+      },
+    };
+  }
+
+  /**
+   * The conversation a loop round runs in (SPEC 14.7, 5.4): the one the
+   * loop named when the extension verifies it for this origin, else the one
+   * this panel already made for the thread, else a new one, whose id goes
+   * back to the loop on `model-results`.
+   */
+  async function loopConversation(threadId, requested) {
+    if (requested) {
+      const opened = await runtime("conversations.open", {
+        id: requested,
+      }).catch(() => null);
+      if (typeof opened?.id === "string") {
+        loopConversations.set(threadId, opened.id);
+        return opened.id;
+      }
+    }
+    const known = loopConversations.get(threadId);
+    if (known) return known;
+    const created = await runtime("conversations.create");
+    if (loopConversations.size >= 100)
+      releaseLoopConversation(loopConversations.keys().next().value);
+    loopConversations.set(threadId, created.id);
+    return created.id;
+  }
+  function releaseLoopConversation(threadId) {
+    const id = loopConversations.get(threadId);
+    loopConversations.delete(threadId);
+    if (id) void runtime("conversations.release", { id }).catch(() => {});
+  }
+  function releaseLoopConversations() {
+    for (const threadId of [...loopConversations.keys()])
+      releaseLoopConversation(threadId);
+  }
+
+  /**
+   * What the first message of a loop turn asks for (SPEC 15.1): a level 1
+   * grant, or level 2 when the loop asks, with the loop's composer; or, when
+   * the visitor picked one of the site's own models, only the hosted panel,
+   * since none of the visitor's models is used.
+   */
+  function loopAccess(manifest, site) {
+    const reason = `${manifest.name} wants to run its assistant in this panel.`;
+    return site
+      ? { capabilities: ["chat.hosted"], reason }
+      : {
+          level: manifest.loop.level === 2 ? "catalog" : "completion",
+          composer: manifest.loop.composer,
+          reason,
+        };
+  }
+
+  /** The turn body's `bridge` (SPEC 14.7, 15.1, 15.2). */
+  async function loopAnnouncement(contract, site, turn) {
+    const tools = contract.manifest.tools.slice(0, 32).map((tool) => ({
+      name: tool.name,
+      ...(tool.description ? { description: tool.description } : {}),
+      inputSchema: tool.inputSchema,
+    }));
+    if (site) {
+      turn.entry = H.bridgeEntry(site);
+      return { model: turn.entry, tools };
+    }
+    const list = await runtime("models.list").catch(() => null);
+    const entries = Array.isArray(list) ? list : [];
+    const chosen = view.selection().model;
+    turn.entry =
+      entries.find((entry) => entry.id === chosen) ??
+      entries.find((entry) => entry.default === true) ??
+      null;
+    return { model: turn.entry, tools };
+  }
+
+  /** One loop turn: consent, the announcement, then the event stream. */
+  async function runLoopTurn(content, context) {
+    const contract = registration;
+    const epoch = panelEpoch;
+    const { manifest } = contract;
+    view.setBusy(true);
+    const site = selectedSite();
+    const turn = {
+      contract,
+      threadId: context?.threadId ?? loopLocalThread,
+      turnId: null,
+      site,
+      entry: null,
+      done: false,
+      stopped: false,
+      stream: null,
+      completions: new Map(),
+      answered: new Set(),
+      prompting: 0,
+      tooling: 0,
+      rounds: 0,
+      lastActivity: Date.now(),
+      usage: null,
+      contextTokens: null,
+      contextCachedTokens: null,
+      contextWindow: null,
+    };
+    loopTurn = turn;
+    try {
+      await enableAccess(
+        loopAccess(manifest, site),
+        { contractFingerprint: contract.fingerprint, mcpOrigins: [] },
+        contract,
+        null,
+        null,
+        { loop: manifest.loop, siteModel: site },
+      );
+      assertRegistration(contract);
+      if (epoch !== panelEpoch || turn.done)
+        throw aiError("PERMISSION_REQUIRED", "The chat was reset.");
+      const bridge = await loopAnnouncement(contract, site, turn);
+      assertRegistration(contract);
+      if (epoch !== panelEpoch || turn.done)
+        throw aiError("PERMISSION_REQUIRED", "The chat was reset.");
+      view.startActivity(crypto.randomUUID(), context?.threadId ?? null);
+      const { model, reasoning } = view.selection();
+      const response = await loopOpen(
+        `threads/${encodeURIComponent(turn.threadId)}/turns`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            content,
+            controls: { ...controls },
+            ...(model ? { model } : {}),
+            ...(reasoning ? { reasoning } : {}),
+            bridge,
+          }),
+        },
+        LOOP_STREAM_BYTES,
+      );
+      turn.stream = response;
+      if (turn.done) return response.cancel();
+      if (response.status < 200 || response.status > 299) {
+        response.cancel();
+        throw aiError(
+          "TOOL_ERROR",
+          `The site's loop refused the turn (${response.status}).`,
+        );
+      }
+      await consumeLoop(response, turn, context);
+    } catch (error) {
+      view.finishActivity(false);
+      if (registration === contract && epoch === panelEpoch && !turn.stopped)
+        view.addBubble(
+          "assistant",
+          `Could not complete the request: ${turn.idled ? "the site's loop stopped answering." : error.message}`,
+          { error: true, persist: false },
+        );
+    } finally {
+      endLoopTurn(turn);
+      if (loopTurn === turn) loopTurn = null;
+      view.setBusy(false);
+      renderStatus();
+      view.refs.input.focus();
+    }
+  }
+
+  /**
+   * Ends a loop turn on this side: every completion it still has running is
+   * cancelled, open prompts close, and the stream is let go. Nothing more is
+   * posted for any of them; the loop learns of a stop on its cancel route.
+   */
+  function endLoopTurn(turn) {
+    if (!turn || turn.done) return;
+    turn.done = true;
+    clearInterval(turn.idleTimer);
+    for (const completion of turn.completions.values()) {
+      completion.cancelled = true;
+      loopRounds.delete(completion.requestId);
+      void runtime("models.cancel", { request: completion.requestId }).catch(
+        () => {},
+      );
+    }
+    turn.completions.clear();
+    if (turn.prompting) {
+      view?.cancelUserInput("The turn ended.");
+      view?.cancelApproval();
+    }
+    turn.stream?.cancel();
+  }
+
+  /** Reads the turn's section 14.3 stream and applies each event. */
+  async function consumeLoop(response, turn, context) {
+    // Silence is allowed while this side owes the loop an answer (a round of
+    // the visitor's model, a site tool, a prompt) and bounded otherwise.
+    turn.idleTimer = setInterval(() => {
+      const owing =
+        turn.completions.size || turn.tooling > 0 || turn.prompting > 0;
+      if (owing) turn.lastActivity = Date.now();
+      else if (Date.now() - turn.lastActivity > LOOP_IDLE_MS) {
+        turn.idled = true;
+        response.cancel();
+      }
+    }, 1000);
+    let buffer = "";
+    for (;;) {
+      const chunk = await response.read();
+      if (chunk == null) break;
+      turn.lastActivity = Date.now();
+      // Normalized as a whole so a CRLF split across two chunks still joins.
+      buffer = `${buffer}${chunk}`.replace(/\r\n/g, "\n");
+      let split;
+      while ((split = buffer.indexOf("\n\n")) !== -1) {
+        const block = buffer.slice(0, split);
+        buffer = buffer.slice(split + 2);
+        const parsed = loopEvent(block);
+        if (parsed && (await handleLoopEvent(parsed, turn, context))) return;
+      }
+    }
+    if (turn.idled)
+      throw aiError("TIMEOUT", "The site's loop stopped answering.");
+    // A stream that ends without `turn.end` or `error` still ends the turn.
+    endLoopTurn(turn);
+    const finished = view.finishActivity(true);
+    if (finished?.entry) context?.record(finished.entry);
+  }
+  function loopEvent(block) {
+    let type = "message";
+    const data = [];
+    for (const line of block.split("\n")) {
+      if (line.startsWith("event:")) type = line.slice(6).trim().slice(0, 40);
+      else if (line.startsWith("data:"))
+        data.push(line.slice(5).replace(/^ /, ""));
+    }
+    if (!data.length) return null;
+    try {
+      const parsed = JSON.parse(data.join("\n"));
+      return plainObject(parsed) ? { type, data: parsed } : null;
+    } catch {
+      return null;
+    }
+  }
+  /** A card from the stream, drawn only if it passes the section 7.4 validator. */
+  async function loopCard(card) {
+    if (!plainObject(card)) return undefined;
+    return (
+      (await runtime("cards.validate", {
+        card,
+        fingerprint: registration?.fingerprint,
+      }).catch(() => null)) ?? undefined
+    );
+  }
+  /**
+   * One section 14.3 event. Only the known types are applied, each with its
+   * own bounds; anything else is ignored. Returns true once the turn is over.
+   */
+  async function handleLoopEvent({ type, data }, turn, context) {
+    if (turn.done) return true;
+    // When the visitor's model answers, what the panel shows about that
+    // model comes from the extension's own provider, not from the stream.
+    const visitor = !turn.site;
+    if (type === "turn.start") {
+      turn.turnId = boundedText(data.turnId, 100) || null;
+      return false;
+    }
+    if (type === "error") {
+      endLoopTurn(turn);
+      view.finishActivity(false);
+      view.addBubble(
+        "assistant",
+        `The assistant reported an error: ${boundedText(data.message, 300) || boundedText(data.code, 40) || "unknown error"}`,
+        { error: true, persist: false },
+      );
+      return true;
+    }
+    if (type === "turn.end") {
+      endLoopTurn(turn);
+      noteLoopTurn(turn, visitor ? null : data.usage);
+      const finished = view.finishActivity(true);
+      if (finished?.entry) context?.record(finished.entry);
+      return true;
+    }
+    if (type === "message") {
+      const entry = loopMessage(data.entry ?? data);
+      if (entry) {
+        const streamed = view.currentTurn()?.outputNode ?? null;
+        context?.record(
+          view.addAssistantResult(
+            {
+              message: {
+                content: Array.isArray(entry.content)
+                  ? entry.content
+                      .filter((part) => part.type === "text")
+                      .map((part) => part.text)
+                      .join("\n")
+                  : entry.content,
+                reasoning: entry.reasoning ?? null,
+                attachments: Array.isArray(entry.content)
+                  ? entry.content.filter((part) => part.type === "image")
+                  : [],
+              },
+            },
+            streamed,
+          ),
+        );
+        // The composer's message replaces a relayed round's provisional text.
+        view.discardProvisional();
+      }
+      return false;
+    }
+    if (type === "tool.client") {
+      void runLoopTool(data, turn);
+      return false;
+    }
+    if (type === "model.client") {
+      void runLoopCompletion(data, turn);
+      return false;
+    }
+    if (type === "model.cancel") {
+      cancelLoopCompletion(data, turn);
+      return false;
+    }
+    if (type === "input.client") {
+      void loopPrompt(turn, () => runLoopInput(data, turn));
+      return false;
+    }
+    if (type === "approval.client") {
+      void loopPrompt(turn, () => runLoopApproval(data, turn));
+      return false;
+    }
+    const event = { turnId: undefined };
+    if (type === "output.delta" || type === "reasoning.delta") {
+      const text = boundedText(data.text, LOOP_DELTA_UNITS);
+      if (!text) return false;
+      view.applyEvent(
+        type === "output.delta"
+          ? { ...event, type, text }
+          : { ...event, type: "agent.reasoning.delta", text },
+      );
+    } else if (type === "model.start")
+      view.applyEvent({
+        ...event,
+        type,
+        round: Number.isInteger(data.round) ? data.round : undefined,
+        model: visitor
+          ? (turn.entry?.id ?? "")
+          : boundedText(data.model, 200) || turn.entry?.id || "",
+      });
+    else if (type === "model.end")
+      view.applyEvent({
+        ...event,
+        type,
+        round: Number.isInteger(data.round) ? data.round : undefined,
+        toolCalls: Number.isInteger(data.toolCalls) ? data.toolCalls : 0,
+        ...(visitor ? {} : { usage: loopUsage(data.usage) ?? undefined }),
+      });
+    else if (type === "model.stalled")
+      view.applyEvent({
+        ...event,
+        type,
+        round: Number.isInteger(data.round) ? data.round : undefined,
+      });
+    else if (type === "agent.phase" || type === "progress")
+      view.applyEvent({
+        ...event,
+        type,
+        text: boundedText(data.text, 200),
+        toolId: boundedText(data.toolId, 128),
+      });
+    else if (type === "tool.start")
+      view.applyEvent({
+        ...event,
+        type,
+        id: boundedText(data.id, 128),
+        name: boundedText(data.name, 128) || "tool",
+        source: ["site", "mcp", "backend", "agent"].includes(data.source)
+          ? data.source
+          : "backend",
+        arguments: boundedText(
+          typeof data.arguments === "string"
+            ? data.arguments
+            : JSON.stringify(data.arguments ?? {}),
+          2000,
+        ),
+      });
+    else if (type === "tool.end")
+      view.applyEvent({
+        ...event,
+        type,
+        id: boundedText(data.id, 128),
+        name: boundedText(data.name, 128),
+        ok: data.ok !== false,
+        result: boundedText(
+          typeof data.result === "string"
+            ? data.result
+            : JSON.stringify(data.result ?? null),
+          2000,
+        ),
+        card: await loopCard(data.card),
+      });
+    else if (type === "card")
+      view.applyEvent({
+        ...event,
+        type,
+        toolId: boundedText(data.toolId, 128),
+        card: await loopCard(data.card),
+      });
+    else if (type === "card.update") {
+      const card = await loopCard(data.card);
+      if (card)
+        view.applyEvent({
+          ...event,
+          type,
+          cardId: boundedText(data.cardId, 32),
+          card,
+        });
+    }
+    return false;
+  }
+  /** A complete assistant `TranscriptEntry` from the stream (SPEC 14.3). */
+  function loopMessage(raw) {
+    if (!plainObject(raw) || (raw.type != null && raw.type !== "message"))
+      return null;
+    if (raw.role != null && raw.role !== "assistant") return null;
+    const content = entryContent(raw.content);
+    if (content == null) return null;
+    return {
+      content,
+      reasoning:
+        typeof raw.reasoning === "string"
+          ? raw.reasoning.slice(0, 12000)
+          : null,
+    };
+  }
+  /** Usage the stream reports for a site model's turn, or null. */
+  function loopUsage(raw) {
+    if (!plainObject(raw)) return null;
+    const usage = {};
+    for (const key of [
+      "promptTokens",
+      "completionTokens",
+      "totalTokens",
+      "cachedTokens",
+      "reasoningTokens",
+    ]) {
+      const value = raw[key] ?? 0;
+      if (!Number.isSafeInteger(value) || value < 0) return null;
+      usage[key] = value;
+    }
+    return usage;
+  }
+  /**
+   * The footer's numbers once a loop turn ends: from the extension's own
+   * provider for rounds it answered, from the stream only for a site model,
+   * and none at all when neither reported any (SPEC 15.1, 15.2).
+   */
+  function noteLoopTurn(turn, streamUsage) {
+    const usage = turn.usage ?? loopUsage(streamUsage);
+    live = null;
+    lastTurn = {
+      at: Date.now(),
+      usageReported: usage != null,
+      promptTokens: usage?.promptTokens ?? 0,
+      completionTokens: usage?.completionTokens ?? 0,
+      cachedTokens: usage?.cachedTokens ?? 0,
+      contextTokens: turn.contextTokens,
+      contextCachedTokens: turn.contextCachedTokens,
+      reasoningTokens: usage?.reasoningTokens ?? 0,
+      contextWindow: turn.contextWindow ?? turn.site?.contextWindow ?? null,
+      processor: null,
+    };
+    if (usage) {
+      session.promptTokens += lastTurn.promptTokens;
+      session.completionTokens += lastTurn.completionTokens;
+    }
+    session.turns++;
+    void refreshSettings();
+  }
+
+  /** Prompts open one at a time; an open one keeps the stream's idle clock still. */
+  function enqueuePrompt(task) {
+    const next = promptChain.then(task, task);
+    promptChain = next.catch(() => {});
+    return next;
+  }
+  function loopPrompt(turn, task) {
+    turn.prompting++;
+    return enqueuePrompt(task).finally(() => {
+      turn.prompting--;
+      turn.lastActivity = Date.now();
+    });
+  }
+
+  /** `tool.client`: one of the page's site tools, run as in hosted chat. */
+  async function runLoopTool(data, turn) {
+    const id = callId(data?.id);
+    if (!id || turn.done || turn.answered.has(`tool:${id}`)) return;
+    turn.answered.add(`tool:${id}`);
+    turn.tooling++;
+    let result;
+    try {
+      result = await runtime("loop.tool", {
+        manifest: turn.contract.manifest,
+        registrationId: turn.contract.id,
+        fingerprint: turn.contract.fingerprint,
+        name: boundedText(data.name, 64),
+        arguments:
+          typeof data.arguments === "string"
+            ? data.arguments.slice(0, 65536)
+            : plainObject(data.arguments)
+              ? data.arguments
+              : {},
+        invocationId: id,
+      });
+    } catch (error) {
+      result = {
+        isError: true,
+        message: String(error?.message ?? "The tool failed.").slice(0, 300),
+      };
+    } finally {
+      turn.tooling--;
+    }
+    if (turn.done) return;
+    await loopPost(turn, "tool-results", { id, result });
+  }
+
+  /** `input.client`: the value goes to `inputs` once and is kept nowhere. */
+  async function runLoopInput(data, turn) {
+    const id = callId(data?.id);
+    if (!id || turn.done || turn.answered.has(`input:${id}`)) return;
+    turn.answered.add(`input:${id}`);
+    const definition = R.userInputDeclaration(data.input);
+    let answer = { id, cancelled: true };
+    if (definition)
+      try {
+        const value = await view.requestUserInput({
+          toolName: view.stepName(boundedText(data.toolId, 128)) ?? "A tool",
+          origin: location.origin,
+          definition,
+          hint: definition.secret
+            ? "Masked. Sent only to this site's loop for this call; अर्जुनः does not store it or send it to the model."
+            : "Sent only to this site's loop for this call; अर्जुनः does not store it or send it to the model.",
+        });
+        answer = { id, value };
+      } catch {
+        answer = { id, cancelled: true };
+      }
+    if (turn.done) return;
+    await loopPost(turn, "inputs", answer);
+  }
+
+  /** `approval.client`: anything but the visitor choosing Approve is false. */
+  async function runLoopApproval(data, turn) {
+    const id = callId(data?.id);
+    if (!id || turn.done || turn.answered.has(`approval:${id}`)) return;
+    turn.answered.add(`approval:${id}`);
+    const toolId = boundedText(data.toolId, 128);
+    let approved = false;
+    if (R.approvalPrompt(data.approval))
+      approved =
+        (await view
+          .requestApproval({
+            origin: location.origin,
+            toolName: view.stepName(toolId),
+            approval: data.approval,
+          })
+          .catch(() => false)) === true;
+    if (turn.done) return;
+    view.markApproval(toolId, approved);
+    await loopPost(turn, "approvals", { id, approved });
+  }
+
+  /** Only the section 5.3 request fields cross to the broker. */
+  function loopRequest(request) {
+    const out = {};
+    for (const key of [
+      "messages",
+      "model",
+      "temperature",
+      "maxTokens",
+      "tools",
+      "toolChoice",
+      "reasoning",
+    ])
+      if (request[key] !== undefined) out[key] = request[key];
+    return out;
+  }
+
+  /**
+   * Posts a round's deltas to `model-results` in order, before its answer
+   * (SPEC 15, `stream: true`). Deltas that arrive while a post is in flight
+   * coalesce per type, so a fast round costs few posts and loses none.
+   */
+  function loopDeltaPoster(turn, id, completion) {
+    let queue = [];
+    let running = null;
+    const drain = async () => {
+      while (queue.length) {
+        const delta = queue.shift();
+        if (turn.done || completion.cancelled) {
+          queue = [];
+          break;
+        }
+        await loopPost(turn, "model-results", { id, delta });
+      }
+      running = null;
+    };
+    return {
+      push(type, text) {
+        const last = queue.at(-1);
+        if (
+          last?.type === type &&
+          last.text.length + text.length <= LOOP_DELTA_POST
+        )
+          last.text += text;
+        else queue.push({ type, text });
+        running ??= drain();
+      },
+      async flush() {
+        while (running) await running;
+      },
+    };
+  }
+
+  /**
+   * `model.client` (SPEC 15.1): the extension answers from the visitor's
+   * model, with the validation a page's `models.generate` gets, in a
+   * conversation it keeps per loop thread. The round's deltas are drawn here
+   * as provisional text; the loop gets them only when it asked to.
+   */
+  async function runLoopCompletion(data, turn) {
+    const id = callId(data?.id);
+    if (!id || turn.done || turn.answered.has(`model:${id}`)) return;
+    turn.answered.add(`model:${id}`);
+    const refuse = (code, message) =>
+      loopPost(turn, "model-results", { id, error: { code, message } });
+    // The site's own model answers this turn: the extension does no model
+    // work for it (SPEC 15.2).
+    if (turn.site)
+      return refuse(
+        "NOT_SUPPORTED",
+        "The visitor chose this site's own model for this turn.",
+      );
+    if (!turn.entry)
+      return refuse(
+        "NOT_CONFIGURED",
+        "No model of the visitor's is available to this site.",
+      );
+    if (
+      !plainObject(data.request) ||
+      !Array.isArray(data.request.messages) ||
+      (data.conversation != null &&
+        (typeof data.conversation !== "string" ||
+          !CONVERSATION_ID.test(data.conversation))) ||
+      (data.stream != null && typeof data.stream !== "boolean")
+    )
+      return refuse("INVALID_REQUEST", "The model.client event is malformed.");
+    const completion = {
+      requestId: crypto.randomUUID(),
+      cancelled: false,
+      conversation: null,
+    };
+    turn.completions.set(id, completion);
+    const poster =
+      data.stream === true ? loopDeltaPoster(turn, id, completion) : null;
+    const round = turn.rounds++;
+    view.applyEvent({ type: "model.start", round, model: turn.entry.id });
+    loopRounds.set(completion.requestId, {
+      round: { output: 0, reasoning: 0 },
+      onEvent(event) {
+        if (completion.cancelled || turn.done) return;
+        if (event.type === "stalled")
+          return view.applyEvent({ type: "model.stalled", round });
+        if (event.type === "output.delta")
+          view.applyEvent({ type: "output.delta", text: event.text });
+        else
+          view.applyEvent({
+            type: "agent.reasoning.delta",
+            text: event.text,
+            provisional: true,
+            provider: String(turn.entry.displayName ?? "model").slice(0, 80),
+          });
+        poster?.push(event.type, event.text);
+      },
+    });
+    try {
+      completion.conversation = await loopConversation(
+        turn.threadId,
+        data.conversation ?? null,
+      );
+      if (completion.cancelled || turn.done) return;
+      const answer = await runtime("models.generate", {
+        ...loopRequest(data.request),
+        conversationId: completion.conversation,
+        _request: completion.requestId,
+        _stream: true,
+      });
+      if (completion.cancelled || turn.done) return;
+      const { _warnings, ...result } = answer ?? {};
+      void _warnings;
+      // The footer shows this round from the extension's own provider.
+      turn.usage ??= {
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        cachedTokens: 0,
+        reasoningTokens: 0,
+      };
+      for (const key of Object.keys(turn.usage))
+        turn.usage[key] += Number(result.usage?.[key]) || 0;
+      turn.contextTokens = result.usage?.promptTokens ?? null;
+      turn.contextCachedTokens = result.usage?.cachedTokens ?? null;
+      turn.contextWindow = result.contextWindow ?? turn.contextWindow;
+      const calls = result.message?.toolCalls?.length ?? 0;
+      view.applyEvent({
+        type: "model.end",
+        round,
+        usage: result.usage,
+        toolCalls: calls,
+      });
+      // Only the composer knows whether a round is the answer; one that
+      // ends in tool calls is not, so its provisional text goes now.
+      if (calls) view.discardProvisional();
+      await poster?.flush();
+      if (completion.cancelled || turn.done) return;
+      await loopPost(turn, "model-results", {
+        id,
+        result,
+        conversation: completion.conversation,
+      });
+    } catch (error) {
+      if (completion.cancelled || turn.done) return;
+      view.discardProvisional();
+      await poster?.flush();
+      await loopPost(turn, "model-results", {
+        id,
+        error: {
+          code: typeof error?.code === "string" ? error.code : "INTERNAL_ERROR",
+          message: String(error?.message ?? "The completion failed.").slice(
+            0,
+            300,
+          ),
+        },
+        ...(completion.conversation
+          ? { conversation: completion.conversation }
+          : {}),
+      });
+    } finally {
+      loopRounds.delete(completion.requestId);
+      if (turn.completions.get(id) === completion) turn.completions.delete(id);
+      turn.lastActivity = Date.now();
+    }
+  }
+  /** `model.cancel`: abort that completion and post nothing more for it. */
+  function cancelLoopCompletion(data, turn) {
+    const id = callId(data?.id);
+    const completion = id ? turn.completions.get(id) : null;
+    if (!completion) return;
+    completion.cancelled = true;
+    turn.completions.delete(id);
+    loopRounds.delete(completion.requestId);
+    void runtime("models.cancel", { request: completion.requestId }).catch(
+      () => {},
+    );
+    view.discardProvisional();
+  }
+
   function snapshot(fields) {
     const result = {};
     if (fields.includes("title")) result.title = document.title.slice(0, 500);
@@ -1325,8 +2760,10 @@
     return result;
   }
 
-  function showConsent(request, current, manifest, tools, status) {
+  function showConsent(request, current, manifest, tools, status, mode = null) {
     ensureUi();
+    const loop = mode?.loop ?? manifest?.loop ?? null;
+    const siteAnswer = mode?.siteModel ?? null;
     return new Promise((resolve) => {
       const overlay = document.createElement("div");
       overlay.className = "overlay";
@@ -1375,11 +2812,44 @@
         body.append(node);
       };
       if (request.reason) row(request.reason);
+      // Who writes the prompts and who answers them, per mode (SPEC 15.3).
+      const approvals = manifest
+        ? [
+            ...manifest.tools
+              .filter((tool) => tool.requiresApproval)
+              .map((tool) => tool.name),
+            ...manifest.mcpServers.flatMap((server) =>
+              (server.tools ?? [])
+                .filter((tool) => tool.requiresApproval)
+                .map((tool) => `${tool.name} (${server.name})`),
+            ),
+          ]
+        : [];
+      for (const line of H.consentLines({
+        mode: loop ? "loop" : manifest ? "hosted" : "page",
+        composer: loop?.composer ?? request.composer ?? "webapp",
+        siteModel: siteAnswer,
+        approvals,
+      }))
+        row(line);
       let modelPicker = null;
       const providerBoxes = [];
+      // A site model answering needs none of the visitor's (SPEC 15.2).
       const needsModel =
-        request.capabilities.includes("models.generate") ||
-        request.capabilities.includes("chat.hosted");
+        !siteAnswer &&
+        (request.capabilities.includes("models.generate") ||
+          request.capabilities.includes("chat.hosted"));
+      // The site restricted which of the user's models may answer it (SPEC
+      // 4); only qualifying models are offered, and with none there is
+      // nothing to approve.
+      const restricted = Boolean(status?.require);
+      const unavailable = restricted && !status.models?.length;
+      if (restricted)
+        row(
+          unavailable
+            ? `This site restricted the choice of model (${describeRequire(status.require)}), and none of your configured models qualifies. Add one in extension settings, then try again.`
+            : `This site restricted the choice of model: ${describeRequire(status.require)}. Only models that qualify are listed.`,
+        );
       if (needsModel && status?.models?.length) {
         const field = document.createElement("label");
         field.className = "field";
@@ -1412,9 +2882,9 @@
         }
         field.append(modelPicker);
         body.append(field);
-      } else if (status?.provider)
+      } else if (status?.provider && !siteAnswer)
         row(`Requests are sent to: ${status.provider}`);
-      else if (needsModel)
+      else if (needsModel && !unavailable)
         row(
           "No provider is configured yet. Add an API key or pair the desktop app in extension settings.",
         );
@@ -1427,6 +2897,12 @@
       row(
         `Permissions after approval:\n${effective.map(describeCapability).join("\n")}`,
       );
+      // Level 1 and 2 generation keeps provider state between a reply's tool
+      // rounds (SPEC 5.4), so the dialog that grants it says so.
+      if (effective.includes("models.generate"))
+        row(
+          "Keeps the model's working state during a reply's tool steps on this device, for up to 2 days.",
+        );
       if (
         request.capabilities.includes("models.catalog") &&
         status?.providers?.length
@@ -1473,6 +2949,7 @@
             `Site tool: ${tool.name} — ${tool.description}`,
             [
               JSON.stringify(tool.inputSchema, null, 2),
+              ...(tool.requiresApproval ? ["\nAsks you before it runs."] : []),
               ...(tool.userInputs?.length
                 ? [
                     "\nExtension-collected inputs (not shown to the model):\n" +
@@ -1515,7 +2992,24 @@
           for (const tool of server.tools ?? [])
             details(
               `Declared tool at ${server.name}: ${tool.name} — ${tool.description}`,
-              JSON.stringify(tool.inputSchema, null, 2),
+              [
+                JSON.stringify(tool.inputSchema, null, 2),
+                ...(tool.requiresApproval
+                  ? ["\nAsks you before it runs."]
+                  : []),
+                // Collected here and sent only to this server (SPEC 7.8).
+                ...(tool.userInputs?.length
+                  ? [
+                      `\nInputs you provide, sent only to ${new URL(server.url).origin} and not shown to the model:\n` +
+                        tool.userInputs
+                          .map(
+                            (input) =>
+                              `- ${input.label} (${input.id}${input.secret ? ", masked" : ""})`,
+                          )
+                          .join("\n"),
+                    ]
+                  : []),
+              ].join(""),
             );
         }
         if (
@@ -1547,6 +3041,10 @@
       // Only a failed lookup blocks approval. An empty catalog is the ordinary
       // first-run state, and the dialog already explains that one; refusing it
       // here would leave a fresh install with no way to grant anything.
+      if (unavailable) {
+        allow.hidden = true;
+        deny.textContent = "Close";
+      }
       if (level !== "assistant" && !status) {
         allow.disabled = true;
         const unavailable = document.createElement("p");
@@ -1559,7 +3057,8 @@
         pendingConsent = null;
         overlay.remove();
         resolve({
-          allowed,
+          allowed: allowed && !unavailable,
+          unavailable,
           model: allowed && modelPicker ? modelPicker.value : null,
           providers:
             allowed && providerBoxes.length
@@ -1586,7 +3085,7 @@
       };
       body.addEventListener("scroll", updateHint);
       requestAnimationFrame(updateHint);
-      allow.focus();
+      (unavailable ? deny : allow).focus();
     });
   }
 
@@ -1625,6 +3124,32 @@
     );
   }
 
+  /**
+   * A round stream event as the page may receive it: a stall notice, or one
+   * bounded delta whose text, added to what this round already carried, stays
+   * within the result's own answer and reasoning bounds.
+   */
+  function roundEvent(event, round) {
+    if (event?.type === "stalled") return { type: "stalled" };
+    const key =
+      event?.type === "output.delta"
+        ? "output"
+        : event?.type === "reasoning.delta"
+          ? "reasoning"
+          : null;
+    if (
+      !key ||
+      typeof event.text !== "string" ||
+      !event.text ||
+      event.text.length > ROUND_DELTA_UNITS
+    )
+      return null;
+    const text = event.text.slice(0, ROUND_TEXT_UNITS[key] - round[key]);
+    if (!text) return null;
+    round[key] += text.length;
+    return { type: event.type, text };
+  }
+
   function matchesSession(message) {
     return (
       alive &&
@@ -1641,8 +3166,47 @@
       sendResponse({ ok: matchesSession(message) });
       return false;
     }
+    if (message?.kind === "arjunah-round") {
+      // A round the extension is answering for a hosted loop (SPEC 15.1):
+      // drawn in this panel, never posted to the page as a stream event.
+      const relayed =
+        alive &&
+        message.session === nonce &&
+        typeof message.request === "string"
+          ? loopRounds.get(message.request)
+          : null;
+      if (relayed) {
+        const event = roundEvent(message.event, relayed.round);
+        if (event) relayed.onEvent(event);
+        sendResponse({ ok: Boolean(event) });
+        return false;
+      }
+      // One event of a round this document is streaming (SPEC 5.3, 10).
+      const round =
+        alive &&
+        message.session === nonce &&
+        typeof message.request === "string"
+          ? streaming.get(message.request)
+          : null;
+      const event = round ? roundEvent(message.event, round) : null;
+      if (event) toPage({ kind: "stream", id: message.request, event });
+      sendResponse({ ok: Boolean(event) });
+      return false;
+    }
     if (message?.kind === "arjunah-progress") {
-      if (message.session === nonce) view?.applyEvent(message);
+      if (message.session === nonce) {
+        view?.applyEvent(message);
+        // Placement and loaded context arrive with each round of a turn.
+        if (message.type === "model.end" && message.processor) {
+          live = {
+            processor: validProcessor(message.processor),
+            contextWindow: Number.isSafeInteger(message.contextWindow)
+              ? message.contextWindow
+              : null,
+          };
+          renderStatus();
+        }
+      }
       return false;
     }
     if (message?.kind === "arjunah-ui") {
@@ -1684,6 +3248,129 @@
         return true;
       }
       return false;
+    }
+    if (message?.kind === "arjunah-site-generate") {
+      // One round of the site's own model (SPEC 15.2), answered by the page's
+      // `models.generate` and abortable by the broker.
+      const active = registration;
+      if (
+        !matchesSession(message) ||
+        !active?.manifest.models?.generate ||
+        typeof message.id !== "string"
+      ) {
+        sendResponse({
+          ok: false,
+          error: {
+            code: "PROVIDER_ERROR",
+            message: "The site's model is not available on this page.",
+          },
+        });
+        return false;
+      }
+      const pageId = crypto.randomUUID();
+      siteRounds.set(message.id, pageId);
+      callPage("site-generate", { request: message.request }, 180000, pageId)
+        .then(
+          (result) =>
+            sendResponse(
+              registration === active && matchesSession(message)
+                ? { ok: true, result }
+                : {
+                    ok: false,
+                    error: {
+                      code: "PROVIDER_ERROR",
+                      message: "The site replaced its assistant.",
+                    },
+                  },
+            ),
+          (error) =>
+            sendResponse({
+              ok: false,
+              error: {
+                code: error?.code === "TIMEOUT" ? "TIMEOUT" : "PROVIDER_ERROR",
+                message: String(error?.message ?? "").slice(0, 300),
+              },
+            }),
+        )
+        .finally(() => siteRounds.delete(message.id));
+      return true;
+    }
+    if (message?.kind === "arjunah-site-generate-cancel") {
+      const pageId =
+        typeof message.id === "string" ? siteRounds.get(message.id) : null;
+      if (pageId && matchesSession(message)) {
+        toPage({ kind: "page-call-abort", id: pageId });
+        const pending = pagePending.get(pageId);
+        if (pending) {
+          clearTimeout(pending.timer);
+          pagePending.delete(pageId);
+          pending.reject(aiError("ABORTED", "The round was cancelled."));
+        }
+      }
+      sendResponse({ ok: true });
+      return false;
+    }
+    if (message?.kind === "arjunah-approval") {
+      // The approval prompt of SPEC 7.8 before the broker invokes a tool that
+      // declared `requiresApproval`. Only Approve answers true.
+      if (!matchesSession(message) || !view) {
+        sendResponse({ ok: false });
+        return false;
+      }
+      const toolId =
+        typeof message.toolId === "string" ? message.toolId.slice(0, 128) : "";
+      void enqueuePrompt(() =>
+        view.requestApproval({
+          origin: location.origin,
+          toolName:
+            typeof message.toolName === "string" ? message.toolName : null,
+          approval: message.approval,
+        }),
+      ).then(
+        (approved) => {
+          const answer = approved === true && matchesSession(message);
+          view.markApproval(toolId, answer);
+          sendResponse({ ok: true, approved: answer });
+        },
+        () => sendResponse({ ok: true, approved: false }),
+      );
+      return true;
+    }
+    if (message?.kind === "arjunah-tool-input") {
+      // A declared remote tool's collected input (SPEC 7.8): shown with the
+      // origin that receives it, returned to the broker, kept nowhere.
+      let recipient = null;
+      try {
+        if (new URL(message.recipient).origin === message.recipient)
+          recipient = message.recipient;
+      } catch {
+        recipient = null;
+      }
+      const definition = R.userInputDeclaration(message.definition);
+      if (!matchesSession(message) || !view || !definition || !recipient) {
+        sendResponse({ ok: false });
+        return false;
+      }
+      void enqueuePrompt(() =>
+        view.requestUserInput({
+          toolName:
+            typeof message.toolName === "string"
+              ? message.toolName.slice(0, 64)
+              : "A tool",
+          origin: recipient,
+          definition,
+          hint: definition.secret
+            ? `Masked. Sent only to ${recipient} for this call; अर्जुनः does not store it or send it to the model.`
+            : `Sent only to ${recipient} for this call; अर्जुनः does not store it or send it to the model.`,
+        }),
+      ).then(
+        (value) =>
+          sendResponse(
+            matchesSession(message) ? { ok: true, value } : { ok: false },
+          ),
+        () => sendResponse({ ok: false }),
+      );
+      return true;
     }
     if (message?.kind === "arjunah-tool") {
       if (!matchesSession(message)) {

@@ -1,4 +1,9 @@
 import { clearMcpSessions } from "../../src/lib/mcp.js";
+import {
+  createProviderStateStore,
+  installProviderStateStore,
+  memoryBackend,
+} from "../../src/lib/provider-state.js";
 
 /**
  * A read from `chrome.storage.local` as Chrome really answers it: the value is
@@ -38,6 +43,10 @@ export async function broker(t) {
     invocations: [],
     // Live turn events the background sends to the content script (SPEC 10).
     events: [],
+    // Round stream events of direct generates the page asked to stream.
+    rounds: [],
+    // Other messages the background sent the content script.
+    messages: [],
     hooks: {},
     removed: null,
   };
@@ -83,6 +92,12 @@ export async function broker(t) {
           if (active?.session === message.session) state.events.push(message);
           return { ok: true };
         }
+        // A page's own round stream (SPEC 5.3), bound to session and request.
+        if (message.kind === "arjunah-round") {
+          if (active?.session === message.session && options.frameId === 0)
+            state.rounds.push(message);
+          return { ok: true };
+        }
         const matches =
           active &&
           options.frameId === 0 &&
@@ -99,6 +114,13 @@ export async function broker(t) {
             result: (await state.hooks.tool?.(message)) ?? { ok: true },
           };
         }
+        // Site-model rounds, approval prompts, and collected inputs (SPEC
+        // 15.2, 7.8) answered by the test as the content script would.
+        if (state.hooks.message) {
+          state.messages.push(message);
+          const reply = await state.hooks.message(message);
+          if (reply !== undefined) return reply;
+        }
         return { ok: true };
       },
     },
@@ -110,6 +132,12 @@ export async function broker(t) {
       ? state.hooks.fetch(url, init, payload)
       : Response.json({ choices: [{ message: { content: "done" } }] });
   };
+  // Node has no IndexedDB. Each background gets its own in-memory store,
+  // which `state.providerState` exposes so a test can look inside it.
+  state.providerState = memoryBackend();
+  installProviderStateStore(
+    createProviderStateStore({ backend: state.providerState }),
+  );
   await import(`../../src/background.js?test=${crypto.randomUUID()}`);
   t.after(() => {
     globalThis.chrome = previous.chrome;

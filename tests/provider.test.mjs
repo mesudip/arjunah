@@ -1385,3 +1385,137 @@ for (const [protocol, path] of [
       globalThis.fetch = originalFetch;
     }
   });
+
+test("every wire format receives tool schemas without the section 7.1 hints", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+  // A Pydantic-generated field plus a type list, as a FastAPI catalog sends.
+  const inputSchema = {
+    type: "object",
+    properties: {
+      note: {
+        anyOf: [{ type: "string", format: "date-time" }, { type: "null" }],
+        default: null,
+        title: "Note",
+      },
+      blob: {
+        type: ["string", "null"],
+        contentMediaType: "image/png",
+        contentEncoding: "base64",
+        readOnly: true,
+        writeOnly: false,
+        deprecated: true,
+        description: "Old upload",
+      },
+    },
+    required: [],
+    additionalProperties: false,
+  };
+  const expected = {
+    type: "object",
+    properties: {
+      note: {
+        anyOf: [{ type: "string" }, { type: "null" }],
+        default: null,
+        title: "Note",
+      },
+      blob: {
+        description: "Old upload",
+        anyOf: [{ type: "string" }, { type: "null" }],
+      },
+    },
+    required: [],
+    additionalProperties: false,
+  };
+  const capabilities = { tools: true, vision: false, reasoning: false };
+  const zen = (protocol, model) => ({
+    kind: "opencode",
+    baseUrl: "https://opencode.ai/zen/v1",
+    apiKey: "zen-key",
+    model,
+    protocol,
+    capabilities,
+  });
+  const cases = [
+    [
+      "chat completions",
+      { baseUrl: "https://provider.test/v1", model: "demo", apiKey: "k" },
+      { choices: [{ message: { role: "assistant", content: "ok" } }] },
+      (payload) => payload.tools[0].function.parameters,
+    ],
+    [
+      "responses",
+      zen("responses", "gpt-5.6-luna"),
+      {
+        status: "completed",
+        output: [
+          { type: "message", content: [{ type: "output_text", text: "ok" }] },
+        ],
+      },
+      (payload) => payload.tools[0].parameters,
+    ],
+    [
+      "anthropic",
+      zen("anthropic", "claude-sonnet-4-6"),
+      { content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" },
+      (payload) => payload.tools[0].input_schema,
+    ],
+    [
+      "gemini",
+      zen("gemini", "gemini-3.1-pro"),
+      {
+        candidates: [
+          { content: { parts: [{ text: "ok" }] }, finishReason: "STOP" },
+        ],
+      },
+      (payload) => payload.tools[0].functionDeclarations[0].parameters,
+    ],
+    [
+      "ollama",
+      {
+        kind: "ollama",
+        cloud: true,
+        baseUrl: "https://ollama.com",
+        apiKey: "k",
+        model: "qwen3-vl:235b",
+        capabilities,
+      },
+      { message: { role: "assistant", content: "ok" }, done: true },
+      (payload) => payload.tools[0].function.parameters,
+    ],
+    [
+      "desktop",
+      {
+        kind: "desktop",
+        baseUrl: "http://127.0.0.1:48123",
+        token: "desktop-token-abcdefghijklmnop",
+        providerId: "opencode",
+        providerName: "OpenCode",
+        model: "opencode/big-pickle",
+        capabilities,
+      },
+      {
+        id: "desk-1",
+        model: "opencode/default",
+        message: { role: "assistant", content: "ok", toolCalls: [] },
+        finishReason: "stop",
+      },
+      (payload) => payload.tools[0].inputSchema,
+    ],
+  ];
+  for (const [name, config, body, schemaOf] of cases) {
+    let payload;
+    globalThis.fetch = async (_url, init) => {
+      payload = JSON.parse(init.body);
+      return Response.json(body);
+    };
+    const result = await generate(config, {
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ name: "plan", inputSchema }],
+    });
+    assert.equal(result.message.content, "ok", name);
+    assert.deepEqual(schemaOf(payload), expected, name);
+  }
+});

@@ -148,6 +148,135 @@
         </p>
       </section>
 
+      <section class="card" id="ollama-section">
+        <div class="section-head">
+          <h2>Ollama on your own server</h2>
+          <span class="eyebrow">Self-hosted</span>
+        </div>
+        <p class="help">
+          Use the models of an Ollama server on this computer or your network.
+          अर्जुनः reads each model's own capabilities from the server, so images
+          go only to vision models and site tools only to models that accept
+          them. Requests go only to the address you enter, except for cloud
+          models the server itself forwards to ollama.com, which are marked.
+        </p>
+        <form id="ollama-form">
+          <label class="field"
+            >Server address<input
+              id="ollama-base-url"
+              type="text"
+              inputmode="url"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="http://127.0.0.1:11434"
+          /></label>
+          <label class="field"
+            >API key (optional)<input
+              id="ollama-api-key"
+              type="password"
+              autocomplete="off"
+              placeholder="Only for a server behind an authenticating proxy"
+          /></label>
+          <label class="keep-key"
+            ><input id="ollama-keep-key" type="checkbox" /> Use the saved
+            key</label
+          >
+          <label class="field"
+            >Default model<span id="ollama-model-mount"></span
+          ></label>
+          <div class="actions">
+            <button type="button" id="clear-ollama" class="btn btn-danger">
+              Disconnect
+            </button>
+            <button type="button" id="refresh-ollama" class="btn btn-ghost">
+              Refresh models
+            </button>
+            <button type="button" id="test-ollama" class="btn btn-secondary">
+              Test connection
+            </button>
+            <button type="submit" class="btn btn-primary">
+              Save and load models
+            </button>
+          </div>
+        </form>
+        <p id="ollama-status" class="status" role="status"></p>
+        <p class="help">
+          Pull a model first, for example <code>ollama pull qwen3-vl:2b</code>.
+          To reach a server on another computer, start it with
+          <code>OLLAMA_HOST=0.0.0.0</code>. Plain <code>http</code> is accepted
+          only for this computer and local-network addresses. Ollama refuses
+          requests that carry a browser extension's origin, so अर्जुनः removes
+          that header on its own requests to this one address; you do not need
+          to change <code>OLLAMA_ORIGINS</code>, and web pages' requests to the
+          server are untouched.
+        </p>
+      </section>
+
+      <section class="card" id="ollama-cloud-section">
+        <div class="section-head">
+          <h2>Ollama Cloud API key</h2>
+          <span class="eyebrow">API key</span>
+        </div>
+        <p class="help">
+          Use the models Ollama hosts at ollama.com with an API key. The key
+          stays in this browser profile and syncs only to a desktop app you
+          paired.
+        </p>
+        <form id="ollama-cloud-form">
+          <label class="field"
+            >Base URL<input
+              id="ollama-cloud-base-url"
+              type="url"
+              value="https://ollama.com"
+              readonly /></label
+          ><label class="field"
+            >API key<input
+              id="ollama-cloud-api-key"
+              type="password"
+              autocomplete="off"
+              placeholder="Ollama API key"
+          /></label>
+          <label class="keep-key"
+            ><input id="ollama-cloud-keep-key" type="checkbox" /> Use the saved
+            Ollama API key</label
+          >
+          <label class="field"
+            >Default model<span id="ollama-cloud-model-mount"></span
+          ></label>
+          <div class="actions">
+            <button
+              type="button"
+              id="clear-ollama-cloud"
+              class="btn btn-danger"
+            >
+              Clear key
+            </button>
+            <button
+              type="button"
+              id="refresh-ollama-cloud"
+              class="btn btn-ghost"
+            >
+              Refresh models
+            </button>
+            <button
+              type="button"
+              id="test-ollama-cloud"
+              class="btn btn-secondary"
+            >
+              Test connection
+            </button>
+            <button type="submit" class="btn btn-primary">Save key</button>
+          </div>
+        </form>
+        <p id="ollama-cloud-status" class="status" role="status"></p>
+        <p class="help">
+          Create a key at
+          <a href="https://ollama.com/settings/keys">ollama.com/settings/keys</a
+          >. Saving the key loads the hosted catalog with each model's
+          capabilities and selects a default for you.
+        </p>
+      </section>
+
       <section class="card">
         <div class="section-head">
           <h2>OpenAI API key</h2>

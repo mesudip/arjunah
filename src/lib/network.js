@@ -22,7 +22,10 @@ export function networkError(error, code, label) {
       "TIMEOUT",
       `${label} request was cancelled or timed out.`,
     );
-  return new BrokerError(code, `${label} request failed.`);
+  // A dropped connection says nothing against the request itself.
+  return new BrokerError(code, `${label} request failed.`, undefined, {
+    retryable: true,
+  });
 }
 
 export async function* responseChunks(response, limit, code) {

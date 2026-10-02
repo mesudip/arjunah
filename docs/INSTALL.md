@@ -1,6 +1,6 @@
 # Installing अर्जुनः
 
-Two parts. The **browser extension** is all you need if you have an OpenAI or OpenCode Zen API key. The **desktop app** is optional: it lets websites use the Claude Code, Codex, or OpenCode subscription you are already signed in to, with no API key.
+Two parts. The **browser extension** is all you need if you have an OpenAI, OpenCode Zen, or Ollama Cloud API key, or run your own Ollama server. The **desktop app** is optional: it lets websites use the Claude Code, Codex, or OpenCode subscription you are already signed in to, with no API key.
 
 ## 1. The browser extension
 
@@ -25,7 +25,19 @@ Open the extension's settings (right-click the icon, **Options**) and do one of:
 
 - Enter an **OpenAI API key** and pick a default model. The key stays in extension storage and is never given to any website.
 - Enter an **OpenCode Zen API key** and pick a model from its live catalog. अर्जुनः uses the native Responses, Anthropic Messages, Gemini generateContent, or Chat Completions format required by that model, including supported image input and incremental output.
+- Connect your own **Ollama** server (see below), or enter an **Ollama Cloud API key** from [ollama.com/settings/keys](https://ollama.com/settings/keys).
 - Pair the **desktop app** (next section) to use your subscriptions instead.
+
+### Ollama
+
+Under **Ollama on your own server**, enter the server's address (`127.0.0.1:11434` for Ollama on this computer) and choose **Save and load models**. No key is needed; the optional key field is for a server behind an authenticating proxy. अर्जुनः asks the server what each model can do, so images go only to models that report vision, site tools only to models that report tools, and the thinking control matches the model. **Refresh models** picks up anything you pull later; the list also refreshes by itself about once a minute while the extension is in use.
+
+- **Another computer on your network:** start Ollama there with `OLLAMA_HOST=0.0.0.0 ollama serve` and enter its address, for example `192.168.1.20:11434`. Plain `http` is accepted only for this computer, private network addresses (including Tailscale's `100.64.0.0/10`), and local names such as `gpubox` or `nas.local`; anything else needs `https`, typically through a reverse proxy.
+- **No `OLLAMA_ORIGINS` change is needed.** Ollama refuses requests that carry a browser extension's origin, so अर्जुनः removes that one header on its own requests to the configured address (a `declarativeNetRequest` rule, Chrome and Firefox). Web pages' requests to the same server are untouched and still face Ollama's own origin check.
+- **Context length** is the server's setting (`OLLAMA_CONTEXT_LENGTH`). The chat shows the length the model was actually loaded with, not its trained maximum, because Ollama silently drops the start of a prompt that does not fit.
+- **CPU or GPU:** beside the context bar under the composer, a marker shows where the server holds the model, read the same way `ollama ps` reports it: `GPU`, `CPU`, or `CPU+GPU 52%` (the share on the GPU) for a model split between them, which is the usual reason a local model is slow. It appears as soon as the chat opens if the model is already loaded, and otherwise after the first round of a reply; the context details list the exact split. Sites never see it.
+
+**Ollama Cloud** uses the same native API at `https://ollama.com` with your API key, and its catalog shows each hosted model's capabilities and thinking levels.
 
 Then try it: open a site that supports अर्जुनः, visit the [hosted Paint playground](https://mesudip.github.io/arjunah/paint/), or run `npm run demo` from a checkout and open <http://127.0.0.1:8090/paint/>.
 

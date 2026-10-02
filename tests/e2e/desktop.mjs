@@ -34,11 +34,17 @@ await new Promise((ready) => site.listen(0, "127.0.0.1", ready));
 const sitePort = site.address().port;
 
 const agentRuns = [];
+// Agent sessions the companion asked the fake to end (SPEC 12.3.1).
+const endedSessions = [];
 const fakeAdapter = {
   id: "claude-code",
   name: "Claude Code",
   vendor: "Anthropic",
   supportsTools: true,
+  supportsThreads: true,
+  endThread(handle) {
+    endedSessions.push(handle);
+  },
   async detect() {
     return {
       installed: true,
@@ -55,7 +61,25 @@ const fakeAdapter = {
   },
   start(options) {
     agentRuns.push(options);
+    // A resumable agent reports its session handle on the first run of a
+    // thread and is handed it back on every later one.
+    if (options.thread && !options.thread.handle)
+      options.onThread?.(`fake-session-${agentRuns.length}`);
     const output = (async () => {
+      // A page's streamed round (SPEC 5.3): the answer reported as live
+      // activity, further apart than the extension's batch window.
+      if (!options.mcp && /stream me/.test(options.prompt)) {
+        const parts = ["Desktop ", "streamed ", "answer."];
+        for (const text of parts) {
+          options.onProgress?.({ type: "output_delta", text });
+          await new Promise((wait) => setTimeout(wait, 400));
+        }
+        return {
+          content: parts.join(""),
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+          model: "fake-model",
+        };
+      }
       if (!options.mcp)
         return {
           content: `Desktop answer to: ${options.prompt}`,
@@ -115,6 +139,7 @@ const desktop = createDesktopApp({
             vendor: "Anthropic",
             kind: "subscription",
             supportsTools: true,
+            supportsThreads: true,
             enabled: true,
             ...(await fakeAdapter.detect()),
           },
@@ -335,6 +360,77 @@ try {
       agentRuns[1].systemPrompt,
       /user-controlled browser AI broker/,
     );
+  }
+
+  // A page conversation's turns resume one agent session, its release ends
+  // it, and a one-off completion still runs fresh (SPEC 12.3.1).
+  step("conversation");
+  const runsBefore = agentRuns.length;
+  const turns = await page.evaluate(async () => {
+    const session = await window.__session;
+    const conversation = await session.conversations.create();
+    const first = await conversation.generate({
+      messages: [{ role: "user", content: "first turn" }],
+    });
+    const second = await conversation.generate({
+      messages: [
+        { role: "user", content: "first turn" },
+        { role: "assistant", content: first.message.content },
+        { role: "user", content: "second turn" },
+      ],
+    });
+    const released = await conversation.release();
+    const oneOff = await session.models.generate({
+      messages: [{ role: "user", content: "one-off" }],
+    });
+    return [
+      first.message.content,
+      second.message.content,
+      released,
+      oneOff.message.content,
+    ];
+  });
+  if (!live) {
+    const [firstRun, secondRun, oneOffRun] = agentRuns.slice(runsBefore);
+    assert.deepEqual(firstRun.thread, { handle: null }, "a new thread");
+    const handle = `fake-session-${runsBefore + 1}`;
+    assert.deepEqual(secondRun.thread, { handle }, "the second turn resumes");
+    assert.doesNotMatch(
+      secondRun.prompt,
+      /first turn/,
+      "a resumed session is sent only what it has not seen",
+    );
+    assert.match(secondRun.prompt, /second turn/);
+    assert.equal(turns[2], true);
+    assert.equal(oneOffRun.thread, null, "a one-off completion runs fresh");
+    await waitFor(() => endedSessions.includes(handle), 5000);
+  }
+
+  // A page's own round streams the companion's answer deltas, then the
+  // result a generate of the same request gives (SPEC 5.3, 12.3.1).
+  if (!live) {
+    step("stream");
+    const streamed = await page.evaluate(async () => {
+      const session = await window.__session;
+      const request = { messages: [{ role: "user", content: "stream me" }] };
+      const events = [];
+      for await (const event of session.models.stream(request))
+        events.push(event);
+      return { events, generated: await session.models.generate(request) };
+    });
+    const deltas = streamed.events.filter(
+      (event) => event.type === "output.delta",
+    );
+    assert.ok(deltas.length >= 2, JSON.stringify(streamed.events));
+    assert.equal(
+      deltas.map((event) => event.text).join(""),
+      "Desktop streamed answer.",
+    );
+    const last = streamed.events.at(-1);
+    assert.equal(last.type, "result");
+    const { id: _streamedId, ...streamedResult } = last.result;
+    const { id: _generatedId, ...generatedResult } = streamed.generated;
+    assert.deepEqual(streamedResult, generatedResult);
   }
 
   // Settings show both diagnostic logs, so a slow run can be explained.

@@ -151,7 +151,8 @@ function compact(n) {
 
 /**
  * A grouped <select> of every available model; `selected` may be null.
- * `only` narrows it to a set of provider ids (the site's own allowlist).
+ * `only` narrows it to a set of provider ids (the site's own allowlist), and
+ * `accepted` to the model ids a site's `require` allows (SPEC 4).
  *
  * A select with nothing selected shows its first option, which reads as a
  * choice nobody made. `placeholder` is the honest first row for that case.
@@ -159,7 +160,7 @@ function compact(n) {
 function fillModelSelect(
   select,
   selected,
-  { defaultMark = null, placeholder = null, only = null } = {},
+  { defaultMark = null, placeholder = null, only = null, accepted = null } = {},
 ) {
   select.replaceChildren();
   let any = false;
@@ -177,6 +178,7 @@ function fillModelSelect(
     const group = document.createElement("optgroup");
     group.label = provider.name;
     for (const model of provider.models) {
+      if (accepted && !accepted.has(model.id)) continue;
       const option = document.createElement("option");
       option.value = model.id;
       option.textContent =
@@ -188,7 +190,7 @@ function fillModelSelect(
       group.append(option);
       any = true;
     }
-    select.append(group);
+    if (group.children.length) select.append(group);
   }
   // A pinned model whose provider is unavailable — or one the site's own
   // allowlist excludes — matches no option. Without this the browser shows
@@ -301,7 +303,11 @@ function renderProviders() {
     side.append(
       element(
         "span",
-        provider.kind === "subscription" ? "Subscription" : "API key",
+        provider.kind === "subscription"
+          ? "Subscription"
+          : provider.kind === "self-hosted"
+            ? "Self-hosted"
+            : "API key",
         "badge",
       ),
     );
@@ -421,11 +427,17 @@ function renderSite() {
   if (grant) {
     fillModelSelect(siteModel, grant.model, {
       defaultMark: catalog?.defaultModel,
-      placeholder: "Follow the global default",
+      // A site with `require` is always pinned to a model that qualifies, so
+      // following a default that may later move is not offered.
+      placeholder: site.acceptedModels ? null : "Follow the global default",
       // `allowed` is authoritative even when empty: enabling no provider is a
       // choice, and `null` here would quietly list every model instead.
       only: site.chosenProviders ? allowed : null,
+      accepted: site.acceptedModels ? new Set(site.acceptedModels) : null,
     });
+    siteModel.title = site.acceptedModels
+      ? "This site accepts only some kinds of model; the others are not listed."
+      : "";
     $("#fallback").hidden = !site.fallback;
     $("#fallback").textContent =
       "The model chosen for this site is unavailable; the global default answers instead.";
@@ -463,8 +475,11 @@ function renderSite() {
         describeAllowlist(new Set(chosen));
         fillModelSelect(siteModel, site?.grant?.model ?? null, {
           defaultMark: catalog?.defaultModel,
-          placeholder: "Follow the global default",
+          placeholder: site?.acceptedModels
+            ? null
+            : "Follow the global default",
           only: new Set(chosen),
+          accepted: site?.acceptedModels ? new Set(site.acceptedModels) : null,
         });
         await update({ providers: chosen }, { render: false });
       });

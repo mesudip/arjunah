@@ -171,3 +171,65 @@ test("MCP renews an expired session once and discovers all bounded pages", async
   assert.equal(initialized, 2);
   assert.equal(methods.filter((m) => m === "tools/list").length, 3);
 });
+
+test("discovered MCP schemas take generator annotations but not assertions", async (t) => {
+  clearMcpSessions();
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    clearMcpSessions();
+  });
+  let tools;
+  globalThis.fetch = async (_url, init) => {
+    const req = JSON.parse(init.body);
+    if (req.method === "notifications/initialized")
+      return new Response(null, { status: 202 });
+    const result =
+      req.method === "initialize"
+        ? { protocolVersion: "2025-03-26" }
+        : { tools };
+    return Response.json({ jsonrpc: "2.0", id: req.id, result });
+  };
+  tools = [
+    {
+      name: "plan",
+      inputSchema: {
+        type: "object",
+        properties: {
+          when: { type: ["string", "null"], format: "date-time" },
+          note: { type: "string", deprecated: true, readOnly: false },
+        },
+      },
+    },
+  ];
+  assert.deepEqual((await listMcpTools({ url: "https://mcp.test" }))[0], {
+    name: "plan",
+    description: "",
+    inputSchema: {
+      type: "object",
+      properties: {
+        when: {
+          format: "date-time",
+          anyOf: [{ type: "string" }, { type: "null" }],
+        },
+        note: { type: "string", deprecated: true, readOnly: false },
+      },
+    },
+  });
+  for (const property of [
+    { type: "string", pattern: "^a$" },
+    { type: "string", format: 7 },
+  ]) {
+    clearMcpSessions();
+    tools = [
+      {
+        name: "plan",
+        inputSchema: { type: "object", properties: { x: property } },
+      },
+    ];
+    await assert.rejects(
+      listMcpTools({ url: "https://mcp.test" }),
+      (error) => error.code === "TOOL_ERROR",
+    );
+  }
+});

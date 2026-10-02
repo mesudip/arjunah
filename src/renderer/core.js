@@ -37,6 +37,16 @@ var ArjunahRenderer = (function () {
     entityDescription: 120,
     userInputChars: 4096,
     userInputPrompts: 4,
+    userInputLabel: 80,
+    userInputDescription: 280,
+    userInputSchemaBytes: 4096,
+    // The approval prompt of SPEC 7.8, in Unicode code points.
+    approvalTitle: 80,
+    approvalSummary: 280,
+    approvalTarget: 80,
+    approvalDetail: 4000,
+    // Both prompts give the visitor this long before they answer for them.
+    promptMs: 120000,
   };
   /**
    * Splits streamed reasoning into display chunks of at most `max` words.
@@ -254,6 +264,14 @@ var ArjunahRenderer = (function () {
     .consent .actions{display:flex;justify-content:flex-end;gap:8px;margin:0 0 0 auto}
     .consent .actions button{border:1px solid #d5dae3;border-radius:11px;padding:9px 15px;background:#fff;color:#0f172a;cursor:pointer;font-weight:600}
     .consent .actions .allow{border-color:var(--accent);background:var(--accent);color:var(--accent-ink)}
+    /* Approval prompt (SPEC 7.8): composer-written text, renderer wording. */
+    .consent.approval:focus{outline:none}
+    .approval-eyebrow{color:#64748b;font-size:11px;letter-spacing:.06em;text-transform:uppercase;margin-bottom:4px;overflow-wrap:anywhere}
+    .consent.approval h2{overflow-wrap:anywhere}
+    .approval-target{display:flex;gap:8px;align-items:baseline;margin:8px 0;font-size:13px}.approval-target span{color:#64748b}.approval-target strong{overflow-wrap:anywhere;font-weight:600}
+    .consent pre.approval-detail{max-height:260px;overflow:auto}
+    .consent .actions .approve.danger{border-color:#b42318;background:#b42318;color:#fff}
+    .tool-approval{font-size:10.5px;color:#15803d;white-space:nowrap}.tool-approval.denied{color:#b42318}
     .consent .level{display:inline-block;padding:2px 8px;border-radius:999px;background:var(--accent);color:var(--accent-ink);font-size:11px;font-weight:600;vertical-align:middle;margin-left:6px}
     /* Chat-style conversation shell with host-owned controls in the slots. */
     .panel{width:min(600px,calc(100vw - 24px));height:min(760px,calc(100vh - 110px));border-radius:22px}
@@ -306,7 +324,7 @@ var ArjunahRenderer = (function () {
     .usage-section+.usage-section{margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}.usage-heading{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:8px}.usage-heading span{color:var(--muted);font-size:12px}.usage-heading strong{font-size:13px;font-weight:600}
     .usage-bar{height:7px;border-radius:999px;background:var(--surface-strong);overflow:hidden}.usage-bar i{display:block;height:100%;border-radius:inherit;background:var(--bar-color,var(--accent));transition:width .25s ease}
     .usage-rows{display:grid;gap:9px;margin-top:12px}.usage-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center}.usage-row .label{display:flex;align-items:center;gap:8px;min-width:0}.usage-row .swatch{width:9px;height:9px;border-radius:3px;background:var(--row-color,var(--accent));flex:none}.usage-row .value{color:var(--muted);font-variant-numeric:tabular-nums;text-align:right}.quota-row{display:grid;gap:6px;margin-top:12px}.quota-line{display:flex;justify-content:space-between;gap:10px}.quota-line span:last-child{color:var(--muted);text-align:right}.usage-note{margin:10px 0 0;color:var(--muted);font-size:11.5px;line-height:1.45}.usage-empty{color:var(--muted)}
-    .context-glance{width:100%;display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:9px;margin-top:7px;padding:0 5px;border:0;background:transparent;color:var(--muted);font-size:10.5px;cursor:pointer;text-align:left}.context-glance strong{font-weight:500;color:var(--muted);font-variant-numeric:tabular-nums}.context-track{height:3px;border-radius:999px;background:var(--surface-strong);overflow:hidden}.context-track i{display:block;height:100%;width:0;background:var(--accent);border-radius:inherit}
+    .context-glance{width:100%;display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:9px;margin-top:7px;padding:0 5px;border:0;background:transparent;color:var(--muted);font-size:10.5px;cursor:pointer;text-align:left}.context-glance strong{font-weight:500;color:var(--muted);font-variant-numeric:tabular-nums}.context-glance em{margin-left:6px;padding:0 5px;border-radius:999px;font-style:normal;font-size:9.5px;font-weight:650;letter-spacing:.02em;line-height:15px;display:inline-block;vertical-align:1px;background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent)}.context-glance em[data-placement=gpu]{background:color-mix(in srgb,#10b981 16%,transparent);color:#059669}.context-glance em[data-placement=cpu]{background:color-mix(in srgb,#d97706 16%,transparent);color:#b45309}.context-glance em[hidden]{display:none}.context-track{height:3px;border-radius:999px;background:var(--surface-strong);overflow:hidden}.context-track i{display:block;height:100%;width:0;background:var(--accent);border-radius:inherit}
     .activity{font-size:13px}.activity>summary{padding:4px 0 6px}.workflow-body{gap:2px}
     .panel[data-tool-view=compact] .tool .source,.panel[data-tool-view=compact] .tool .state{display:none}
     .panel[data-tool-view=detailed] .workflow-body{padding:5px 0}.panel[data-tool-view=detailed] .workflow-body::before{display:none}
@@ -771,6 +789,146 @@ var ArjunahRenderer = (function () {
     return true;
   }
 
+  const USER_INPUT_ID = /^[a-z][a-z0-9_-]{0,31}$/;
+  const USER_INPUT_KEYWORDS = new Set([
+    "type",
+    "enum",
+    "const",
+    "minimum",
+    "maximum",
+    "minLength",
+    "maxLength",
+    "title",
+    "description",
+    "$comment",
+  ]);
+
+  const plainRecord = (value) =>
+    value != null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.getPrototypeOf(value) === Object.prototype;
+
+  /** A string of at most `max` code points, or null for anything else. */
+  function boundedPromptText(value, max, { required = false } = {}) {
+    if (value == null && !required) return "";
+    if (typeof value !== "string") return null;
+    // Directional overrides and isolates would let one string reorder the
+    // text drawn after it, so a prompt never carries them.
+    const text = value.replace(/[‪-‮⁦-⁩]/g, "");
+    const length = [...text].length;
+    if (length > max || (required && !text.trim())) return null;
+    return text;
+  }
+
+  /**
+   * One SPEC 7.3 declaration, checked the way the extension checks a site
+   * tool's: a declaration arriving on a stream (`input.client`, SPEC 14.3) has
+   * no broker in front of it. Returns the normalized declaration or null.
+   */
+  function userInputDeclaration(raw) {
+    if (!plainRecord(raw) || typeof raw.id !== "string") return null;
+    if (!USER_INPUT_ID.test(raw.id)) return null;
+    const label = boundedPromptText(raw.label, LIMITS.userInputLabel, {
+      required: true,
+    });
+    const description = boundedPromptText(
+      raw.description,
+      LIMITS.userInputDescription,
+    );
+    if (label == null || description == null) return null;
+    let schema;
+    try {
+      const text = JSON.stringify(raw.schema);
+      if (new TextEncoder().encode(text).length > LIMITS.userInputSchemaBytes)
+        return null;
+      schema = JSON.parse(text);
+    } catch {
+      return null;
+    }
+    if (
+      !plainRecord(schema) ||
+      !["string", "number", "integer", "boolean"].includes(schema.type) ||
+      Object.keys(schema).some((key) => !USER_INPUT_KEYWORDS.has(key))
+    )
+      return null;
+    const numeric = schema.type === "number" || schema.type === "integer";
+    const finite = (key) => schema[key] == null || Number.isFinite(schema[key]);
+    const count = (key) =>
+      schema[key] == null ||
+      (Number.isInteger(schema[key]) && schema[key] >= 0);
+    if (
+      !finite("minimum") ||
+      !finite("maximum") ||
+      !count("minLength") ||
+      !count("maxLength") ||
+      (!numeric && (schema.minimum != null || schema.maximum != null)) ||
+      (schema.type !== "string" &&
+        (schema.minLength != null || schema.maxLength != null)) ||
+      (schema.minimum != null &&
+        schema.maximum != null &&
+        schema.minimum > schema.maximum) ||
+      (schema.minLength != null &&
+        schema.maxLength != null &&
+        schema.minLength > schema.maxLength)
+    )
+      return null;
+    for (const key of ["title", "description", "$comment"])
+      if (schema[key] != null && typeof schema[key] !== "string") return null;
+    const typed = (value) =>
+      schema.type === "string"
+        ? typeof value === "string"
+        : schema.type === "boolean"
+          ? typeof value === "boolean"
+          : typeof value === "number" &&
+            Number.isFinite(value) &&
+            (schema.type !== "integer" || Number.isInteger(value));
+    if (
+      schema.enum != null &&
+      (!Array.isArray(schema.enum) ||
+        !schema.enum.length ||
+        schema.enum.some((value) => !typed(value)))
+    )
+      return null;
+    if (Object.hasOwn(schema, "const") && !typed(schema.const)) return null;
+    if (
+      schema.type === "string" &&
+      (schema.maxLength == null || schema.maxLength > LIMITS.userInputChars)
+    )
+      schema.maxLength = LIMITS.userInputChars;
+    if (schema.type === "string" && (schema.minLength ?? 0) > schema.maxLength)
+      return null;
+    const secret = raw.secret === true;
+    if (
+      secret &&
+      (schema.type !== "string" ||
+        schema.enum != null ||
+        Object.hasOwn(schema, "const"))
+    )
+      return null;
+    return { id: raw.id, label, description, schema, secret };
+  }
+
+  /**
+   * The approval prompt's content (SPEC 7.8). The composer writes it from the
+   * operation it is about to run; every field is drawn as text. Returns the
+   * normalized prompt or null when any field breaks its bound.
+   */
+  function approvalPrompt(raw) {
+    if (!plainRecord(raw)) return null;
+    const title = boundedPromptText(raw.title, LIMITS.approvalTitle, {
+      required: true,
+    });
+    const summary = boundedPromptText(raw.summary, LIMITS.approvalSummary, {
+      required: true,
+    });
+    const target = boundedPromptText(raw.target, LIMITS.approvalTarget);
+    const detail = boundedPromptText(raw.detail, LIMITS.approvalDetail);
+    if ([title, summary, target, detail].includes(null)) return null;
+    if (raw.danger != null && typeof raw.danger !== "boolean") return null;
+    return { title, summary, target, detail, danger: raw.danger === true };
+  }
+
   /** Distinguishes the ids of two widgets sharing one document. */
   let viewCount = 0;
 
@@ -849,6 +1007,7 @@ var ArjunahRenderer = (function () {
     let mentionIndex = 0;
     let mentionSearch = 0;
     let pendingInputPrompt = null;
+    let pendingApproval = null;
     let busy = false;
     let composerBlocked = false;
     // Set when the site allows exactly one model: there is nothing to pick, so
@@ -1143,6 +1302,7 @@ var ArjunahRenderer = (function () {
         outputText: "",
         outputRender: 0,
         reasoning: null,
+        provisionalReasoning: null,
         stalledLabel: null,
       };
       if (displaying(threadId)) {
@@ -1221,6 +1381,30 @@ var ArjunahRenderer = (function () {
       });
     }
 
+    /** Drops the streamed answer text of the current round, if any. */
+    function dropOutput(turn) {
+      turn.outputNode?.remove();
+      turn.outputNode = null;
+      turn.outputText = "";
+      if (turn.outputRender) {
+        cancelAnimationFrame(turn.outputRender);
+        turn.outputRender = 0;
+      }
+    }
+
+    /**
+     * Ends a relayed round's provisional text (SPEC 15, "Deltas go to the
+     * interface controller"): the composer's `message` replaces it, and a round
+     * that ends in tool calls or is cancelled discards it.
+     */
+    function discardProvisional() {
+      const turn = currentTurn;
+      if (!turn) return;
+      dropOutput(turn);
+      turn.provisionalReasoning?.node.remove();
+      turn.provisionalReasoning = null;
+    }
+
     function addStep(key, record) {
       const turn = currentTurn;
       const node = stepNode(record);
@@ -1276,15 +1460,7 @@ var ArjunahRenderer = (function () {
         turn.label = event.toolCalls
           ? `Running ${event.toolCalls} tool call${event.toolCalls === 1 ? "" : "s"}…`
           : "Finishing…";
-        if (event.toolCalls && turn.outputNode) {
-          turn.outputNode.remove();
-          turn.outputNode = null;
-          turn.outputText = "";
-          if (turn.outputRender) {
-            cancelAnimationFrame(turn.outputRender);
-            turn.outputRender = 0;
-          }
-        }
+        if (event.toolCalls && turn.outputNode) dropOutput(turn);
       } else if (type === "output.delta") {
         renderOutputDelta(event.text);
       } else if (type === "tool.start") {
@@ -1362,7 +1538,11 @@ var ArjunahRenderer = (function () {
         type === "agent.reasoning.delta"
       ) {
         if (!displaying(turn.threadId)) return;
-        let box = turn.reasoning;
+        // A relayed round's reasoning is provisional (SPEC 15) and lives in a
+        // box of its own, so discarding it leaves the host's own reasoning.
+        const slot =
+          event.provisional === true ? "provisionalReasoning" : "reasoning";
+        let box = turn[slot];
         if (!box) {
           box = {
             node: doc.createElement("details"),
@@ -1377,7 +1557,7 @@ var ArjunahRenderer = (function () {
           box.summary.textContent = box.label;
           box.node.append(box.summary, box.pre);
           turn.body.append(box.node);
-          turn.reasoning = box;
+          turn[slot] = box;
         }
         let text = typeof event.text === "string" ? event.text : "";
         // A whole summary is its own paragraph and starts a new chunk.
@@ -2632,7 +2812,7 @@ var ArjunahRenderer = (function () {
           finish(false, message);
         timer = setTimeout(
           () => pendingInputPrompt?.("The prompt timed out."),
-          120000,
+          LIMITS.promptMs,
         );
         cancel.addEventListener("click", () =>
           finish(false, "The user cancelled."),
@@ -2669,6 +2849,148 @@ var ArjunahRenderer = (function () {
 
     function cancelUserInput(message) {
       pendingInputPrompt?.(message ?? "The request was cancelled.");
+    }
+
+    // ------------------------------------------------------------ approvals
+
+    /**
+     * Ask the visitor to approve one operation (SPEC 7.8). `request` is
+     * `{ origin, toolName?, approval }` with `approval` as `approvalPrompt`
+     * accepts it. Resolves `true` only when the visitor chooses Approve; Deny,
+     * Escape, the timeout and `cancelApproval` resolve `false`. The answer is
+     * the caller's to bind to its operation: this prompt grants nothing.
+     */
+    function requestApproval(request) {
+      const approval = approvalPrompt(request?.approval);
+      if (!approval)
+        return Promise.reject(new Error("The approval request is invalid."));
+      if (pendingApproval)
+        return Promise.reject(
+          new Error("Another approval prompt is already open."),
+        );
+      return new Promise((resolve) => {
+        const overlay = doc.createElement("div");
+        overlay.className = "overlay";
+        const card = doc.createElement("section");
+        card.className = "consent approval";
+        card.setAttribute("role", "alertdialog");
+        card.setAttribute("aria-modal", "true");
+        // Focus rests on the dialog, not on a button: neither answer is the
+        // default, so a stray Enter cannot choose one.
+        card.tabIndex = -1;
+
+        const head = doc.createElement("header");
+        head.className = "consent-head";
+        const eyebrow = doc.createElement("div");
+        eyebrow.className = "approval-eyebrow";
+        eyebrow.textContent = request.toolName
+          ? `Approval requested · ${String(request.toolName).slice(0, 64)}`
+          : "Approval requested";
+        const title = doc.createElement("h2");
+        title.textContent = approval.title;
+        const origin = doc.createElement("div");
+        origin.className = "origin";
+        origin.textContent = `Asked by ${request.origin ?? "this page"}`;
+        head.append(eyebrow, title, origin);
+
+        const body = doc.createElement("div");
+        body.className = "consent-body";
+        const summary = doc.createElement("div");
+        summary.className = "scope";
+        summary.textContent = approval.summary;
+        body.append(summary);
+        if (approval.target) {
+          const target = doc.createElement("div");
+          target.className = "approval-target";
+          const label = doc.createElement("span");
+          label.textContent = "Target";
+          const value = doc.createElement("strong");
+          value.textContent = approval.target;
+          target.append(label, value);
+          body.append(target);
+        }
+        if (approval.detail) {
+          const detail = doc.createElement("pre");
+          detail.className = "approval-detail";
+          detail.textContent = approval.detail;
+          body.append(detail);
+        }
+
+        const foot = doc.createElement("footer");
+        foot.className = "consent-foot";
+        const hint = doc.createElement("span");
+        hint.className = "consent-hint";
+        hint.textContent =
+          "If you do not answer within 2 minutes, this is denied.";
+        const actions = doc.createElement("div");
+        actions.className = "actions";
+        const deny = doc.createElement("button");
+        deny.type = "button";
+        deny.className = "deny";
+        deny.textContent = "Deny";
+        const approve = doc.createElement("button");
+        approve.type = "button";
+        approve.className = `allow approve${approval.danger ? " danger" : ""}`;
+        approve.textContent = "Approve";
+
+        let timer = null;
+        const finish = (approved) => {
+          if (!pendingApproval) return;
+          pendingApproval = null;
+          clearTimeout(timer);
+          overlay.remove();
+          resolve(approved);
+        };
+        pendingApproval = () => finish(false);
+        timer = setTimeout(() => finish(false), LIMITS.promptMs);
+        deny.addEventListener("click", () => finish(false));
+        approve.addEventListener("click", () => finish(true));
+        card.addEventListener("keydown", (event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            finish(false);
+          } else if (
+            event.key === "Enter" &&
+            event.target !== deny &&
+            event.target !== approve
+          ) {
+            event.preventDefault();
+            event.stopPropagation();
+          }
+        });
+        actions.append(deny, approve);
+        foot.append(hint, actions);
+        card.append(head, body, foot);
+        overlay.append(card);
+        (panel.parentNode ?? panel).append(overlay);
+        queueMicrotask(() => card.focus());
+      });
+    }
+
+    function cancelApproval() {
+      pendingApproval?.();
+    }
+
+    /** Shows a decision on its tool step; the stored record is unchanged. */
+    function markApproval(toolId, approved) {
+      const step = currentTurn?.steps.get(toolId);
+      if (!step) return false;
+      let mark = step.card.querySelector(".tool-approval");
+      if (!mark) {
+        mark = doc.createElement("span");
+        mark.className = "tool-approval";
+        // In the summary, so the compact view shows it without expanding.
+        step.state.before(mark);
+      }
+      mark.textContent = approved ? "Approved by you" : "Not approved";
+      mark.classList.toggle("denied", !approved);
+      return true;
+    }
+
+    /** The name of a step in the running turn, for a prompt to cite. */
+    function stepName(toolId) {
+      return currentTurn?.steps.get(toolId)?.record.name ?? null;
     }
 
     // ---------------------------------------------------------------- wiring
@@ -2902,6 +3224,13 @@ var ArjunahRenderer = (function () {
       // collected tool inputs (SPEC 7.3)
       requestUserInput,
       cancelUserInput,
+      // approvals (SPEC 7.8)
+      requestApproval,
+      cancelApproval,
+      markApproval,
+      stepName,
+      // relayed rounds (SPEC 15)
+      discardProvisional,
       // options and controls
       setOptions,
       controls: () => ({ ...controlValues }),
@@ -3022,6 +3351,8 @@ var ArjunahRenderer = (function () {
     pretty,
     compactNumber,
     userInputMatches,
+    userInputDeclaration,
+    approvalPrompt,
     flattenMentions,
     reasoningChunks,
   };

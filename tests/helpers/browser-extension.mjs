@@ -28,6 +28,9 @@ export async function mockProviderExtension(mockBase, firefox = false) {
         return globalThis.fetch(${JSON.stringify(mockBase)} + target.pathname.slice(3), init);
       if (target.origin === 'https://opencode.ai' && target.pathname.startsWith('/zen/v1/'))
         return globalThis.fetch(${JSON.stringify(zenBase)} + target.pathname.slice(7), init);
+      // A loopback server is the test's own mock (Ollama is reached by the
+      // address the user types, so no redirect is needed for it).
+      if (target.hostname === '127.0.0.1') return globalThis.fetch(url, init);
       throw new Error('Unexpected provider destination in browser test.');
     };\n`;
     await writeFile(providerPath, transport + source);

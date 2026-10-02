@@ -13,7 +13,7 @@
     "lint": "node scripts/check.mjs",
     "test": "node --test tests/*.test.mjs",
     "test:openai": "node --env-file=.env scripts/verify-openai.mjs",
-    "test:e2e": "npm run test:e2e:chrome && npm run test:e2e:firefox && npm run test:e2e:security && npm run test:e2e:hosted && npm run test:e2e:widget && npm run test:e2e:desktop && npm run test:e2e:polling",
+    "test:e2e": "npm run test:e2e:chrome && npm run test:e2e:firefox && npm run test:e2e:security && npm run test:e2e:hosted && npm run test:e2e:widget && npm run test:e2e:desktop && npm run test:e2e:polling && npm run test:e2e:ollama",
     "test:e2e:chrome": "node tests/e2e/chrome.mjs",
     "test:e2e:firefox": "node tests/e2e/firefox.mjs",
     "lint:firefox": "node scripts/build-targets.mjs --unpacked && npx --yes web-ext@10.6.0 lint --source-dir dist/firefox-unpacked --warnings-as-errors",
@@ -29,8 +29,9 @@
     "build:sdk": "npm run build -w arjunah",
     "build:widget": "npm run build -w arjunah-widget",
     "test:e2e:widget": "node tests/e2e/widget.mjs",
-    "test:e2e:hosted": "node tests/e2e/hosted-surfaces.mjs",
-    "test:e2e:polling": "node tests/e2e/polling.mjs"
+    "test:e2e:hosted": "node tests/e2e/hosted-surfaces.mjs && node tests/e2e/hosted-loop.mjs",
+    "test:e2e:polling": "node tests/e2e/polling.mjs",
+    "test:e2e:ollama": "node tests/e2e/ollama.mjs"
   },
   "devDependencies": {
     "@puppeteer/browsers": "3.2.2",

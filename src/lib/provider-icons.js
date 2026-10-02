@@ -10,11 +10,17 @@ const PROVIDER_ICONS = Object.freeze({
   codex: "icons/providers/codex.png",
   "opencode-api": "icons/providers/opencode.svg",
   "opencode-cli": "icons/providers/opencode.svg",
+  ollama: "icons/providers/ollama.svg",
+  "ollama-cloud": "icons/providers/ollama.svg",
 });
 
 // The two OpenCode surfaces share one official mark, so the badge is what
-// tells the hosted Zen API apart from the CLI on this computer.
-const PROVIDER_BADGES = Object.freeze({ "opencode-api": "API" });
+// tells the hosted Zen API apart from the CLI on this computer. Ollama's two
+// surfaces work the same way: the bare mark is the user's own server.
+const PROVIDER_BADGES = Object.freeze({
+  "opencode-api": "API",
+  "ollama-cloud": "Cloud",
+});
 
 /** `{ src, badge? }` for a provider id, or null when we ship no artwork. */
 export function providerIcon(providerId, { badges = true } = {}) {

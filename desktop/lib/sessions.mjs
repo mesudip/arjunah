@@ -123,6 +123,22 @@ export class ToolSession {
     this.armResumeTimer();
   }
 
+  /**
+   * The browser closed the request that was waiting on this run (a page
+   * aborted its call, or the visitor pressed stop). Nobody can receive the
+   * answer, so the agent process is killed rather than left to finish on the
+   * user's subscription, and the waiting request is released at once.
+   */
+  cancel() {
+    const waiter = this.waiter;
+    this.waiter = null;
+    this.end(true);
+    if (waiter) {
+      clearTimeout(waiter.timer);
+      waiter.resolve({ type: "cancelled" });
+    }
+  }
+
   end(kill) {
     if (this.ended) return;
     this.ended = true;

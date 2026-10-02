@@ -8,6 +8,8 @@
 import type {
   AIAccessRequest,
   AIErrorCode,
+  AIErrorDetails,
+  AIGrantChange,
   AISession,
   AISiteManifest,
   Arjunah,
@@ -21,20 +23,29 @@ export const PROTOCOL_VERSION = "1.0.0";
 export const READY_EVENT = "arjunah:ready";
 /** Dispatched on `window` when another actor already owns the namespace. */
 export const CONFLICT_EVENT = "arjunah:conflict";
+/** Dispatched on `window` when this origin's grant or site model changes. */
+export const GRANT_CHANGE_EVENT = "arjunah:grantchange";
 
 declare global {
   interface Window {
     /** Shared namespace; अर्जुनः owns only `window.ai.arjunah`. */
     readonly ai?: { readonly arjunah?: Arjunah };
   }
+  interface WindowEventMap {
+    "arjunah:grantchange": CustomEvent<AIGrantChange>;
+  }
 }
 
 /** The error shape every rejected page API promise carries. */
 export interface AIError extends Error {
   name: "AIError";
-  /** SPEC section 9 codes, plus `NOT_INSTALLED` raised by this SDK. */
+  /**
+   * SPEC section 9 codes, plus `NOT_INSTALLED` raised by this SDK. A newer
+   * extension may send a code this union lacks; handle it as `INTERNAL_ERROR`.
+   */
   code: AIErrorCode | "NOT_INSTALLED";
-  details?: unknown;
+  /** Absent only on this SDK's own `NOT_INSTALLED`. */
+  details?: AIErrorDetails;
 }
 
 export function isAIError(error: unknown): error is AIError {
@@ -111,6 +122,28 @@ export async function enable(
   options?: WaitOptions,
 ): Promise<AISession> {
   return (await waitForArjunah(options)).enable(request);
+}
+
+/**
+ * Opens the extension's view of this site. Call it from a user gesture such
+ * as a click; otherwise it rejects with `PERMISSION_REQUIRED`.
+ */
+export async function openSettings(options?: WaitOptions): Promise<true> {
+  return (await waitForArjunah(options)).openSettings();
+}
+
+/**
+ * Calls `listener` whenever this origin's grant or site model changes, on
+ * any surface (consent, the toolbar popup, settings, the chat header, a
+ * revocation). Returns a function that stops listening.
+ */
+export function onGrantChange(
+  listener: (change: AIGrantChange) => void,
+): () => void {
+  if (typeof window === "undefined") return () => {};
+  const handler = (event: CustomEvent<AIGrantChange>) => listener(event.detail);
+  window.addEventListener(GRANT_CHANGE_EVENT, handler);
+  return () => window.removeEventListener(GRANT_CHANGE_EVENT, handler);
 }
 
 /** Hands the origin's whole grant back. */

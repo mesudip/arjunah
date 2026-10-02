@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Bridged widget over the extension</title>
+  </head>
+  <body>
+    <div id="assistant"></div>
+    <script type="module">
+      import { mountAssistant } from "/widget/index.js";
+
+      // SPEC 15 mode 4: the test's server runs the loop (tests/e2e/chrome.mjs,
+      // `/bridge-api/`) and the real extension answers its `model.client`
+      // through the visitor's level 1 session.
+      window.assistant = mountAssistant({
+        mount: document.querySelector("#assistant"),
+        backend: { baseUrl: "/bridge-api/" },
+        widget: { name: "Streamed desk" },
+        bridge: { arjunah: true },
+      });
+    </script>
+  </body>
+</html>

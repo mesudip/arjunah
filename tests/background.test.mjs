@@ -799,6 +799,24 @@ test("selecting a desktop provider routes generation through the desktop app and
       capabilities: { tools: true, vision: false, reasoning: false },
       contextWindow: null,
       reasoningLevels: [],
+      // The companion's own caps, not the 400/128/2,000 of an API model.
+      limits: {
+        messages: 300,
+        messageUnits: 180_000,
+        tools: 64,
+        toolDescriptionUnits: 500,
+        toolCallsPerMessage: 32,
+        toolArgumentUnits: 65_536,
+        schemaBytes: 32_768,
+        schemaDepth: 16,
+        requestBytes: 12_000_000,
+        maxTokens: 32_768,
+        timeoutMs: 180_000,
+      },
+      // A subscription agent with its built-in tools disabled (SPEC 5.2).
+      kind: "subscription",
+      local: false,
+      builtinTools: false,
     },
   ]);
   const status = await b.ok("broker.status");
@@ -808,6 +826,10 @@ test("selecting a desktop provider routes generation through the desktop app and
   });
   assert.equal(result.message.content, "from desktop");
   assert.equal(result.model, "claude-code/sonnet");
+  assert.deepEqual(
+    [result.kind, result.local, result.builtinTools],
+    ["subscription", false, false],
+  );
   const request = b.requests.find(
     (item) => new URL(item.url).pathname === "/api/generate",
   );

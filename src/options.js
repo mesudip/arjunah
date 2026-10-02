@@ -6,6 +6,7 @@ import {
 } from "./lib/openai.js";
 import { OPENCODE_BASE_URL, opencodeDisplayName } from "./lib/opencode.js";
 import { searchFilter } from "./lib/search.js";
+import { ollamaDisplayName } from "./lib/ollama.js";
 let existing = null;
 let opencodeExisting = null;
 let desktop = null;
@@ -172,6 +173,277 @@ function refreshOpenCodeKeyControl() {
   $("#opencode-api-key").required = !(canReuse && keep.checked);
   $("#opencode-api-key").placeholder =
     canReuse && keep.checked ? "Saved key will be used" : "OpenCode API key";
+}
+// Ollama: the self-hosted server and Ollama Cloud share one form shape, told
+// apart by the DOM prefix and the provider id the broker routes on.
+const OLLAMA_FORMS = Object.freeze({
+  local: {
+    provider: "ollama",
+    prefix: "ollama",
+    name: "Ollama (self-hosted)",
+    badge: "Self-hosted",
+  },
+  cloud: {
+    provider: "ollama-cloud",
+    prefix: "ollama-cloud",
+    name: "Ollama Cloud",
+    badge: "API key",
+  },
+});
+const ollamaExisting = { local: null, cloud: null };
+function ollamaField(which, suffix) {
+  return $(`#${OLLAMA_FORMS[which].prefix}-${suffix}`);
+}
+/**
+ * "qwen3-vl:2b · 2.1B Q4_K_M · vision · tools · thinking": what a model is
+ * and accepts, at a glance, and whether it actually runs on ollama.com.
+ */
+function ollamaModelLabel(model) {
+  const size = [model.parameterSize, model.quantization]
+    .filter(Boolean)
+    .join(" ");
+  const traits = [
+    size || null,
+    model.remote ? "runs on ollama.com" : null,
+    model.capabilities?.vision ? "vision" : null,
+    model.capabilities?.tools ? "tools" : null,
+    model.capabilities?.reasoning ? "thinking" : null,
+  ].filter(Boolean);
+  return [model.displayName ?? model.id, ...traits].join(" · ");
+}
+function ollamaValues(which) {
+  const keep = ollamaField(which, "keep-key");
+  return {
+    provider: OLLAMA_FORMS[which].provider,
+    ...(which === "local"
+      ? { baseUrl: ollamaField(which, "base-url").value.trim() }
+      : {}),
+    model: $(`#${OLLAMA_FORMS[which].prefix}-model`)?.value.trim() ?? "",
+    apiKey: ollamaField(which, "api-key").value,
+    keepApiKey: !keep.disabled && keep.checked,
+  };
+}
+function setOllamaModelOptions(which, selected = "", models = []) {
+  const prefix = OLLAMA_FORMS[which].prefix;
+  const ids = models.map((model) => model.id);
+  mountCombo(
+    `#${prefix}-model-mount`,
+    `${prefix}-model`,
+    modelCombo({
+      label: `${OLLAMA_FORMS[which].name} default model`,
+      models: models.map((model) => ({
+        id: model.id,
+        displayName: ollamaModelLabel(model),
+      })),
+      value: ids.includes(selected) ? selected : (ids[0] ?? ""),
+      disabled: !models.length,
+      empty:
+        which === "local"
+          ? "Save the server address to load models"
+          : "Save your key to load models",
+      placeholder: models.length ? "Search models" : "No models loaded yet",
+    }),
+  );
+}
+function refreshOllamaKeyControl(which) {
+  const saved = ollamaExisting[which];
+  const keep = ollamaField(which, "keep-key");
+  // A saved key belongs to the address it was saved with.
+  const sameServer =
+    which === "cloud" ||
+    (saved &&
+      origin(saved.baseUrl) ===
+        origin(
+          ollamaField(which, "base-url").value.trim() ||
+            "http://127.0.0.1:11434",
+        ));
+  const canReuse = Boolean(saved?.hasApiKey && sameServer);
+  keep.disabled = !canReuse;
+  if (!canReuse) keep.checked = false;
+  keep.closest("label").hidden = !canReuse;
+  const input = ollamaField(which, "api-key");
+  input.required = which === "cloud" && !(canReuse && keep.checked);
+  input.placeholder =
+    canReuse && keep.checked
+      ? "Saved key will be used"
+      : which === "cloud"
+        ? "Ollama API key"
+        : "Only for a server behind an authenticating proxy";
+}
+function applyOllamaSummary(which, summary) {
+  ollamaExisting[which] = summary;
+  if (which === "local" && summary)
+    ollamaField(which, "base-url").value = summary.baseUrl;
+  ollamaField(which, "api-key").value = "";
+  ollamaField(which, "keep-key").checked = Boolean(summary?.hasApiKey);
+  setOllamaModelOptions(which, summary?.model, summary?.models ?? []);
+  refreshOllamaKeyControl(which);
+}
+function describeOllama(summary) {
+  const models = summary.models ?? [];
+  const vision = models.filter((model) => model.capabilities?.vision).length;
+  const remote = models.filter((model) => model.remote).length;
+  return `${models.length} model${models.length === 1 ? "" : "s"}${vision ? `, ${vision} with image input` : ""}${remote ? `, ${remote} running on ollama.com` : ""}`;
+}
+/** "Not offered: gpt-oss:20b (the server cannot load it…)", or null. */
+function describeSkipped(summary) {
+  const skipped = summary?.skipped ?? [];
+  if (!skipped.length) return null;
+  return `Not offered: ${skipped.map((item) => `${item.id} (${item.reason.replace(/\.$/, "")})`).join("; ")}.`;
+}
+function renderOllamaCard(which, active) {
+  const form = OLLAMA_FORMS[which];
+  const saved = ollamaExisting[which];
+  const provider = catalog?.providers.find((item) => item.id === form.provider);
+  const isActive = active.type === form.provider;
+  const card = element("div", null, "provider");
+  card.classList.toggle("available", Boolean(provider?.available));
+  card.classList.toggle("active", isActive);
+  card.append(element("span", null, `dot ${provider?.available ? "on" : ""}`));
+  const title = element("div", null, "title");
+  title.append(element("strong", form.name));
+  title.append(element("span", form.badge, "badge"));
+  if (isActive)
+    title.append(element("span", "Global default", "badge badge-accent"));
+  card.append(title);
+  card.append(
+    element(
+      "div",
+      saved
+        ? `${ollamaDisplayName(saved.model)} · ${provider?.account ?? ""} · ${describeOllama(saved)}`
+        : which === "local"
+          ? "No server connected. Add one below."
+          : "No key saved. Add one below.",
+      "meta",
+    ),
+  );
+  if (saved?.lastError)
+    card.append(element("div", saved.lastError, "meta warn"));
+  const skipped = describeSkipped(saved);
+  if (skipped) card.append(element("div", skipped, "meta warn"));
+  if (saved) card.append(renderStats(form.provider));
+  const controls = element("div", null, "controls");
+  const choose = modelCombo({
+    label: `${form.name} model`,
+    models: (provider?.models ?? []).map((model) => ({
+      id: model.model,
+      displayName: ollamaModelLabel(model),
+    })),
+    value: saved?.model ?? "",
+    disabled: !provider?.available,
+    empty:
+      which === "local"
+        ? "Connect a server to load models"
+        : "Save your key to load models",
+  });
+  const use = element(
+    "button",
+    isActive ? "Change model" : "Use as default",
+    `btn ${isActive ? "btn-secondary" : "btn-primary"}`,
+  );
+  use.type = "button";
+  use.disabled = !provider?.available;
+  use.addEventListener("click", () =>
+    select({ type: form.provider, model: choose.value }),
+  );
+  controls.append(choose, use);
+  card.append(controls);
+  return card;
+}
+async function loadOllama() {
+  const [local, cloud] = await Promise.all([
+    runtime("ollama.get", { provider: "ollama" }),
+    runtime("ollama.get", { provider: "ollama-cloud" }),
+  ]);
+  ollamaExisting.local = local;
+  ollamaExisting.cloud = cloud;
+}
+function wireOllamaForm(which) {
+  const form = OLLAMA_FORMS[which];
+  const statusId = `#${form.prefix}-status`;
+  if (which === "local")
+    ollamaField(which, "base-url").addEventListener("input", () =>
+      refreshOllamaKeyControl(which),
+    );
+  ollamaField(which, "keep-key").addEventListener("change", () =>
+    refreshOllamaKeyControl(which),
+  );
+  $(`#${form.prefix}-form`).addEventListener("submit", async (event) => {
+    event.preventDefault();
+    status(statusId, "Connecting and loading models…");
+    try {
+      const chosen = $(`#${form.prefix}-model`)?.value;
+      const summary = await runtime("ollama.save", ollamaValues(which));
+      applyOllamaSummary(which, summary);
+      status(
+        statusId,
+        [
+          `Saved. ${describeOllama(summary)} loaded; ${ollamaDisplayName(summary.model)} is the default${chosen ? "" : " (pick another above and save again to change it)"}.`,
+          describeSkipped(summary),
+        ]
+          .filter(Boolean)
+          .join(" "),
+      );
+      refreshDesktop();
+    } catch (error) {
+      status(statusId, error.message, true);
+    }
+  });
+  $(`#refresh-${form.prefix}`).addEventListener("click", async () => {
+    if (!ollamaExisting[which])
+      return status(statusId, "Save first, then refresh.", true);
+    status(statusId, "Refreshing models…");
+    try {
+      const summary = await runtime("ollama.refresh", {
+        provider: form.provider,
+      });
+      applyOllamaSummary(which, summary);
+      status(
+        statusId,
+        summary?.lastError ??
+          [`${describeOllama(summary)} available.`, describeSkipped(summary)]
+            .filter(Boolean)
+            .join(" "),
+        Boolean(summary?.lastError),
+      );
+      refreshDesktop();
+    } catch (error) {
+      status(statusId, error.message, true);
+    }
+  });
+  $(`#test-${form.prefix}`).addEventListener("click", async () => {
+    status(statusId, "Testing… a local model may take a while to load.");
+    try {
+      const result = await runtime("ollama.test", ollamaValues(which));
+      const traits = [
+        result.capabilities?.vision ? "accepts images" : "no image input",
+        result.capabilities?.tools ? "accepts tools" : "no tool support",
+      ].join(", ");
+      status(
+        statusId,
+        `Connected. ${ollamaDisplayName(result.model)} ${result.calledTool ? "answered with a tool call" : "answered"} (${traits}${result.contextWindow ? `, ${result.contextWindow.toLocaleString()}-token context loaded` : ""}). ${result.modelCount} models on this ${which === "local" ? "server" : "account"}, ${result.visionModels} with image input.`,
+      );
+      await loadOllama();
+      refreshDesktop();
+    } catch (error) {
+      status(statusId, error.message, true);
+    }
+  });
+  $(`#clear-${form.prefix}`).addEventListener("click", async () => {
+    try {
+      await runtime("ollama.clear", { provider: form.provider });
+      applyOllamaSummary(which, null);
+      status(
+        statusId,
+        which === "local"
+          ? "Ollama server disconnected."
+          : "Ollama Cloud key cleared.",
+      );
+      refreshDesktop();
+    } catch (error) {
+      status(statusId, error.message, true);
+    }
+  });
 }
 function status(selector, message, error = false) {
   const node = $(selector);
@@ -686,6 +958,10 @@ function renderProviders() {
   openCodeControls.append(openCodeSelect, useOpenCode);
   openCodeCard.append(openCodeControls);
   cards.push(openCodeCard);
+  cards.push(
+    renderOllamaCard("local", active),
+    renderOllamaCard("cloud", active),
+  );
   for (const provider of desktop?.providers ?? []) {
     const isActive =
       active.type === "desktop" && active.providerId === provider.id;
@@ -807,6 +1083,7 @@ async function select(active) {
     desktop = { ...desktop, ...result };
     existing = await runtime("provider.get");
     opencodeExisting = await runtime("opencode.get");
+    await loadOllama();
     if (existing) setModelOptions(existing.model);
     catalog = await runtime("catalog.get").catch(() => catalog);
     renderProviders();
@@ -879,6 +1156,8 @@ async function refreshDesktop(refresh = false) {
     nextDesktop = { running: false, paired: false, error: error.message };
   }
   const nextCatalog = await runtime("catalog.get").catch(() => catalog);
+  // Cards follow a background catalog refresh; the forms keep what is typed.
+  await loadOllama().catch(() => {});
   if (request !== desktopRequest) return;
   desktop = nextDesktop;
   catalog = nextCatalog;
@@ -887,9 +1166,12 @@ async function refreshDesktop(refresh = false) {
   refreshGrants().catch(() => {});
 }
 
-existing = await runtime("provider.get");
-opencodeExisting = await runtime("opencode.get");
-catalog = await runtime("catalog.get").catch(() => null);
+[existing, opencodeExisting, catalog] = await Promise.all([
+  runtime("provider.get"),
+  runtime("opencode.get"),
+  runtime("catalog.get").catch(() => null),
+  loadOllama(),
+]);
 $("#base-url").value = OPENAI_BASE_URL;
 $("#opencode-base-url").value = OPENCODE_BASE_URL;
 setModelOptions(existing?.model);
@@ -904,6 +1186,10 @@ if (opencodeExisting)
   $("#opencode-keep-key").checked = opencodeExisting.hasApiKey;
 refreshKeyControl();
 refreshOpenCodeKeyControl();
+applyOllamaSummary("local", ollamaExisting.local);
+applyOllamaSummary("cloud", ollamaExisting.cloud);
+wireOllamaForm("local");
+wireOllamaForm("cloud");
 renderProviders();
 await refreshGrants();
 refreshDesktop();

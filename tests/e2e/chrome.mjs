@@ -7,13 +7,100 @@ import { join, resolve } from "node:path";
 import puppeteer from "puppeteer";
 
 const fixture = await readFile(resolve("tests/fixtures/site.html"));
+const widgetFixture = await readFile(
+  resolve("tests/fixtures/widget-extension.html"),
+);
 const modelRequests = [];
 const zenRequests = [];
+// Provider state a Responses round leaves for its continuation (SPEC 5.4).
+const ZEN_REASONING = {
+  type: "reasoning",
+  id: "rs_zen_1",
+  summary: [{ type: "summary_text", text: "Use the weather tool." }],
+  encrypted_content: "gAAAAABe2e-encrypted-reasoning-blob==",
+};
 const mcpMethods = [];
+// Requests the mock holds open until the browser gives up on them.
+const held = [];
+// Streamed rounds the mock holds open after their first delta.
+const heldStreams = [];
+// The loop behind the bridged widget page: one turn whose single round is
+// relayed with `stream: true`, and every `model-results` body it was posted.
+const widgetRelay = { threads: [], posts: [] };
+async function widgetBridgeApi(request, response, route) {
+  const json = (value, status = 200) => {
+    response.writeHead(status, { "Content-Type": "application/json" });
+    response.end(value === null ? "" : JSON.stringify(value));
+  };
+  let text = "";
+  for await (const chunk of request) text += chunk;
+  if (route === "threads" && request.method === "GET")
+    return json(widgetRelay.threads);
+  if (route === "threads" && request.method === "POST") {
+    const summary = {
+      id: `t${widgetRelay.threads.length + 1}`,
+      title: "Streamed",
+      updatedAt: new Date().toISOString(),
+    };
+    widgetRelay.threads.push(summary);
+    return json(summary);
+  }
+  if (/^threads\/[^/]+$/.test(route)) return json([]);
+  if (/\/model-results$/.test(route)) {
+    widgetRelay.posts.push(JSON.parse(text));
+    return json(null, 204);
+  }
+  if (/\/cancel$/.test(route)) return json(null, 204);
+  const turn = route.match(/^threads\/([^/]+)\/turns$/);
+  if (!turn || request.method !== "POST") return json(null, 404);
+  const send = (type, data) =>
+    response.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+  });
+  send("turn.start", { turnId: "w1", threadId: turn[1] });
+  send("model.client", {
+    id: "m1",
+    request: { messages: [{ role: "user", content: "stream this round" }] },
+    stream: true,
+  });
+  let final;
+  while (!(final = widgetRelay.posts.find((item) => item.result || item.error)))
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+  send("message", {
+    entry: {
+      type: "message",
+      id: "f1",
+      role: "assistant",
+      content: `${final.result?.message.content ?? final.error.code} (final)`,
+      createdAt: new Date().toISOString(),
+    },
+  });
+  send("turn.end", { turnId: "w1" });
+  response.end();
+}
 const server = createServer(async (request, response) => {
+  if (request.url.startsWith("/bridge-api/"))
+    return widgetBridgeApi(request, response, request.url.slice(12));
   if (request.url === "/site.html") {
     response.writeHead(200, { "Content-Type": "text/html" });
     response.end(fixture);
+    return;
+  }
+  // The published widget (built by `npm run build:widget`) in bridged mode
+  // over this extension, with its loop in page JavaScript.
+  if (request.url === "/widget-extension.html") {
+    response.writeHead(200, { "Content-Type": "text/html" });
+    response.end(widgetFixture);
+    return;
+  }
+  const widgetFile = request.url.match(/^\/widget\/([a-z]+\.js)$/);
+  if (widgetFile) {
+    response.writeHead(200, { "Content-Type": "text/javascript" });
+    response.end(
+      await readFile(resolve("packages/widget/dist", widgetFile[1])),
+    );
     return;
   }
   if (request.url === "/v1/models") {
@@ -29,6 +116,72 @@ const server = createServer(async (request, response) => {
       payload,
       authorization: request.headers.authorization,
     });
+    // A model that never answers, so the test can watch a page abort reach
+    // this very connection.
+    if (payload.messages?.[0]?.content === "hold this request open") {
+      const entry = { closed: false };
+      held.push(entry);
+      response.on("close", () => {
+        entry.closed = true;
+      });
+      return;
+    }
+    // A page's own round stream (SPEC 5.3): the same answer streamed in three
+    // deltas further apart than the extension's batch window, or as one
+    // fixed JSON response, so both forms must produce the same result.
+    if (payload.messages?.[0]?.content === "stream this round") {
+      const usage = { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7 };
+      const parts = ["Streamed ", "round ", "answer."];
+      if (!payload.stream) {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(
+          JSON.stringify({
+            id: "response-stream",
+            choices: [
+              {
+                message: { role: "assistant", content: parts.join("") },
+                finish_reason: "stop",
+              },
+            ],
+            usage,
+          }),
+        );
+        return;
+      }
+      response.writeHead(200, { "Content-Type": "text/event-stream" });
+      for (const [index, text] of parts.entries()) {
+        response.write(
+          `data: ${JSON.stringify({
+            id: "response-stream",
+            choices: [
+              {
+                delta: { content: text },
+                finish_reason: index === parts.length - 1 ? "stop" : null,
+              },
+            ],
+          })}\n\n`,
+        );
+        await new Promise((resolveWait) => setTimeout(resolveWait, 400));
+      }
+      response.write(`data: ${JSON.stringify({ choices: [], usage })}\n\n`);
+      response.end("data: [DONE]\n\n");
+      return;
+    }
+    if (payload.messages?.[0]?.content === "stream then hold") {
+      const entry = { closed: false };
+      heldStreams.push(entry);
+      response.on("close", () => {
+        entry.closed = true;
+      });
+      response.writeHead(200, { "Content-Type": "text/event-stream" });
+      response.write(
+        `data: ${JSON.stringify({
+          id: "response-held",
+          choices: [{ delta: { content: "Partial" }, finish_reason: null }],
+        })}\n\n`,
+      );
+      return;
+    }
     const hasToolResult = payload.messages.some((item) => item.role === "tool");
     const shouldCallTool =
       Array.isArray(payload.tools) && payload.tools.length && !hasToolResult;
@@ -134,24 +287,57 @@ const server = createServer(async (request, response) => {
   if (request.url === "/zen/v1/responses") {
     let body = "";
     for await (const chunk of request) body += chunk;
+    const payload = JSON.parse(body);
     zenRequests.push({
       path: "/responses",
-      payload: JSON.parse(body),
+      payload,
       authorization: request.headers.authorization,
     });
+    // A request with tools that does not yet carry a tool result is round 1
+    // of a tool turn: reasoning (encrypted, as asked) and one call.
+    const toolTurn = Array.isArray(payload.tools) && payload.tools.length > 0;
+    const continuing = payload.input.some(
+      (item) => item.type === "function_call_output",
+    );
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(
-      JSON.stringify({
-        id: "zen-responses-1",
-        status: "completed",
-        output: [
-          {
-            type: "message",
-            content: [{ type: "output_text", text: "Zen Responses answer." }],
-          },
-        ],
-        usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 },
-      }),
+      JSON.stringify(
+        toolTurn && !continuing
+          ? {
+              id: "zen-responses-tool",
+              status: "completed",
+              output: [
+                ZEN_REASONING,
+                {
+                  type: "function_call",
+                  id: "fc_zen_1",
+                  call_id: "call_zen_1",
+                  name: payload.tools[0].name,
+                  arguments: '{"city":"Kathmandu"}',
+                  status: "completed",
+                },
+              ],
+              usage: { input_tokens: 6, output_tokens: 4, total_tokens: 10 },
+            }
+          : {
+              id: "zen-responses-1",
+              status: "completed",
+              output: [
+                {
+                  type: "message",
+                  content: [
+                    {
+                      type: "output_text",
+                      text: toolTurn
+                        ? "Zen tool answer."
+                        : "Zen Responses answer.",
+                    },
+                  ],
+                },
+              ],
+              usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 },
+            },
+      ),
     );
     return;
   }
@@ -329,12 +515,20 @@ try {
         "disable",
         "enable",
         "isEnabled",
+        "openSettings",
         "site",
         "version",
       ],
     },
   );
 
+  // Every grant change reaches the page as one event with three fields.
+  await page.evaluate(() => {
+    window.__grantChanges = [];
+    window.addEventListener("arjunah:grantchange", (event) =>
+      window.__grantChanges.push(event.detail),
+    );
+  });
   // A bare enable() asks for level 1 and resolves to the session.
   await page.evaluate(() => {
     window.__session = window.ai.arjunah.enable();
@@ -350,23 +544,129 @@ try {
   assert.equal(await page.evaluate(() => window.ai.arjunah.isEnabled()), true);
   assert.deepEqual(
     await page.evaluate(async () =>
-      (await (await window.__session).models.list()).map((item) => item.id),
+      (await (await window.__session).models.list()).map((item) => [
+        item.id,
+        item.kind,
+        item.local,
+        item.builtinTools,
+      ]),
     ),
-    ["openai/gpt-test-model"],
+    [["openai/gpt-test-model", "api-key", false, false]],
   );
+  const direct = await page.evaluate(async () => {
+    const result = await (
+      await window.__session
+    ).models.generate({
+      messages: [{ role: "user", content: "hello" }],
+    });
+    return [result.message.content, result.kind, result.local];
+  });
+  assert.deepEqual(direct, ["Direct model response.", "api-key", false]);
+  await waitForAsync(() =>
+    page.evaluate(() => window.__grantChanges.length === 1),
+  );
+  assert.deepEqual(
+    await page.evaluate(() => window.__grantChanges),
+    [{ level: "completion", model: "openai/gpt-test-model", revoked: false }],
+    "consent announced the new grant",
+  );
+
+  // A changed `require` asks again; with nothing that qualifies the sheet
+  // says so, offers only Close, and the request is NOT_CONFIGURED.
+  await page.evaluate(() => {
+    window.__restricted = window.ai.arjunah
+      .enable({ require: { kinds: ["subscription"] } })
+      .then(
+        () => "unexpected",
+        (error) => error.code,
+      );
+  });
+  await page.waitForFunction(
+    () => document.activeElement?.id === "arjunah-extension",
+  );
+  await page.keyboard.press("Enter");
+  assert.equal(
+    await page.evaluate(() => window.__restricted),
+    "NOT_CONFIGURED",
+  );
+  // A constraint the saved model meets is approved and pinned.
+  await page.evaluate(() => {
+    window.__restricted = window.ai.arjunah
+      .enable({ require: { kinds: ["api-key"], builtinTools: false } })
+      .then((session) => session.grant.model);
+  });
+  await page.waitForFunction(
+    () => document.activeElement?.id === "arjunah-extension",
+  );
+  await page.keyboard.press("Enter");
+  assert.equal(
+    await page.evaluate(() => window.__restricted),
+    "openai/gpt-test-model",
+  );
+  // The same constraint again needs no prompt.
   assert.equal(
     await page.evaluate(
       async () =>
         (
-          await (
-            await window.__session
-          ).models.generate({
-            messages: [{ role: "user", content: "hello" }],
+          await window.ai.arjunah.enable({
+            require: { builtinTools: false, kinds: ["api-key"] },
           })
-        ).message.content,
+        ).grant.level,
     ),
-    "Direct model response.",
+    "completion",
   );
+
+  // openSettings() needs a user gesture. A script the page runs on its own,
+  // long after load and with no input since, is refused; a click is not.
+  // Nothing drives the quiet page in the meantime, because every Puppeteer
+  // evaluation counts as a gesture for the next five seconds.
+  const quiet = await browser.newPage();
+  await quiet.evaluateOnNewDocument(() => {
+    window.__settings = new Promise((resolveLater) =>
+      setTimeout(resolveLater, 5500),
+    ).then(() =>
+      window.ai.arjunah.openSettings().then(
+        () => "opened",
+        (error) => error.code,
+      ),
+    );
+  });
+  await quiet.goto(`http://localhost:${port}/site.html`);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 6500));
+  assert.equal(
+    await quiet.evaluate(() => window.__settings),
+    "PERMISSION_REQUIRED",
+  );
+  await quiet.close();
+  const targetsBefore = new Set(browser.targets());
+  await page.evaluate(() => {
+    const button = document.createElement("button");
+    button.id = "open-settings";
+    button.textContent = "AI settings";
+    button.addEventListener("click", () => {
+      window.__settings = window.ai.arjunah.openSettings();
+    });
+    document.body.append(button);
+  });
+  await page.click("#open-settings");
+  assert.equal(await page.evaluate(() => window.__settings), true);
+  const opened = () =>
+    browser
+      .targets()
+      .find(
+        (target) =>
+          !targetsBefore.has(target) &&
+          /\/(popup|options)\.html/.test(target.url() ?? ""),
+      );
+  await waitFor(() => opened());
+  const settingsView = opened();
+  // Headless Chrome has no toolbar to anchor the popup to, so this is the
+  // fallback: the settings page at its site list.
+  if (/options\.html/.test(settingsView.url())) {
+    assert.match(settingsView.url(), /options\.html#grants$/);
+    await (await settingsView.page())?.close();
+  }
+  await page.bringToFront();
   assert.equal(modelRequests.at(-1).authorization, "Bearer e2e-secret");
   assert.equal(
     JSON.stringify(
@@ -377,6 +677,235 @@ try {
     ).includes("e2e-secret"),
     false,
   );
+
+  // The model entry reports its bounds, and the bridge enforces exactly them:
+  // the request one past `tools` is refused without reaching the mock, with
+  // the request id and retryability in `details` (SPEC 5.2, 5.3, 9).
+  const bounds = await page.evaluate(async () => {
+    const session = await window.__session;
+    const [entry] = await session.models.list();
+    const tools = (count) =>
+      Array.from({ length: count }, (_, index) => ({
+        name: `tool_${index}`,
+        inputSchema: { type: "object" },
+      }));
+    const refused = await session.models
+      .generate({
+        messages: [{ role: "user", content: "x" }],
+        tools: tools(entry.limits.tools + 1),
+      })
+      .then(
+        () => null,
+        (error) => ({ code: error.code, details: error.details }),
+      );
+    return { limits: entry.limits, refused };
+  });
+  assert.deepEqual(bounds.limits, {
+    messages: 400,
+    messageUnits: 180_000,
+    tools: 128,
+    toolDescriptionUnits: 2_000,
+    toolCallsPerMessage: 32,
+    toolArgumentUnits: 65_536,
+    schemaBytes: 32_768,
+    schemaDepth: 16,
+    requestBytes: 12_000_000,
+    maxTokens: 32_768,
+    timeoutMs: 180_000,
+  });
+  assert.equal(bounds.refused.code, "INVALID_REQUEST");
+  assert.match(bounds.refused.details.requestId, /^[0-9a-f-]{36}$/);
+  assert.equal(bounds.refused.details.retryable, false);
+  const sentBefore = modelRequests.length;
+
+  // A page aborts a generate the mock is still holding: the promise rejects
+  // with ABORTED at once and the provider connection itself is closed.
+  await page.evaluate(async () => {
+    const session = await window.__session;
+    window.__abort = new AbortController();
+    window.__held = session.models
+      .generate(
+        { messages: [{ role: "user", content: "hold this request open" }] },
+        { signal: window.__abort.signal },
+      )
+      .then(
+        () => ({ settled: "resolved" }),
+        (error) => ({
+          name: error.name,
+          code: error.code,
+          details: error.details,
+        }),
+      );
+  });
+  await waitFor(() => held.length === 1);
+  assert.equal(modelRequests.length, sentBefore + 1);
+  assert.equal(held[0].closed, false);
+  const aborted = await page.evaluate(async () => {
+    window.__abort.abort();
+    return window.__held;
+  });
+  assert.equal(aborted.name, "AIError");
+  assert.equal(aborted.code, "ABORTED");
+  assert.match(aborted.details.requestId, /^[0-9a-f-]{36}$/);
+  assert.equal(aborted.details.retryable, false);
+  await waitFor(() => held[0].closed);
+  // The session keeps working after a cancel.
+  assert.equal(
+    await page.evaluate(
+      async () =>
+        (
+          await (
+            await window.__session
+          ).models.generate({
+            messages: [{ role: "user", content: "hello again" }],
+          })
+        ).message.content,
+    ),
+    "Direct model response.",
+  );
+
+  // The page streams a round of its own (SPEC 5.3): deltas as the provider
+  // writes them, then the result a generate of the same request gives.
+  const streamedRound = await page.evaluate(async () => {
+    const session = await window.__session;
+    const request = {
+      messages: [{ role: "user", content: "stream this round" }],
+    };
+    const events = [];
+    for await (const event of session.models.stream(request))
+      events.push(event);
+    return { events, generated: await session.models.generate(request) };
+  });
+  const roundDeltas = streamedRound.events.filter(
+    (event) => event.type === "output.delta",
+  );
+  assert.ok(roundDeltas.length >= 2, JSON.stringify(streamedRound.events));
+  assert.equal(
+    roundDeltas.map((event) => event.text).join(""),
+    "Streamed round answer.",
+  );
+  assert.equal(streamedRound.events.at(-1).type, "result");
+  assert.equal(
+    streamedRound.events.filter((event) => event.type === "result").length,
+    1,
+  );
+  assert.deepEqual(streamedRound.events.at(-1).result, streamedRound.generated);
+  assert.equal(
+    streamedRound.generated.message.content,
+    "Streamed round answer.",
+  );
+  assert.equal(
+    modelRequests.at(-2).payload.stream,
+    true,
+    "the stream reached the provider as a streamed request",
+  );
+
+  // A second stream is aborted after its first delta: the loop rejects with
+  // ABORTED and the provider connection is closed.
+  await page.evaluate(async () => {
+    const session = await window.__session;
+    window.__streamAbort = new AbortController();
+    window.__streamSeen = [];
+    window.__streamDone = (async () => {
+      try {
+        for await (const event of session.models.stream(
+          { messages: [{ role: "user", content: "stream then hold" }] },
+          { signal: window.__streamAbort.signal },
+        ))
+          window.__streamSeen.push(event);
+        return { settled: "finished" };
+      } catch (error) {
+        return { name: error.name, code: error.code, details: error.details };
+      }
+    })();
+  });
+  await waitFor(() => heldStreams.length === 1);
+  await page.waitForFunction(() => window.__streamSeen.length >= 1);
+  assert.equal(heldStreams[0].closed, false);
+  const abortedStream = await page.evaluate(async () => {
+    window.__streamAbort.abort();
+    return { outcome: await window.__streamDone, seen: window.__streamSeen };
+  });
+  assert.deepEqual(abortedStream.seen, [
+    { type: "output.delta", text: "Partial" },
+  ]);
+  assert.equal(abortedStream.outcome.name, "AIError");
+  assert.equal(abortedStream.outcome.code, "ABORTED");
+  assert.match(abortedStream.outcome.details.requestId, /^[0-9a-f-]{36}$/);
+  await waitFor(() => heldStreams[0].closed);
+
+  // The widget's bridged mode on this origin's level 1 session: its relayed
+  // round runs through `conversation.stream`, so the deltas it draws and
+  // posts are the extension's own, followed by the extension's result.
+  const widgetPage = await browser.newPage();
+  widgetPage.on("pageerror", (error) =>
+    errors.push(`widget: ${error.message}`),
+  );
+  await widgetPage.goto(`http://localhost:${port}/widget-extension.html`, {
+    waitUntil: "networkidle0",
+  });
+  const inWidget = (script) =>
+    widgetPage.evaluate(
+      (source) =>
+        new Function("root", source)(
+          document.querySelector("#assistant").shadowRoot,
+        ),
+      script,
+    );
+  await widgetPage.waitForFunction(() =>
+    document.querySelector("#assistant")?.shadowRoot?.querySelector(".input"),
+  );
+  await inWidget(`root.querySelector(".input").focus();`);
+  await widgetPage.keyboard.type("hello", { delay: 5 });
+  await inWidget(`root.querySelector(".send:not(.stop)").click();`);
+  // The widget enables access with `composer: "server"` (SPEC 15.3), and this
+  // origin's level 1 grant was approved for the page itself, so the visitor
+  // is asked again, with the server's wording.
+  const composerCdp = await widgetPage.createCDPSession();
+  const composerDeadline = Date.now() + 15000;
+  for (;;) {
+    const tree = JSON.stringify(
+      await composerCdp.send("DOM.getDocument", { depth: -1, pierce: true }),
+    );
+    if (tree.includes("This site's server writes the prompts")) break;
+    if (Date.now() > composerDeadline)
+      throw new Error("the composer change did not ask again");
+    await new Promise((done) => setTimeout(done, 200));
+  }
+  await composerCdp.detach();
+  await widgetPage.keyboard.press("Enter");
+  await waitFor(() =>
+    widgetRelay.posts.some((item) => item.result || item.error),
+  );
+  await widgetPage.waitForFunction(() =>
+    [
+      ...document
+        .querySelector("#assistant")
+        .shadowRoot.querySelectorAll(".msg.assistant"),
+    ].some((node) =>
+      node.textContent.includes("Streamed round answer. (final)"),
+    ),
+  );
+  const relayed = widgetRelay.posts;
+  const relayedDeltas = relayed.filter((item) => item.delta);
+  assert.ok(relayedDeltas.length >= 2, JSON.stringify(relayed));
+  assert.ok(relayed.at(-1).result, "the result is posted last");
+  assert.ok(relayed.slice(0, -1).every((item) => item.delta));
+  assert.equal(
+    relayedDeltas
+      .filter((item) => item.delta.type === "output.delta")
+      .map((item) => item.delta.text)
+      .join(""),
+    "Streamed round answer.",
+  );
+  assert.equal(relayed.at(-1).result.message.content, "Streamed round answer.");
+  assert.equal(typeof relayed.at(-1).conversation, "string");
+  assert.equal(
+    modelRequests.at(-1).payload.stream,
+    true,
+    "the relayed round reached the provider as a stream",
+  );
+  await widgetPage.close();
 
   const isolated = await browser.newPage();
   await isolated.goto(`http://127.0.0.1:${port}/site.html`);
@@ -495,7 +1024,13 @@ try {
   assert.match(rendered, /1 step completed/);
   assert.doesNotMatch(rendered, /\*\*round\*\*/);
   assert.ok(
-    modelRequests.some((item) => item.payload.stream === true),
+    // The page's own streamed rounds above request one too, so this looks
+    // for the hosted tool round.
+    modelRequests.some(
+      (item) =>
+        item.payload.stream === true &&
+        item.payload.messages.some((message) => message.role === "tool"),
+    ),
     "hosted answers request a provider stream",
   );
 
@@ -651,6 +1186,9 @@ try {
   await popup.close();
   await page.bringToFront();
 
+  await page.evaluate(() => {
+    window.__grantChanges.length = 0;
+  });
   await page.evaluate(() => window.ai.arjunah.disable());
   assert.deepEqual(
     await page.evaluate(async () => [
@@ -659,6 +1197,14 @@ try {
     ]),
     [false, null],
   );
+  await waitForAsync(() =>
+    page.evaluate(() => window.__grantChanges.some((change) => change.revoked)),
+  );
+  assert.deepEqual(await page.evaluate(() => window.__grantChanges.at(-1)), {
+    level: null,
+    model: null,
+    revoked: true,
+  });
   assert.equal(
     await page.evaluate(async () => {
       try {
@@ -754,6 +1300,18 @@ try {
   });
   await zenPage.waitForFunction(
     () => document.activeElement?.id === "arjunah-extension",
+  );
+  // A level 1 consent says that working state is kept between tool steps.
+  const consentCdp = await zenPage.createCDPSession();
+  const consentDom = JSON.stringify(
+    await consentCdp.send("DOM.getDocument", { depth: -1, pierce: true }),
+  );
+  await consentCdp.detach();
+  assert.ok(
+    consentDom.includes(
+      "Keeps the model's working state during a reply's tool steps on this device, for up to 2 days.",
+    ),
+    "the level 1 consent discloses provider-state retention",
   );
   await zenPage.keyboard.press("Enter");
   await zenPage.evaluate(() => window.__zenSession);
@@ -863,6 +1421,160 @@ try {
     false,
     "the Zen key must never be visible to the page",
   );
+
+  // Provider-state continuity (SPEC 5.4): the page runs its own two-round
+  // tool turn; round 1's encrypted reasoning waits in the extension's own
+  // IndexedDB and goes back on round 2, and the page never sees it.
+  const luna = await settings.evaluate(
+    () =>
+      new Promise((resolveReply) =>
+        chrome.runtime.sendMessage(
+          {
+            kind: "arjunah",
+            method: "catalog.default",
+            params: { model: "opencode-api/gpt-5.6-luna" },
+          },
+          resolveReply,
+        ),
+      ),
+  );
+  assert.equal(luna.ok, true, JSON.stringify(luna));
+  // Read from an extension page, which shares the worker's origin and so its
+  // IndexedDB. Opening must never create the database itself.
+  const storedState = () =>
+    settings.evaluate(
+      () =>
+        new Promise((resolveRead, rejectRead) => {
+          const open = indexedDB.open("arjunah");
+          open.onupgradeneeded = () => open.transaction.abort();
+          open.onerror = () => resolveRead(null);
+          open.onsuccess = () => {
+            const db = open.result;
+            const read = db
+              .transaction("providerState")
+              .objectStore("providerState")
+              .getAll();
+            read.onsuccess = () => {
+              db.close();
+              resolveRead(read.result);
+            };
+            read.onerror = () => {
+              db.close();
+              rejectRead(read.error);
+            };
+          };
+        }),
+    );
+  const weatherTool = {
+    name: "get_weather",
+    description: "Weather for a city.",
+    inputSchema: {
+      type: "object",
+      properties: { city: { type: "string" } },
+      additionalProperties: false,
+    },
+  };
+  // The extension mints the conversation; the page keeps only its handle.
+  const conversationId = await zenPage.evaluate(async () => {
+    const session = await window.__zenSession;
+    window.__conversation = await session.conversations.create();
+    return window.__conversation.id;
+  });
+  assert.match(conversationId, /^[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{22}$/);
+  const toolRound = (previous) =>
+    zenPage.evaluate(
+      async ({ tool, previous }) => {
+        const ask = { role: "user", content: "Weather in Kathmandu?" };
+        return window.__conversation.generate({
+          tools: [tool],
+          messages: previous
+            ? [
+                ask,
+                {
+                  role: "assistant",
+                  content: previous.message.content,
+                  toolCalls: previous.message.toolCalls.map((call) => ({
+                    id: call.id,
+                    type: "function",
+                    function: { name: call.name, arguments: call.arguments },
+                  })),
+                },
+                {
+                  role: "tool",
+                  toolCallId: previous.message.toolCalls[0].id,
+                  content: '{"tempC":21}',
+                },
+              ]
+            : [ask],
+        });
+      },
+      { tool: weatherTool, previous },
+    );
+  const roundOne = await toolRound(null);
+  assert.equal(roundOne.providerState, "none");
+  assert.deepEqual(
+    roundOne.message.toolCalls.map((call) => call.id),
+    ["call_zen_1"],
+  );
+  assert.deepEqual(zenRequests.at(-1).payload.include, [
+    "reasoning.encrypted_content",
+  ]);
+  assert.equal(
+    JSON.stringify(roundOne).includes(ZEN_REASONING.encrypted_content),
+    false,
+    "provider state never crosses the page bridge",
+  );
+  const kept = await storedState();
+  assert.equal(kept?.length, 1, JSON.stringify(kept));
+  assert.equal(kept[0].origin, `http://127.0.0.1:${port}`);
+  assert.equal(kept[0].conversationKey, conversationId);
+  assert.deepEqual(kept[0].callIds, ["call_zen_1"]);
+  assert.equal(kept[0].model, "opencode-api/gpt-5.6-luna");
+  assert.equal(
+    JSON.stringify(kept).includes("zen-e2e-secret"),
+    false,
+    "the stored revision is a digest, never the key",
+  );
+  const roundTwo = await toolRound(roundOne);
+  assert.equal(roundTwo.providerState, "reused");
+  assert.equal(roundTwo.message.content, "Zen tool answer.");
+  const replay = zenRequests.at(-1).payload.input;
+  assert.deepEqual(replay[1], ZEN_REASONING);
+  assert.equal(replay[2].type, "function_call");
+  assert.equal(replay[2].id, "fc_zen_1");
+  assert.equal(replay[2].call_id, "call_zen_1");
+  assert.deepEqual(
+    await storedState(),
+    [],
+    "the final round ends the turn and its state",
+  );
+  // A conversation the page abandons mid-turn is released explicitly, and
+  // can be reopened by id later; an id the extension did not mint for this
+  // origin is refused.
+  await toolRound(null);
+  assert.equal((await storedState()).length, 1);
+  assert.deepEqual(
+    await zenPage.evaluate(async (id) => {
+      const session = await window.__zenSession;
+      const reopened = await session.conversations.open(id);
+      const forged = await session.conversations
+        .open(`${id.slice(0, -1)}${id.endsWith("A") ? "B" : "A"}`)
+        .then(
+          () => "unexpected",
+          (error) => error.code,
+        );
+      return { id: reopened.id, released: await reopened.release(), forged };
+    }, conversationId),
+    { id: conversationId, released: true, forged: "INVALID_REQUEST" },
+  );
+  assert.deepEqual(await storedState(), []);
+  // The install key that signs conversation ids lives in local storage.
+  assert.match(
+    await settings.evaluate(
+      async () => (await chrome.storage.local.get("installKey")).installKey,
+    ),
+    /^[A-Za-z0-9_-]{43}$/,
+  );
   await zenPage.close();
 
   assert.deepEqual(errors, []);
@@ -876,6 +1588,13 @@ try {
   await testExtension.cleanup();
 }
 
+async function waitForAsync(check, timeout = 10000) {
+  const deadline = Date.now() + timeout;
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error("Timed out waiting.");
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+  }
+}
 async function waitFor(check, timeout = 10000) {
   const deadline = Date.now() + timeout;
   while (!check()) {

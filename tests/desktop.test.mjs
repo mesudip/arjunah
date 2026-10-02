@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { request as httpRequest } from "node:http";
+import { spawn } from "node:child_process";
 import { createDesktopApp } from "../desktop/lib/server.mjs";
 import { Store } from "../desktop/lib/store.mjs";
 import {
@@ -489,6 +490,79 @@ test("agent failures surface as provider errors without internals", async (t) =>
   assert.equal(result.status, 502);
   assert.equal(result.body.error.code, "PROVIDER_ERROR");
   assert.match(result.body.error.message, /Not logged in/);
+});
+
+test("an agent failure the CLI words as a limit carries its section 9 code", async (t) => {
+  for (const [message, status, code] of [
+    ["Prompt is too long", 502, "CONTEXT_TOO_LONG"],
+    ["Claude AI usage limit reached", 429, "RATE_LIMITED"],
+    ["The model gpt-9 does not exist", 502, "MODEL_UNAVAILABLE"],
+  ]) {
+    const { call, pair } = await app(t, () => ({
+      child: null,
+      output: Promise.resolve({ isError: true, errorMessage: message }),
+    }));
+    const result = await call("/api/generate", {
+      method: "POST",
+      headers: await pair(),
+      body: { providerId: "fake", messages: [{ role: "user", content: "x" }] },
+    });
+    assert.equal(result.status, status, message);
+    assert.equal(result.body.error.code, code, message);
+  }
+});
+
+test("a browser that closes its generate request stops the agent run and its process", async (t) => {
+  let child = null;
+  let started;
+  const running = new Promise((resolve) => (started = resolve));
+  const { call, pair, base, instance } = await app(t, () => {
+    // A real process that would run until killed, like a CLI still thinking.
+    child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      stdio: "ignore",
+    });
+    const output = new Promise((resolve) =>
+      child.on("exit", () =>
+        resolve({ isError: true, errorMessage: "terminated" }),
+      ),
+    );
+    started();
+    return { child, output };
+  });
+  const headers = await pair();
+  const controller = new AbortController();
+  const pending = fetch(`${base}/api/generate`, {
+    method: "POST",
+    signal: controller.signal,
+    headers: {
+      Origin: EXTENSION,
+      "Content-Type": "application/json",
+      ...headers,
+    },
+    body: JSON.stringify({
+      providerId: "fake",
+      messages: [{ role: "user", content: "x" }],
+    }),
+  }).catch((error) => error);
+  await running;
+  assert.equal(instance.sessions.sessions.size, 1);
+  controller.abort();
+  assert.equal((await pending).name, "AbortError");
+  const exit = await new Promise((resolve) => {
+    if (child.exitCode != null || child.signalCode != null)
+      return resolve(child.signalCode ?? child.exitCode);
+    child.on("exit", (code, signal) => resolve(signal ?? code));
+  });
+  assert.equal(exit, "SIGTERM");
+  assert.equal(instance.sessions.sessions.size, 0);
+  assert.ok(
+    instance.logs.entries.some((entry) =>
+      /closed the request; Fake was stopped/.test(entry.message),
+    ),
+  );
+  // The companion keeps answering the next request as usual.
+  const next = await call("/api/status");
+  assert.equal(next.status, 200);
 });
 
 const PIXEL =

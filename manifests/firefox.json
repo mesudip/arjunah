@@ -3,7 +3,7 @@
   "name": "अर्जुनः (Arjunah)",
   "version": "1.0.0",
   "description": "Bring your own AI provider to websites through a user-controlled, origin-scoped window.ai.arjunah extension.",
-  "permissions": ["storage", "tabs"],
+  "permissions": ["storage", "tabs", "declarativeNetRequestWithHostAccess"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "scripts": ["background.js"],
@@ -32,7 +32,7 @@
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
-      "js": ["renderer/core.js", "content.js"],
+      "js": ["renderer/core.js", "hosted.js", "content.js"],
       "run_at": "document_start",
       "all_frames": false
     }

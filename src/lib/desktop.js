@@ -10,9 +10,21 @@ const STATUS_CODES = {
   403: "USER_DENIED",
   404: "NOT_SUPPORTED",
   413: "INVALID_REQUEST",
+  429: "RATE_LIMITED",
   502: "PROVIDER_ERROR",
   504: "TIMEOUT",
 };
+// Agent failures the companion classifies from the CLI's own words (SPEC 9).
+// Each is shown in our sentence rather than the CLI's, which can quote the
+// conversation or name the account.
+const AGENT_FAILURES = Object.freeze({
+  CONTEXT_TOO_LONG:
+    "The conversation is too long for the selected model's context window. Send fewer or shorter messages.",
+  RATE_LIMITED:
+    "The subscription is rate limited or out of its usage allowance. Try again later.",
+  MODEL_UNAVAILABLE:
+    "The selected model is not available from the desktop agent. Choose another model in the extension.",
+});
 
 /**
  * JSON with object keys in a fixed order, for comparing a value against a copy
@@ -79,7 +91,12 @@ async function desktopFetch(link, path, init = {}) {
       cache: "no-store",
     });
   } catch (error) {
-    if (["AbortError", "TimeoutError"].includes(error?.name))
+    // An abort is the caller's decision, never evidence that the companion
+    // is down: reporting it as NOT_CONFIGURED would mark it unreachable.
+    if (
+      ["AbortError", "TimeoutError"].includes(error?.name) ||
+      init.signal?.aborted
+    )
       throw networkError(error, "TIMEOUT", "Desktop app");
     throw new BrokerError(
       "NOT_CONFIGURED",
@@ -92,6 +109,19 @@ async function desktopFetch(link, path, init = {}) {
     "PROVIDER_ERROR",
   ).catch(() => null);
   if (!response.ok) {
+    const classified = Object.hasOwn(AGENT_FAILURES, body?.error?.code)
+      ? body.error.code
+      : null;
+    if (classified) {
+      const wait = body.error.retryAfterMs;
+      throw new BrokerError(
+        classified,
+        AGENT_FAILURES[classified],
+        classified === "RATE_LIMITED" && Number.isSafeInteger(wait) && wait >= 0
+          ? { retryAfterMs: Math.min(wait, 86_400_000) }
+          : undefined,
+      );
+    }
     const message =
       response.status === 401
         ? "अर्जुनः Desktop no longer recognises this browser's pairing. Open extension settings and pair again."

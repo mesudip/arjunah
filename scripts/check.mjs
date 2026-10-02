@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { VERSION, LIMITS } from "../src/lib/constants.js";
+import { VERSION, LIMITS, GENERATE_LIMITS } from "../src/lib/constants.js";
 
 const pkg = JSON.parse(readFileSync("package.json", "utf8"));
 // npm versions may carry a prerelease tag (1.0.0-beta.1); the protocol version does not.
@@ -200,11 +200,29 @@ if (
   throw new Error("Discovery/type versions drifted.");
 for (const [path, needle] of [
   ["src/page-api.js", String(LIMITS.resultBytes)],
+  ["src/page-api.js", String(GENERATE_LIMITS.timeoutMs)],
   ["src/content.js", String(LIMITS.contextText)],
   ["src/content.js", String(LIMITS.selection)],
 ]) {
   if (!readFileSync(path, "utf8").includes(needle))
     throw new Error(`Classic script limit drifted in ${path}.`);
+}
+// SPEC 5.3 states the generate bounds in one table that `models.list()`
+// reports as `limits`; each row with a member must carry the enforced value,
+// and the SDK type must name every member.
+for (const [member, value] of Object.entries(GENERATE_LIMITS)) {
+  const row = new RegExp(
+    `^\\|[^|\\n]+\\|\\s*\`${member}\`\\s*\\|\\s*${value.toLocaleString("en-US")}\\s*\\|[^|\\n]+\\|\\s*$`,
+    "m",
+  );
+  if (!row.test(spec))
+    throw new Error(
+      `SPEC.md section 5.3 must state limits.${member} as ${value.toLocaleString("en-US")}.`,
+    );
+  if (!new RegExp(`\\b${member}: number;`).test(types))
+    throw new Error(
+      `AIModelLimits in packages/sdk/src/types.ts lacks ${member}.`,
+    );
 }
 // The integration fixtures are plain static pages that no browser test loads,
 // so a rename of the page API can rot them silently. It already did once.

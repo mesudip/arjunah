@@ -16,7 +16,35 @@ const modelRequests = [];
 const mcpMethods = [];
 let holdNext = false,
   heldResponse = null;
+const ollamaRequests = [];
 const server = createServer(async (request, response) => {
+  // A stand-in Ollama server with the real one's Origin check: anything that
+  // arrives carrying an Origin header is refused.
+  if (request.url.startsWith("/api/")) {
+    let raw = "";
+    for await (const chunk of request) raw += chunk;
+    ollamaRequests.push({
+      path: request.url,
+      method: request.method,
+      origin: request.headers.origin ?? null,
+    });
+    if (request.headers.origin) {
+      response.writeHead(403);
+      response.end("Forbidden");
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(
+      JSON.stringify(
+        request.url === "/api/tags"
+          ? { models: [{ name: "qwen3-vl:2b", digest: "v" }] }
+          : request.url === "/api/show"
+            ? { capabilities: ["completion", "vision", "tools"] }
+            : { models: [] },
+      ),
+    );
+    return;
+  }
   if (request.url === "/site.html") {
     response.writeHead(200, { "Content-Type": "text/html" });
     response.end(fixture);
@@ -38,6 +66,30 @@ const server = createServer(async (request, response) => {
     if (holdNext) {
       holdNext = false;
       heldResponse = response;
+      return;
+    }
+    // A page's own round stream (SPEC 5.3): two deltas further apart than
+    // the extension's batch window.
+    if (
+      payload.stream &&
+      payload.messages[0]?.content === "stream this round"
+    ) {
+      response.writeHead(200, { "Content-Type": "text/event-stream" });
+      for (const [index, text] of ["Firefox ", "streamed."].entries()) {
+        response.write(
+          `data: ${JSON.stringify({
+            id: "firefox-stream",
+            choices: [
+              {
+                delta: { content: text },
+                finish_reason: index ? "stop" : null,
+              },
+            ],
+          })}\n\n`,
+        );
+        await new Promise((wait) => setTimeout(wait, 400));
+      }
+      response.end("data: [DONE]\n\n");
       return;
     }
     const hasToolResult = payload.messages.some((item) => item.role === "tool");
@@ -166,6 +218,29 @@ try {
     5000,
   );
 
+  // Firefox sends the extension's moz-extension:// Origin on every POST, which
+  // Ollama refuses; the declarativeNetRequest rule must remove it.
+  await driver
+    .findElement(By.id("ollama-base-url"))
+    .sendKeys(`127.0.0.1:${port}`);
+  await driver.findElement(By.css("#ollama-form button[type=submit]")).click();
+  await driver.wait(
+    until.elementTextContains(
+      driver.findElement(By.id("ollama-status")),
+      "Saved.",
+    ),
+    10000,
+  );
+  assert.ok(
+    ollamaRequests.some((item) => item.method === "POST"),
+    "discovery POSTs to /api/show",
+  );
+  assert.deepEqual(
+    ollamaRequests.filter((item) => item.origin !== null),
+    [],
+    "no Firefox request reached Ollama with an Origin",
+  );
+
   await driver.findElement(By.id("open-popup")).click();
   await driver.wait(until.urlContains("/popup.html"), 5000);
   await driver.wait(
@@ -193,6 +268,15 @@ try {
     false,
   );
 
+  // openSettings() needs a user gesture. Nothing has been clicked or typed
+  // on this page yet, so a script calling it is refused.
+  assert.equal(
+    await invoke(driver, "window.ai.arjunah.openSettings()", true),
+    "PERMISSION_REQUIRED",
+  );
+  await driver.executeScript(
+    "window.__changes=[];window.addEventListener('arjunah:grantchange',e=>window.__changes.push(e.detail))",
+  );
   await start(
     driver,
     "grant",
@@ -204,6 +288,14 @@ try {
   assert.equal(grant.ok, true);
   assert.equal(grant.value.origin, `http://localhost:${port}`);
   assert.equal(grant.value.level, "completion", "enable() defaults to level 1");
+  await driver.wait(
+    async () =>
+      (await driver.executeScript("return window.__changes.length")) === 1,
+    10000,
+  );
+  assert.deepEqual(await driver.executeScript("return window.__changes"), [
+    { level: "completion", model: "openai/test-model", revoked: false },
+  ]);
   assert.equal(
     await invoke(driver, "window.ai.arjunah.isEnabled()", true),
     true,
@@ -219,9 +311,45 @@ try {
         capabilities: { tools: true, vision: false, reasoning: false },
         contextWindow: null,
         reasoningLevels: [],
+        limits: {
+          messages: 400,
+          messageUnits: 180_000,
+          tools: 128,
+          toolDescriptionUnits: 2_000,
+          toolCallsPerMessage: 32,
+          toolArgumentUnits: 65_536,
+          schemaBytes: 32_768,
+          schemaDepth: 16,
+          requestBytes: 12_000_000,
+          maxTokens: 32_768,
+          timeoutMs: 180_000,
+        },
+        kind: "api-key",
+        local: false,
+        builtinTools: false,
       },
     ],
   );
+  // A click is a user gesture, so openSettings() opens the settings page.
+  const handlesBefore = await driver.getAllWindowHandles();
+  await driver.executeScript(
+    "const b=document.createElement('button');b.id='open-settings';b.textContent='AI settings';b.onclick=()=>{window.__settings=null;window.ai.arjunah.openSettings().then(v=>window.__settings={ok:true,value:v},e=>window.__settings={ok:false,error:e.code})};document.body.append(b)",
+  );
+  await driver.findElement(By.id("open-settings")).click();
+  assert.deepEqual(await result(driver, "settings"), { ok: true, value: true });
+  // Firefox lets the extension open its toolbar popup here, which is not a
+  // window WebDriver can see; where it does not, the settings page opens.
+  await driver.sleep(500);
+  const settingsTab = (await driver.getAllWindowHandles()).find(
+    (handle) => !handlesBefore.includes(handle),
+  );
+  if (settingsTab) {
+    const pageHandle = await driver.getWindowHandle();
+    await driver.switchTo().window(settingsTab);
+    assert.match(await driver.getCurrentUrl(), /options\.html#grants$/);
+    await driver.close();
+    await driver.switchTo().window(pageHandle);
+  }
   assert.equal(
     (
       await invoke(
@@ -233,6 +361,21 @@ try {
     "Firefox direct response.",
   );
   assert.equal(modelRequests.at(-1).authorization, "Bearer firefox-e2e-secret");
+  const streamed = await invoke(
+    driver,
+    `(async()=>{const events=[];for await(const event of window.__session.models.stream({messages:[{role:'user',content:'stream this round'}]}))events.push(event);return events;})()`,
+    true,
+  );
+  assert.deepEqual(
+    streamed.slice(0, -1),
+    [
+      { type: "output.delta", text: "Firefox " },
+      { type: "output.delta", text: "streamed." },
+    ],
+    JSON.stringify(streamed),
+  );
+  assert.equal(streamed.at(-1).type, "result");
+  assert.equal(streamed.at(-1).result.message.content, "Firefox streamed.");
 
   const mainHandle = await driver.getWindowHandle();
   await driver.switchTo().newWindow("tab");

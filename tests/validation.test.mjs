@@ -412,6 +412,257 @@ test("tool schemas reject unsupported assertions and enforce supported nested ar
     );
 });
 
+// One optional Pydantic/FastAPI field, exactly as such a generated catalog
+// sends it.
+const pydanticSchema = {
+  type: "object",
+  properties: {
+    note: {
+      anyOf: [{ type: "string", format: "date-time" }, { type: "null" }],
+      default: null,
+      title: "Note",
+    },
+  },
+  required: [],
+  additionalProperties: false,
+};
+const invalidRequest = (error) => error.code === "INVALID_REQUEST";
+
+test("generator annotations are accepted on every tool surface and their values are typed", async () => {
+  const { validateSchema } = await import("../src/lib/schema.js");
+  const tools = [{ name: "plan", inputSchema: pydanticSchema }];
+  assert.deepEqual(
+    validateSiteManifest({ name: "Schema", tools }).tools[0].inputSchema,
+    pydanticSchema,
+  );
+  assert.deepEqual(
+    validateGenerateRequest({
+      messages: [{ role: "user", content: "hi" }],
+      tools,
+    }).tools[0].inputSchema,
+    pydanticSchema,
+  );
+  assert.deepEqual(
+    validateMcpServer({ id: "m", url: "https://mcp.test", tools }).tools[0]
+      .inputSchema,
+    pydanticSchema,
+  );
+  for (const [key, value] of Object.entries({
+    format: "email",
+    contentMediaType: "application/json",
+    contentEncoding: "base64",
+    readOnly: true,
+    writeOnly: false,
+    deprecated: true,
+  })) {
+    const schema = {
+      type: "object",
+      properties: { x: { type: "string", [key]: value } },
+    };
+    assert.deepEqual(validateSchema(schema), schema, key);
+  }
+  for (const [key, value] of Object.entries({
+    format: 1,
+    contentMediaType: true,
+    contentEncoding: null,
+    readOnly: "true",
+    writeOnly: 0,
+    deprecated: "yes",
+  }))
+    assert.throws(
+      () =>
+        validateSiteManifest({
+          name: "Schema",
+          tools: [
+            {
+              name: "x",
+              inputSchema: {
+                type: "object",
+                properties: { x: { [key]: value } },
+              },
+            },
+          ],
+        }),
+      invalidRequest,
+      key,
+    );
+  // Assertions and references are still refused; only annotations were added.
+  for (const extra of [
+    { pattern: "^a$" },
+    { $ref: "#/$defs/x" },
+    { nullable: true },
+  ])
+    assert.throws(
+      () =>
+        validateSchema({
+          type: "object",
+          properties: { x: { type: "string", ...extra } },
+        }),
+      invalidRequest,
+      JSON.stringify(extra),
+    );
+});
+
+test("a type list becomes an anyOf of single types, bounded as rewritten", async () => {
+  const { validateSchema, validateArguments } = await import(
+    "../src/lib/schema.js"
+  );
+  const sent = {
+    type: "object",
+    properties: {
+      tags: {
+        type: ["array", "null"],
+        items: { type: "string" },
+        maxItems: 2,
+        description: "Labels",
+      },
+      count: { type: ["integer"] },
+    },
+    additionalProperties: false,
+  };
+  const before = structuredClone(sent);
+  const schema = validateSchema(sent);
+  assert.deepEqual(sent, before, "the caller's schema is never modified");
+  // Each type-specific keyword moves into the alternative of its own type.
+  assert.deepEqual(schema.properties.tags, {
+    description: "Labels",
+    anyOf: [
+      { type: "array", items: { type: "string" }, maxItems: 2 },
+      { type: "null" },
+    ],
+  });
+  assert.deepEqual(schema.properties.count, { type: "integer" });
+  // The broker validates a contract more than once; the result is stable.
+  assert.deepEqual(validateSchema(schema), schema);
+  for (const args of [{ tags: null }, { tags: ["a"], count: 2 }])
+    assert.deepEqual(validateArguments(args, schema), args);
+  for (const args of [{ tags: ["a", "b", "c"] }, { tags: "a" }, { count: 1.5 }])
+    assert.throws(
+      () => validateArguments(args, schema),
+      (error) => error.code === "TOOL_ERROR",
+      JSON.stringify(args),
+    );
+  // An existing anyOf is kept; the type alternatives join allOf.
+  assert.deepEqual(
+    validateSchema({
+      type: "object",
+      properties: {
+        x: {
+          type: ["string", "null"],
+          maxLength: 4,
+          anyOf: [{ minLength: 2 }, { const: null }],
+          allOf: [{ description: "kept" }],
+        },
+      },
+    }).properties.x,
+    {
+      anyOf: [{ minLength: 2 }, { const: null }],
+      allOf: [
+        { description: "kept" },
+        { anyOf: [{ type: "string", maxLength: 4 }, { type: "null" }] },
+      ],
+    },
+  );
+  // A list follows the rules of a single type: known, distinct, non-empty.
+  for (const type of [[], ["string", "string"], ["text"], ["string", null]])
+    assert.throws(
+      () => validateSchema({ type: "object", properties: { x: { type } } }),
+      invalidRequest,
+      JSON.stringify(type),
+    );
+  // Tool input schemas describe objects, so the root takes one type.
+  assert.deepEqual(validateSchema({ type: ["object"] }), { type: "object" });
+  assert.throws(
+    () => validateSchema({ type: ["object", "null"] }),
+    invalidRequest,
+  );
+  // A type list adds a level, and the depth bound applies to the result.
+  const nest = (inner, levels) =>
+    levels
+      ? { type: "object", properties: { x: nest(inner, levels - 1) } }
+      : inner;
+  validateSchema(nest({ type: "string" }, 16));
+  validateSchema(nest({ type: ["string", "null"] }, 15));
+  assert.throws(
+    () => validateSchema(nest({ type: ["string", "null"] }, 16)),
+    invalidRequest,
+  );
+  // So does the combinator bound: a full allOf has no room for the types.
+  const crowded = (members) => ({
+    type: "object",
+    properties: {
+      x: {
+        type: ["string", "null"],
+        anyOf: [{}],
+        allOf: Array.from({ length: members }, () => ({})),
+      },
+    },
+  });
+  assert.equal(validateSchema(crowded(31)).properties.x.allOf.length, 32);
+  assert.throws(() => validateSchema(crowded(32)), invalidRequest);
+});
+
+test("schemas sent to providers carry no hints, and data that looks like one survives", async () => {
+  const { validateSchema, providerSchema } = await import(
+    "../src/lib/schema.js"
+  );
+  const schema = validateSchema({
+    type: "object",
+    title: "Event",
+    properties: {
+      format: {
+        type: "string",
+        format: "uri",
+        readOnly: true,
+        enum: ["a"],
+        description: "A property named like the keyword",
+      },
+      body: {
+        type: ["string", "null"],
+        contentMediaType: "application/json",
+        contentEncoding: "base64",
+        default: { format: "kept as data" },
+      },
+      old: {
+        type: "array",
+        deprecated: true,
+        writeOnly: false,
+        items: { type: "string", format: "uuid" },
+        examples: [{ deprecated: true }],
+      },
+      extra: { allOf: [{ format: "email" }] },
+    },
+    additionalProperties: { type: "string", format: "date" },
+  });
+  assert.deepEqual(providerSchema(schema), {
+    type: "object",
+    title: "Event",
+    properties: {
+      format: {
+        type: "string",
+        enum: ["a"],
+        description: "A property named like the keyword",
+      },
+      body: {
+        default: { format: "kept as data" },
+        anyOf: [{ type: "string" }, { type: "null" }],
+      },
+      old: {
+        type: "array",
+        items: { type: "string" },
+        examples: [{ deprecated: true }],
+      },
+      extra: { allOf: [{}] },
+    },
+    additionalProperties: { type: "string" },
+  });
+  assert.deepEqual(providerSchema(pydanticSchema).properties.note, {
+    anyOf: [{ type: "string" }, { type: "null" }],
+    default: null,
+    title: "Note",
+  });
+});
+
 test("JSON result limits count UTF-8 bytes", async () => {
   const { cloneJson } = await import("../src/lib/validation.js");
   assert.equal(cloneJson("x".repeat(65534), "result").length, 65534);
